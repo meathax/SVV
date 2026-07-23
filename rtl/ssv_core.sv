@@ -95,7 +95,7 @@ wire  [5:0] scr_addr  = a[6:1];
 wire [15:0] wram_q, spr_q, pal_q;
 logic [15:0] scroll_q;
 wire [15:0] spr_video_q;
-wire [15:0] palette_video_q;
+wire [23:0] palette_video_rgb;
 
 s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
     .clock_a(clk_sys), .address_a(wram_addr), .data_a(m_wdata),
@@ -111,11 +111,10 @@ s32_big_dpram #(.ADDR_WIDTH(17), .NUM_WORDS(131072)) sprite_ram (
     .byteena_b(2'b00), .wren_b(1'b0), .q_b(spr_video_q)
 );
 
-s32_big_dpram #(.ADDR_WIDTH(16), .NUM_WORDS(65536)) palette_ram (
-    .clock_a(clk_sys), .address_a(pal_addr), .data_a(m_wdata),
-    .byteena_a(m_be), .wren_a(m_req && m_we && sel_palette), .q_a(pal_q),
-    .clock_b(clk_sys), .address_b(16'd0), .data_b(16'd0),
-    .byteena_b(2'b00), .wren_b(1'b0), .q_b(palette_video_q)
+ssv_palette_ram palette_ram (
+    .clk(clk_sys), .cpu_addr(pal_addr), .cpu_data(m_wdata),
+    .cpu_be(m_be), .cpu_we(m_req && m_we && sel_palette), .cpu_q(pal_q),
+    .video_index(15'd0), .video_rgb(palette_video_rgb)
 );
 
 always_ff @(posedge clk_sys) begin
@@ -158,17 +157,10 @@ always_ff @(posedge clk_sys) begin
         video_enable <= m_wdata[7];
 end
 
-// Backdrop colour is palette entry zero until the sprite pipeline is wired.
-wire [15:0] backdrop = palette_video_q;
-
-wire [7:0] red8   = {backdrop[7:0]};
-wire [7:0] green8 = {backdrop[15:8]};
-// MAME uses xRGB888 words in palette RAM. This provisional path exposes the
-// two stored bytes for bring-up; the final renderer will use the full 32-bit
-// palette representation discovered from hardware/MAME traces.
+// Backdrop colour is palette entry zero until the line buffer is connected.
 always_comb begin
     rgb     = (!video_enable || hb || vb) ? 24'h000000 :
-              {red8, green8, 8'h00};
+              palette_video_rgb;
     audio_l = 16'sd0;
     audio_r = 16'sd0;
 end

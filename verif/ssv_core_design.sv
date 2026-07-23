@@ -2,6 +2,7 @@
 `include "../rtl/ssv_irq.sv"
 `include "../rtl/ssv_video_timing.sv"
 `include "../rtl/common/s32_big_dpram.sv"
+`include "../rtl/video/ssv_palette_ram.sv"
 `include "../rtl/cpu/v60/s32_v60.sv"
 `include "../rtl/cpu/v60/s32_v60_bus.sv"
 `include "../rtl/ssv_core.sv"
