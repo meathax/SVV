@@ -14,6 +14,7 @@
 *.jdi
 *.smsg
 *.summary
+/cr_ie_info.json
 
 # Simulation output.
 /obj_dir/

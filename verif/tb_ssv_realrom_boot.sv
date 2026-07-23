@@ -8,6 +8,10 @@ logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
+logic sdr_p1_req, sdr_p1_ack;
+logic [24:3] sdr_p1_addr;
+logic [63:0] sdr_p1_dout;
+
 logic sdr_wr_req, sdr_wr_ack;
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
@@ -29,6 +33,8 @@ ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
+    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
+    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
@@ -53,6 +59,8 @@ end
 
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 0;
+    sdr_p1_ack <= 0;
+    sdr_p1_dout <= 64'd0;
     sdr_wr_ack <= 0;
     if (rst) begin
         p0_seen <= 0;

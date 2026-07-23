@@ -196,6 +196,10 @@ ssv_rom_loader loader (
 wire p0_req, p0_ack;
 wire [24:1] p0_addr;
 wire [15:0] p0_dout;
+wire p1_req, p1_ack;
+wire [24:3] p1_addr;
+wire [63:0] p1_dout;
+
 wire core_wr_req, core_wr_ack;
 wire [24:1] core_wr_addr;
 wire [15:0] core_wr_din;
@@ -222,7 +226,7 @@ sdram sdram (
     .wr_req(sw_req), .wr_addr(sw_addr), .wr_din(sw_din),
     .wr_be(sw_be), .wr_ack(sw_ack),
     .p0_req(p0_req), .p0_addr(p0_addr), .p0_dout(p0_dout), .p0_ack(p0_ack),
-    .p1_req(1'b0), .p1_addr('0), .p1_dout(), .p1_ack(),
+    .p1_req(p1_req), .p1_addr(p1_addr), .p1_dout(p1_dout), .p1_ack(p1_ack),
     .p2_req(1'b0), .p2_addr('0), .p2_dout(), .p2_ack(),
     .p3_req(1'b0), .p3_addr('0), .p3_dout(), .p3_ack(),
     .p4_req(1'b0), .p4_addr('0), .p4_dout(), .p4_ack(),
@@ -250,6 +254,8 @@ ssv_core core (
     .clk_sys(clk_sys), .rst(core_reset), .ce_cpu(ce_cpu),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
+    .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr),
+    .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
     .sdr_wr_din(core_wr_din), .sdr_wr_be(core_wr_be),
     .sdr_wr_ack(core_wr_ack),

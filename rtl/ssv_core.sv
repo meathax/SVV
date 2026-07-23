@@ -12,6 +12,11 @@ module ssv_core (
     input       [15:0] sdr_p0_dout,
     input              sdr_p0_ack,
 
+    output logic       sdr_p1_req,
+    output logic [24:3] sdr_p1_addr,
+    input       [63:0] sdr_p1_dout,
+    input              sdr_p1_ack,
+
     output logic       sdr_wr_req,
     output logic [24:1] sdr_wr_addr,
     output logic [15:0] sdr_wr_din,
@@ -94,8 +99,11 @@ wire  [5:0] scr_addr  = a[6:1];
 
 wire [15:0] wram_q, spr_q, pal_q;
 logic [15:0] scroll_q;
+wire [16:0] renderer_spr_addr;
 wire [15:0] spr_video_q;
+wire [14:0] line_color;
 wire [23:0] palette_video_rgb;
+integer scroll_init_i;
 
 s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
     .clock_a(clk_sys), .address_a(wram_addr), .data_a(m_wdata),
@@ -107,21 +115,29 @@ s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
 s32_big_dpram #(.ADDR_WIDTH(17), .NUM_WORDS(131072)) sprite_ram (
     .clock_a(clk_sys), .address_a(spr_addr), .data_a(m_wdata),
     .byteena_a(m_be), .wren_a(m_req && m_we && sel_sprram), .q_a(spr_q),
-    .clock_b(clk_sys), .address_b(17'd0), .data_b(16'd0),
+    .clock_b(clk_sys), .address_b(renderer_spr_addr), .data_b(16'd0),
     .byteena_b(2'b00), .wren_b(1'b0), .q_b(spr_video_q)
 );
 
 ssv_palette_ram palette_ram (
     .clk(clk_sys), .cpu_addr(pal_addr), .cpu_data(m_wdata),
     .cpu_be(m_be), .cpu_we(m_req && m_we && sel_palette), .cpu_q(pal_q),
-    .video_index(15'd0), .video_rgb(palette_video_rgb)
+    .video_index(line_color), .video_rgb(palette_video_rgb)
 );
 
 always_ff @(posedge clk_sys) begin
-    scroll_q <= scroll[scr_addr];
+    if (rst) begin
+        scroll_q <= 16'd0;
+        for (scroll_init_i = 0; scroll_init_i < 64;
+             scroll_init_i = scroll_init_i + 1)
+            scroll[scroll_init_i] <= 16'd0;
+    end
+    else begin
+        scroll_q <= scroll[scr_addr];
     if (m_req && m_we && sel_scroll) begin
         if (m_be[0]) scroll[scr_addr][7:0]  <= m_wdata[7:0];
         if (m_be[1]) scroll[scr_addr][15:8] <= m_wdata[15:8];
+    end
     end
 end
 
@@ -132,6 +148,60 @@ ssv_video_timing timing (
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse)
 );
+
+// Swap line buffers as active display enters horizontal blank. The renderer
+// then has the remainder of this line and the active portion of the next line
+// to prepare the scanline after that.
+wire renderer_line_start = ce_pixel && (hcnt == SSV_HBSTART - 1'd1);
+logic [8:0] renderer_target_y;
+always_comb begin
+    if (vcnt >= SSV_VTOTAL - 2)
+        renderer_target_y = vcnt - (SSV_VTOTAL - 2);
+    else
+        renderer_target_y = vcnt + 2'd2;
+end
+
+wire [8:0] scan_x_ahead = (hcnt < SSV_HBSTART - 1'd1)
+                         ? hcnt + 1'd1 : 9'd0;
+wire line_clear_busy, line_clear_done;
+wire renderer_plot_we, renderer_plot_shadow, renderer_shadow_4bit;
+wire [8:0] renderer_plot_x;
+wire [14:0] renderer_plot_color;
+wire [7:0] renderer_plot_pen;
+wire renderer_busy, renderer_done;
+logic renderer_overrun;
+
+ssv_line_buffer line_buffer (
+    .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
+    .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
+    .plot_color(renderer_plot_color), .plot_shadow(renderer_plot_shadow),
+    .plot_pen(renderer_plot_pen), .shadow_4bit(renderer_shadow_4bit),
+    .scan_x(scan_x_ahead), .scan_color(line_color),
+    .clear_busy(line_clear_busy), .clear_done(line_clear_done)
+);
+
+ssv_bg_renderer background_renderer (
+    .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
+    .target_y(renderer_target_y), .clear_done(line_clear_done),
+    .scroll_x(scroll[0]), .scroll_y(scroll[1]), .scroll_mode(scroll[3]),
+    .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
+    .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
+    .spr_addr(renderer_spr_addr), .spr_data(spr_video_q),
+    .rom_req(sdr_p1_req), .rom_addr(sdr_p1_addr),
+    .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
+    .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
+    .plot_color(renderer_plot_color),
+    .plot_shadow(renderer_plot_shadow), .plot_pen(renderer_plot_pen),
+    .plot_shadow_4bit(renderer_shadow_4bit),
+    .busy(renderer_busy), .done(renderer_done)
+);
+
+always_ff @(posedge clk_sys) begin
+    if (rst)
+        renderer_overrun <= 1'b0;
+    else if (renderer_line_start && renderer_busy)
+        renderer_overrun <= 1'b1;
+end
 
 wire vector_we = m_req && m_we && sel_irqvec;
 wire ack_we    = m_req && m_we && sel_irqack;
@@ -157,7 +227,7 @@ always_ff @(posedge clk_sys) begin
         video_enable <= m_wdata[7];
 end
 
-// Backdrop colour is palette entry zero until the line buffer is connected.
+// Line-buffer indices resolve through the live xRGB888 palette.
 always_comb begin
     rgb     = (!video_enable || hb || vb) ? 24'h000000 :
               palette_video_rgb;
@@ -290,7 +360,7 @@ always_ff @(posedge clk_sys) begin
 end
 
 always_comb debug_status = {
-    cpu_halted, video_enable, irq_n, vb, hb, ext_busy, ext_done, 1'b0,
+    cpu_halted, video_enable, irq_n, vb, hb, ext_busy, ext_done, renderer_overrun,
     irq_requested, irq_enabled
 };
 
