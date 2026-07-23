@@ -7,6 +7,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_sprite_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
