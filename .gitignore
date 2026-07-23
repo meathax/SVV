@@ -1,0 +1,34 @@
+# Copyrighted game data must never be committed.
+/rom/
+*.zip
+*.7z
+*.rar
+
+# MiSTer/Quartus generated output.
+/db/
+/incremental_db/
+/output_files/
+*.qws
+*.sof
+*.rbf
+*.jdi
+*.smsg
+*.summary
+
+# Simulation output.
+/obj_dir/
+/sim_output/
+*.vcd
+*.fst
+*.lxt
+*.lxt2
+*.log
+/verif/*_abs.sv
+
+# Local scratch and editor files.
+/scratch/
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db

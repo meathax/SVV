@@ -1,0 +1,15 @@
+# SSV MiSTer project file list
+set_global_assignment -name QIP_FILE sys/sys.qip
+set_global_assignment -name SDC_FILE SSV.sdc
+
+set_global_assignment -name SYSTEMVERILOG_FILE Arcade-SSV.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_rom_loader.sv
+set_global_assignment -name QIP_FILE rtl/pll/pll.qip
