@@ -93,13 +93,15 @@ wire sel_extmem  = sel_xram | sel_dynaram;
 logic [15:0] scroll [0:63];
 
 wire [14:0] wram_addr = a[15:1];
-wire [16:0] spr_addr  = a[17:1] - 17'h08000;
-wire [15:0] pal_addr  = a[16:1] - 16'h0a000;
+wire [16:0] spr_addr  = a[17:1];
+wire [15:0] pal_addr  = a[16:1];
 wire  [5:0] scr_addr  = a[6:1];
 
 wire [15:0] wram_q, spr_q, pal_q;
 logic [15:0] scroll_q;
 wire [16:0] renderer_spr_addr;
+wire [16:0] bg_spr_addr, obj_spr_addr;
+wire [255:0] sprite_offsets;
 wire [15:0] spr_video_q;
 wire [14:0] line_color;
 wire [23:0] palette_video_rgb;
@@ -141,8 +143,16 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
+genvar sprite_offset_i;
+generate
+    for (sprite_offset_i = 0; sprite_offset_i < 16; sprite_offset_i = sprite_offset_i + 1) begin : g_sprite_offsets
+        assign sprite_offsets[sprite_offset_i * 16 +: 16] = scroll[32 + sprite_offset_i];
+    end
+endgenerate
+
 logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
+logic video_enable;
 ssv_video_timing timing (
     .clk(clk_sys), .rst(rst), .ce_pixel(ce_pixel),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
@@ -152,7 +162,8 @@ ssv_video_timing timing (
 // Swap line buffers as active display enters horizontal blank. The renderer
 // then has the remainder of this line and the active portion of the next line
 // to prepare the scanline after that.
-wire renderer_line_start = ce_pixel && (hcnt == SSV_HBSTART - 1'd1);
+wire renderer_line_start = video_enable && ce_pixel &&
+                           (hcnt == SSV_HBSTART - 1'd1);
 logic [8:0] renderer_target_y;
 always_comb begin
     if (vcnt >= SSV_VTOTAL - 2)
@@ -169,7 +180,30 @@ wire [8:0] renderer_plot_x;
 wire [14:0] renderer_plot_color;
 wire [7:0] renderer_plot_pen;
 wire renderer_busy, renderer_done;
+wire bg_plot_we, bg_plot_shadow, bg_shadow_4bit;
+wire [8:0] bg_plot_x;
+wire [14:0] bg_plot_color;
+wire [7:0] bg_plot_pen;
+wire obj_plot_we, obj_plot_shadow, obj_shadow_4bit;
+wire [8:0] obj_plot_x;
+wire [14:0] obj_plot_color;
+wire [7:0] obj_plot_pen;
+wire bg_rom_req, obj_rom_req;
+wire [24:3] bg_rom_addr, obj_rom_addr;
+wire bg_busy, bg_done, obj_busy, obj_done;
 logic renderer_overrun;
+
+assign renderer_spr_addr = obj_busy ? obj_spr_addr : bg_spr_addr;
+assign sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req;
+assign sdr_p1_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
+assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
+assign renderer_plot_x = obj_busy ? obj_plot_x : bg_plot_x;
+assign renderer_plot_color = obj_busy ? obj_plot_color : bg_plot_color;
+assign renderer_plot_shadow = obj_busy ? obj_plot_shadow : bg_plot_shadow;
+assign renderer_plot_pen = obj_busy ? obj_plot_pen : bg_plot_pen;
+assign renderer_shadow_4bit = obj_busy ? obj_shadow_4bit : bg_shadow_4bit;
+assign renderer_busy = bg_busy | obj_busy;
+assign renderer_done = obj_done;
 
 ssv_line_buffer line_buffer (
     .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
@@ -186,14 +220,31 @@ ssv_bg_renderer background_renderer (
     .scroll_x(scroll[0]), .scroll_y(scroll[1]), .scroll_mode(scroll[3]),
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
     .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
-    .spr_addr(renderer_spr_addr), .spr_data(spr_video_q),
-    .rom_req(sdr_p1_req), .rom_addr(sdr_p1_addr),
+    .spr_addr(bg_spr_addr), .spr_data(spr_video_q),
+    .rom_req(bg_rom_req), .rom_addr(bg_rom_addr),
     .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
-    .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
-    .plot_color(renderer_plot_color),
-    .plot_shadow(renderer_plot_shadow), .plot_pen(renderer_plot_pen),
-    .plot_shadow_4bit(renderer_shadow_4bit),
-    .busy(renderer_busy), .done(renderer_done)
+    .plot_we(bg_plot_we), .plot_x(bg_plot_x),
+    .plot_color(bg_plot_color),
+    .plot_shadow(bg_plot_shadow), .plot_pen(bg_plot_pen),
+    .plot_shadow_4bit(bg_shadow_4bit),
+    .busy(bg_busy), .done(bg_done)
+);
+
+ssv_sprite_renderer sprite_renderer (
+    .clk(clk_sys), .rst(rst), .start(bg_done),
+    .target_y(renderer_target_y),
+    .local_control(scroll[59]), .flip_control(scroll[58]),
+    .coordinate_control(scroll[61]),
+    .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
+    .sprite_offsets(sprite_offsets), .shadow_4bit(scroll[59][7]),
+    .spr_addr(obj_spr_addr), .spr_data(spr_video_q),
+    .rom_req(obj_rom_req), .rom_addr(obj_rom_addr),
+    .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
+    .plot_we(obj_plot_we), .plot_x(obj_plot_x),
+    .plot_color(obj_plot_color),
+    .plot_shadow(obj_plot_shadow), .plot_pen(obj_plot_pen),
+    .plot_shadow_4bit(obj_shadow_4bit),
+    .busy(obj_busy), .done(obj_done)
 );
 
 always_ff @(posedge clk_sys) begin
@@ -219,10 +270,9 @@ ssv_irq irqs (
     .requested(irq_requested), .enabled(irq_enabled)
 );
 
-logic video_enable;
 always_ff @(posedge clk_sys) begin
     if (rst)
-        video_enable <= 1'b1;
+        video_enable <= 1'b0;
     else if (m_req && m_we && (a == 24'h21000e) && m_be[0])
         video_enable <= m_wdata[7];
 end

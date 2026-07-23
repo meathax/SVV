@@ -7,6 +7,7 @@
 `include "../rtl/video/ssv_gfx_row_fetch.sv"
 `include "../rtl/video/ssv_gfx_row_decode.sv"
 `include "../rtl/video/ssv_bg_renderer.sv"
+`include "../rtl/video/ssv_sprite_renderer.sv"
 `include "../rtl/cpu/v60/s32_v60.sv"
 `include "../rtl/cpu/v60/s32_v60_bus.sv"
 `include "../rtl/ssv_core.sv"
