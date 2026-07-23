@@ -159,11 +159,6 @@ ssv_video_timing timing (
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse)
 );
 
-// Swap line buffers as active display enters horizontal blank. The renderer
-// then has the remainder of this line and the active portion of the next line
-// to prepare the scanline after that.
-wire renderer_line_start = video_enable && ce_pixel &&
-                           (hcnt == SSV_HBSTART - 1'd1);
 logic [8:0] renderer_target_y;
 always_comb begin
     if (vcnt >= SSV_VTOTAL - 2)
@@ -171,6 +166,13 @@ always_comb begin
     else
         renderer_target_y = vcnt + 2'd2;
 end
+
+// Swap line buffers as active display enters horizontal blank. Lines 0 and 1
+// are prepared at the tail of vblank; descriptors are cached earlier in it.
+wire renderer_line_start = video_enable && ce_pixel &&
+                           (hcnt == SSV_HBSTART - 1'd1) &&
+                           (renderer_target_y < SSV_VBSTART) &&
+                           !obj_cache_busy;
 
 wire [8:0] scan_x_ahead = (hcnt < SSV_HBSTART - 1'd1)
                          ? hcnt + 1'd1 : 9'd0;
@@ -191,9 +193,10 @@ wire [7:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
 wire [24:3] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
+wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
 
-assign renderer_spr_addr = obj_busy ? obj_spr_addr : bg_spr_addr;
+assign renderer_spr_addr = obj_cache_busy ? obj_spr_addr : bg_spr_addr;
 assign sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req;
 assign sdr_p1_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
 assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
@@ -230,8 +233,10 @@ ssv_bg_renderer background_renderer (
     .busy(bg_busy), .done(bg_done)
 );
 
-ssv_sprite_renderer sprite_renderer (
-    .clk(clk_sys), .rst(rst), .start(bg_done),
+ssv_cached_sprite_renderer sprite_renderer (
+    .clk(clk_sys), .rst(rst),
+    .cache_start(video_enable && vblank_pulse),
+    .start(bg_done),
     .target_y(renderer_target_y),
     .local_control(scroll[59]), .flip_control(scroll[58]),
     .coordinate_control(scroll[61]),
@@ -244,6 +249,9 @@ ssv_sprite_renderer sprite_renderer (
     .plot_color(obj_plot_color),
     .plot_shadow(obj_plot_shadow), .plot_pen(obj_plot_pen),
     .plot_shadow_4bit(obj_shadow_4bit),
+    .cache_busy(obj_cache_busy),
+    .cache_ready(obj_cache_ready),
+    .cache_overflow(obj_cache_overflow),
     .busy(obj_busy), .done(obj_done)
 );
 
