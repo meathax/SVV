@@ -19,7 +19,7 @@ ssv_gfx_row_fetch dut (.*);
 logic req_d;
 integer delay_count;
 integer transaction;
-logic [24:3] expected [0:3];
+logic [24:3] expected [0:1];
 
 always_ff @(posedge clk) begin
     req_d <= rom_req;
@@ -65,10 +65,8 @@ initial begin
     delay_count = 0;
     transaction = 0;
 
-    expected[0] = 22'h020009;
-    expected[1] = 22'h080009;
-    expected[2] = 22'h0e0009;
-    expected[3] = 22'h140009;
+    expected[0] = 22'h020013;
+    expected[1] = 22'h120009;
 
     repeat (3) @(posedge clk);
     rst <= 1'b0;
@@ -76,14 +74,14 @@ initial begin
 
     wait (done);
     #1;
-    if (plane01 !== 32'hd0000000 ||
-        plane23 !== 32'hd0000001 ||
-        plane45 !== 32'hd0000002 ||
-        plane67 !== 32'hd0000003) begin
-        $error("odd-row burst selection failed");
+    if (plane01 !== 32'ha0000000 ||
+        plane23 !== 32'hd0000000 ||
+        plane45 !== 32'hd0000001 ||
+        plane67 !== 32'd0) begin
+        $error("packed plane extraction failed");
         $fatal(1);
     end
-    if (transaction != 4 || busy) begin
+    if (transaction != 2 || busy) begin
         $error("transaction count/busy mismatch");
         $fatal(1);
     end

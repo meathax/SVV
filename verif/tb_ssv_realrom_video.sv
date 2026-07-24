@@ -51,6 +51,10 @@ integer pc_ring_pos;
 integer ring_i;
 integer ext_index;
 integer sprite_index;
+integer packed_code;
+integer packed_row;
+integer raw_q0_index;
+integer raw_q1_index;
 integer nonzero_global_words;
 integer nonzero_palette_entries;
 integer first_nonzero_global;
@@ -126,7 +130,27 @@ always_ff @(posedge clk_sys) begin
             p1_seen <= 1'b1;
             p1_byte_addr = {sdr_p1_addr, 3'b000};
             sprite_index = p1_byte_addr - 25'h0100000;
-            if (sprite_index >= 0 && sprite_index + 7 < 12582912) begin
+            if (sprite_index >= 0 && sprite_index < 8388608) begin
+                // Hardware download interleaves corresponding Q0/Q1 rows
+                // into one 64-bit beat. Reconstruct that packed SDRAM view
+                // from MAME's raw 4 MiB quarter layout.
+                packed_code = sprite_index >> 6;
+                packed_row = (sprite_index >> 3) & 7;
+                raw_q0_index = packed_code * 32 + packed_row * 4;
+                raw_q1_index = 4194304 + raw_q0_index;
+                sdr_p1_dout <= {
+                    sprite_rom[raw_q1_index + 3],
+                    sprite_rom[raw_q1_index + 2],
+                    sprite_rom[raw_q1_index + 1],
+                    sprite_rom[raw_q1_index],
+                    sprite_rom[raw_q0_index + 3],
+                    sprite_rom[raw_q0_index + 2],
+                    sprite_rom[raw_q0_index + 1],
+                    sprite_rom[raw_q0_index]
+                };
+            end
+            else if (sprite_index >= 0 &&
+                     sprite_index + 7 < 12582912) begin
                 sdr_p1_dout <= {
                     sprite_rom[sprite_index + 7],
                     sprite_rom[sprite_index + 6],
@@ -183,7 +207,7 @@ always_ff @(posedge clk_sys) begin
         if (rgb != 24'd0)
             nonblack_pixels <= nonblack_pixels + 1;
     end
-    if (!rst && dut.renderer_plot_we)
+    if (!rst && |dut.renderer_plot_we)
         plot_events <= plot_events + 1;
     if (!rst && dut.line_color != 15'd0)
         nonzero_indices <= nonzero_indices + 1;

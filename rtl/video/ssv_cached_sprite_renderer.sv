@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Vblank-cached scanline renderer for SSV normal sprites.
+// Vblank-cached scanline renderer for interleaved SSV sprites and tilemaps.
 `timescale 1ns/1ps
 
 module ssv_cached_sprite_renderer #(
@@ -17,6 +17,7 @@ module ssv_cached_sprite_renderer #(
     input  logic  [15:0] global_y_base,
     input  logic  [15:0] global_y_adjust,
     input  logic [255:0] sprite_offsets,
+    input  logic [511:0] tilemap_scrolls,
     input  logic         shadow_4bit,
 
     output logic  [16:0] spr_addr,
@@ -27,11 +28,11 @@ module ssv_cached_sprite_renderer #(
     input  logic  [63:0] rom_data,
     input  logic         rom_ack,
 
-    output logic         plot_we,
-    output logic   [8:0] plot_x,
-    output logic  [14:0] plot_color,
+    output logic   [3:0] plot_we,
+    output logic  [35:0] plot_x,
+    output logic  [59:0] plot_color,
     output logic         plot_shadow,
-    output logic   [7:0] plot_pen,
+    output logic  [31:0] plot_pen,
     output logic         plot_shadow_4bit,
 
     output logic         cache_busy,
@@ -54,16 +55,22 @@ localparam integer LINE_COUNT_WIDTH = LINE_SLOT_WIDTH + 1;
 localparam integer LINE_ADDR_WIDTH = 8 + LINE_SLOT_WIDTH;
 localparam logic [LINE_COUNT_WIDTH-1:0] LINE_SLOTS_VALUE = LINE_SLOTS;
 
-typedef enum logic [4:0] {
+typedef enum logic [5:0] {
     IDLE,
     BUILD_CLEAR_LINES,
     BUILD_GLOBAL_WAIT, BUILD_GLOBAL_0, BUILD_GLOBAL_1,
     BUILD_GLOBAL_2, BUILD_GLOBAL_3,
     BUILD_LOCAL_WAIT, BUILD_LOCAL_0, BUILD_LOCAL_1,
-    BUILD_LOCAL_2, BUILD_LOCAL_3, BUILD_STORE,
+    BUILD_LOCAL_2, BUILD_LOCAL_3, BUILD_EVALUATE,
+    BUILD_STORE,
     BUILD_BUCKET_READ, BUILD_BUCKET_WRITE, BUILD_ADVANCE,
     RENDER_COUNT_READ, RENDER_COUNT_WAIT,
-    RENDER_LINE_READ, RENDER_READ, RENDER_PREP,
+    RENDER_LINE_READ, RENDER_READ, RENDER_DECODE, RENDER_PREP,
+    RENDER_SPRITE_PREP, RENDER_ADVANCE,
+    TILE_ROW_ADDR, TILE_ROW_WAIT,
+    TILE_CODE_ADDR, TILE_CODE_WAIT,
+    TILE_ATTR_ADDR, TILE_ATTR_WAIT,
+    TILE_PREP,
     FETCH_START, FETCH_WAIT, PLOT
 } state_t;
 state_t state;
@@ -73,15 +80,17 @@ logic [16:0] local_base;
 logic  [4:0] local_index;
 logic [15:0] global_w0, global_w1, global_w2, global_w3;
 logic [15:0] local_w0, local_w1, local_w2, local_w3;
+logic [15:0] tilemaps_offsy;
 
 logic [CACHE_ADDR_WIDTH:0] cache_write_count;
 logic [CACHE_ADDR_WIDTH:0] cache_count;
 logic [CACHE_ADDR_WIDTH-1:0] cache_read_index;
 logic [CACHE_ADDR_WIDTH:0] cache_render_index;
-logic [111:0] cache_q;
+logic [127:0] cache_q;
+logic [127:0] cache_decode_q;
 logic cache_pending;
 (* ramstyle = "M10K, no_rw_check" *)
-logic [111:0] descriptor_cache [0:CACHE_ENTRIES-1];
+logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
 
 (* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
@@ -97,6 +106,10 @@ logic [CACHE_ADDR_WIDTH-1:0] line_entry_q;
 logic [LINE_COUNT_WIDTH-1:0] render_line_count;
 logic [LINE_COUNT_WIDTH-1:0] render_line_slot;
 logic [7:0] build_first_y, build_last_y;
+logic build_screen_visible_q;
+logic [7:0] build_first_y_q, build_last_y_q;
+logic [127:0] cache_write_data_q;
+
 
 
 logic  [8:0] target_y_latched;
@@ -113,6 +126,18 @@ logic        flip_y;
 logic        shadow;
 logic  [8:0] color;
 logic  [4:0] plot_i;
+logic        render_tilemap;
+logic [15:0] tile_mode;
+logic [15:0] tile_unknown;
+logic [15:0] tile_code_low;
+logic [15:0] tile_attr;
+logic [16:0] tile_word_addr;
+logic [16:0] tile_map_x;
+logic [16:0] tile_map_y;
+logic [16:0] tile_scroll_x;
+logic signed [10:0] tile_screen_x;
+logic        last_was_tilemap;
+logic  [2:0] last_tilemap_group;
 
 logic        fetch_start;
 logic        fetch_done;
@@ -121,13 +146,14 @@ logic  [2:0] fetch_row;
 logic [31:0] plane01, plane23, plane45, plane67;
 logic [127:0] pens;
 
-wire [15:0] cached_g0 = cache_q[111:96];
-wire [15:0] cached_g2 = cache_q[95:80];
-wire [15:0] cached_g3 = cache_q[79:64];
-wire [15:0] cached_l0 = cache_q[63:48];
-wire [15:0] cached_l1 = cache_q[47:32];
-wire [15:0] cached_l2 = cache_q[31:16];
-wire [15:0] cached_l3 = cache_q[15:0];
+wire [15:0] cached_tilemaps_offsy = cache_decode_q[127:112];
+wire [15:0] cached_g0 = cache_decode_q[111:96];
+wire [15:0] cached_g2 = cache_decode_q[95:80];
+wire [15:0] cached_g3 = cache_decode_q[79:64];
+wire [15:0] cached_l0 = cache_decode_q[63:48];
+wire [15:0] cached_l1 = cache_decode_q[47:32];
+wire [15:0] cached_l2 = cache_decode_q[31:16];
+wire [15:0] cached_l3 = cache_decode_q[15:0];
 
 logic  [1:0] calc_xbits, calc_ybits;
 logic  [3:0] calc_xnum, calc_ynum;
@@ -138,6 +164,12 @@ logic signed [16:0] calc_sx, calc_sy;
 logic signed [17:0] calc_line_rel;
 logic  [6:0] calc_height;
 logic        calc_tilemap;
+logic        calc_tilemap_active;
+logic signed [16:0] calc_tilemap_sy;
+logic signed [17:0] calc_tilemap_sy_work;
+logic signed [17:0] calc_tile_scroll_x_work;
+logic [16:0] calc_tile_map_y;
+logic signed [17:0] calc_tilemap_bottom;
 logic  [3:0] calc_tile_y;
 logic  [2:0] calc_row;
 
@@ -202,11 +234,52 @@ function automatic logic [19:0] code_for_tile(
     end
 endfunction
 
+function automatic logic [15:0] tilemap_scroll_word(
+    input logic [511:0] values,
+    input logic   [4:0] index
+);
+    tilemap_scroll_word = values[index * 16 +: 16];
+endfunction
+
+function automatic logic [16:0] tile_address(
+    input logic [16:0] x,
+    input logic [16:0] y,
+    input logic [15:0] mode
+);
+    logic [3:0] size_shift;
+    logic [16:0] size_mask;
+    logic [16:0] page;
+    logic [16:0] base;
+    logic [16:0] column;
+    logic [16:0] row;
+    begin
+        size_shift = 4'd8 + {1'b0, mode[15:13]};
+        size_mask = (17'd1 << size_shift) - 17'd1;
+        page = (x & 17'h07fff) >> size_shift;
+        base = page << (size_shift + 2'd2);
+        column = (x & (size_mask & 17'h1fff0)) << 2;
+        row = (y & 17'h001f0) >> 3;
+        tile_address = base + column + row;
+    end
+endfunction
+
+wire signed [10:0] global_y_base_s = signed10(global_y_base);
+
 wire [3:0] cached_offset_index = {cached_g0[7:5], 1'b0};
 wire [15:0] selected_offset_x =
     offset_word(sprite_offsets, cached_offset_index);
 wire [15:0] selected_offset_y =
     offset_word(sprite_offsets, cached_offset_index + 1'd1);
+wire [4:0] cached_tilemap_base = {cached_l0[2:0], 2'b00};
+wire [15:0] cached_tile_scroll_x =
+    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base);
+wire [15:0] cached_tile_scroll_y =
+    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 1'd1);
+wire [15:0] cached_tile_unknown =
+    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 2'd2);
+wire [15:0] cached_tile_mode =
+    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 2'd3);
+
 
 wire [3:0] build_offset_index = {global_w0[7:5], 1'b0};
 wire [15:0] build_offset_x =
@@ -226,6 +299,10 @@ logic signed [16:0] build_offsx;
 logic signed [16:0] build_offsy;
 logic signed [17:0] build_right;
 logic signed [17:0] build_bottom;
+logic build_tilemap_active;
+logic signed [17:0] build_tilemap_sy_work;
+logic signed [16:0] build_tilemap_sy;
+logic signed [17:0] build_tilemap_bottom;
 
 always_comb begin
     logic signed [16:0] sx_work;
@@ -243,6 +320,31 @@ always_comb begin
     calc_ynum = 4'd1 << calc_ybits;
     calc_tilemap = (cached_l0 <= 16'd7) && (cached_l1 == 16'd0) &&
                    (calc_xbits == 2'd0) && (calc_ybits == 2'd3);
+    calc_tilemap_active = calc_tilemap && (cached_g0[4:0] != 0) &&
+                          (cached_l0 != 0);
+    calc_tilemap_sy_work = signed10(cached_l3);
+    if (local_control[12])
+        calc_tilemap_sy_work = calc_tilemap_sy_work - 18'sd32;
+    else if (coordinate_control[11]) begin
+        if (coordinate_control[12])
+            calc_tilemap_sy_work = calc_tilemap_sy_work -
+                                   signed10(cached_tilemaps_offsy);
+        else
+            calc_tilemap_sy_work = calc_tilemap_sy_work +
+                                   signed10(cached_tilemaps_offsy);
+    end
+    calc_tilemap_sy = signed10(calc_tilemap_sy_work[15:0]);
+    calc_tilemap_bottom = calc_tilemap_sy + 18'sd65;
+    calc_tile_scroll_x_work = $signed({2'b00, cached_tile_scroll_x});
+    if ((cached_tile_unknown & 16'h05ff) == 16'h0440)
+        calc_tile_scroll_x_work = calc_tile_scroll_x_work - 18'sd16;
+    else if ((cached_tile_unknown & 16'h05ff) == 16'h0401)
+        calc_tile_scroll_x_work = calc_tile_scroll_x_work - 18'sd32;
+
+    calc_tile_map_y = {8'd0, target_y_latched} +
+                      {1'b0, cached_tile_scroll_y} +
+                      {{6{global_y_base_s[10]}}, global_y_base_s} +
+                      {1'b0, global_y_adjust} + 17'd2;
 
     calc_code = expand_code(cached_l0, cached_l1);
     if ((calc_xnum == 4'd2) && (calc_ynum == 4'd4))
@@ -300,6 +402,21 @@ always_comb begin
     build_height = {build_ynum, 3'd0};
     build_tilemap = (local_w0 <= 16'd7) && (local_w1 == 16'd0) &&
                     (build_xbits == 2'd0) && (build_ybits == 2'd3);
+    build_tilemap_active = build_tilemap && (global_w0[4:0] != 0) &&
+                           (local_w0 != 0);
+    build_tilemap_sy_work = signed10(local_w3);
+    if (local_control[12])
+        build_tilemap_sy_work = build_tilemap_sy_work - 18'sd32;
+    else if (coordinate_control[11]) begin
+        if (coordinate_control[12])
+            build_tilemap_sy_work = build_tilemap_sy_work -
+                                    signed10(tilemaps_offsy);
+        else
+            build_tilemap_sy_work = build_tilemap_sy_work +
+                                    signed10(tilemaps_offsy);
+    end
+    build_tilemap_sy = signed10(build_tilemap_sy_work[15:0]);
+    build_tilemap_bottom = build_tilemap_sy + 18'sd65;
 
     build_sx_work = signed10(local_w2 + global_w2 + build_offset_x);
     build_sy_work = signed10(local_w3 + global_w3 + build_offset_y);
@@ -333,24 +450,36 @@ always_comb begin
 
     build_right = build_sx + $signed({1'b0, build_xnum, 4'd0});
     build_bottom = build_sy + $signed({1'b0, build_height});
-    if (build_sy < 0)
-        build_first_y = 8'd0;
-    else
-        build_first_y = build_sy[7:0];
-    build_last_y = (build_bottom > 18'sd240) ? 8'd239 :
-                   build_bottom[7:0] - 1'd1;
-    build_screen_visible = !build_tilemap &&
-                           (build_sx < 17'sd336) &&
-                           (build_right > 18'sd0) &&
-                           (build_sy < 17'sd240) &&
-                           (build_bottom > 18'sd0);
+    if (build_tilemap) begin
+        if (build_tilemap_sy < 0)
+            build_first_y = 8'd0;
+        else
+            build_first_y = build_tilemap_sy[7:0];
+        build_last_y = (build_tilemap_bottom > 18'sd240) ? 8'd239 :
+                       build_tilemap_bottom[7:0] - 1'd1;
+        build_screen_visible = build_tilemap_active &&
+                               (build_tilemap_sy < 17'sd240) &&
+                               (build_tilemap_bottom > 18'sd0);
+    end
+    else begin
+        if (build_sy < 0)
+            build_first_y = 8'd0;
+        else
+            build_first_y = build_sy[7:0];
+        build_last_y = (build_bottom > 18'sd240) ? 8'd239 :
+                       build_bottom[7:0] - 1'd1;
+        build_screen_visible = (build_sx < 17'sd336) &&
+                               (build_right > 18'sd0) &&
+                               (build_sy < 17'sd240) &&
+                               (build_bottom > 18'sd0);
+    end
 end
 
 wire cache_we = (state == BUILD_STORE) &&
-                build_screen_visible &&
+                build_screen_visible_q &&
                 (cache_write_count < CACHE_COUNT_VALUE);
-wire [111:0] cache_write_data = {
-    global_w0, global_w2, global_w3,
+wire [127:0] cache_write_data = {
+    tilemaps_offsy, global_w0, global_w2, global_w3,
     local_w0, local_w1, local_w2, local_w3
 };
 
@@ -368,7 +497,7 @@ always_ff @(posedge clk) begin
         cache_q <= descriptor_cache[line_entry_q];
     if (cache_we)
         descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
-            <= cache_write_data;
+            <= cache_write_data_q;
 end
 
 ssv_gfx_row_fetch fetch (
@@ -387,11 +516,13 @@ ssv_gfx_row_decode decode (
     .gfx_mode(gfx_mode), .flip_x(flip_x), .pens(pens)
 );
 
-wire [7:0] current_pen = pens[plot_i * 8 +: 8];
-wire signed [17:0] current_x =
-    sprite_sx + $signed({13'd0, plot_i});
-wire current_x_visible =
-    (current_x >= 0) && (current_x <= $signed({9'd0, LAST_PIXEL}));
+logic [7:0] batch_pen [0:3];
+logic signed [17:0] batch_x [0:3];
+integer plot_lane;
+wire tile_flip_x = tile_attr[15] ^
+                   (flip_control[12] && !flip_control[13]);
+wire tile_flip_y = tile_attr[14] ^
+                   (flip_control[14] && !flip_control[13]);
 
 always_comb begin
     spr_addr = {5'd0, global_base};
@@ -403,15 +534,33 @@ always_comb begin
         BUILD_LOCAL_0: spr_addr = local_base + 1'd1;
         BUILD_LOCAL_1: spr_addr = local_base + 2'd2;
         BUILD_LOCAL_2: spr_addr = local_base + 2'd3;
+        TILE_ROW_ADDR, TILE_ROW_WAIT:
+            spr_addr = ({9'd0, tile_mode[7:0]} << 9) + tile_map_y[8:0];
+        TILE_CODE_ADDR, TILE_CODE_WAIT,
+        TILE_ATTR_ADDR, TILE_ATTR_WAIT: spr_addr = tile_word_addr;
         default: ;
     endcase
 
     fetch_start = (state == FETCH_START);
-    plot_we = (state == PLOT) && current_x_visible &&
-              (current_pen != 8'd0);
-    plot_x = current_x[8:0];
-    plot_pen = current_pen;
-    plot_color = ({color, 6'd0} + current_pen) & 15'h7fff;
+    plot_we = 4'd0;
+    plot_x = 36'd0;
+    plot_pen = 32'd0;
+    plot_color = 60'd0;
+    for (plot_lane = 0; plot_lane < 4; plot_lane = plot_lane + 1) begin
+        batch_pen[plot_lane] =
+            pens[(plot_i + plot_lane) * 8 +: 8];
+        batch_x[plot_lane] = render_tilemap
+            ? tile_screen_x + $signed({13'd0, plot_i}) + plot_lane
+            : sprite_sx + $signed({13'd0, plot_i}) + plot_lane;
+        plot_we[plot_lane] = (state == PLOT) &&
+            (batch_x[plot_lane] >= 0) &&
+            (batch_x[plot_lane] <= $signed({9'd0, LAST_PIXEL})) &&
+            (batch_pen[plot_lane] != 0);
+        plot_x[plot_lane * 9 +: 9] = batch_x[plot_lane][8:0];
+        plot_pen[plot_lane * 8 +: 8] = batch_pen[plot_lane];
+        plot_color[plot_lane * 15 +: 15] =
+            ({color, 6'd0} + batch_pen[plot_lane]) & 15'h7fff;
+    end
     plot_shadow = shadow;
     plot_shadow_4bit = shadow_4bit;
 end
@@ -430,14 +579,20 @@ always_ff @(posedge clk) begin
         local_w1 <= 16'd0;
         local_w2 <= 16'd0;
         local_w3 <= 16'd0;
+        tilemaps_offsy <= 16'd0;
         cache_write_count <= '0;
         cache_count <= '0;
         cache_read_index <= '0;
         cache_render_index <= '0;
+        cache_decode_q <= '0;
         cache_busy <= 1'b0;
         cache_ready <= 1'b0;
         cache_overflow <= 1'b0;
         cache_pending <= 1'b0;
+        build_screen_visible_q <= 1'b0;
+        build_first_y_q <= 8'd0;
+        build_last_y_q <= 8'd0;
+        cache_write_data_q <= 128'd0;
         clear_y <= 8'd0;
         line_count_addr <= 8'd0;
         bucket_y <= 8'd0;
@@ -460,6 +615,18 @@ always_ff @(posedge clk) begin
         shadow <= 1'b0;
         color <= 9'd0;
         plot_i <= 5'd0;
+        render_tilemap <= 1'b0;
+        tile_mode <= 16'd0;
+        tile_unknown <= 16'd0;
+        tile_code_low <= 16'd0;
+        tile_attr <= 16'd0;
+        tile_word_addr <= 17'd0;
+        tile_map_x <= 17'd0;
+        tile_map_y <= 17'd0;
+        tile_scroll_x <= 17'd0;
+        tile_screen_x <= 11'sd0;
+        last_was_tilemap <= 1'b0;
+        last_tilemap_group <= 3'd0;
         fetch_code <= 20'd0;
         fetch_row <= 3'd0;
         busy <= 1'b0;
@@ -486,6 +653,7 @@ always_ff @(posedge clk) begin
                 else if (start) begin
                     if (cache_ready) begin
                         target_y_latched <= target_y;
+                        last_was_tilemap <= 1'b0;
                         cache_render_index <= '0;
                         line_count_addr <= target_y[7:0];
                         busy <= 1'b1;
@@ -552,11 +720,21 @@ always_ff @(posedge clk) begin
             end
             BUILD_LOCAL_3: begin
                 local_w3 <= spr_data;
+                if (local_index == 0)
+                    tilemaps_offsy <= spr_data;
+                state <= BUILD_EVALUATE;
+            end
+
+            BUILD_EVALUATE: begin
+                build_screen_visible_q <= build_screen_visible;
+                build_first_y_q <= build_first_y;
+                build_last_y_q <= build_last_y;
+                cache_write_data_q <= cache_write_data;
                 state <= BUILD_STORE;
             end
 
             BUILD_STORE: begin
-                if (build_screen_visible) begin
+                if (build_screen_visible_q) begin
                     if (cache_write_count == CACHE_LAST_VALUE) begin
                         cache_write_count <= cache_write_count + 1'd1;
                         cache_count <= CACHE_COUNT_VALUE;
@@ -569,9 +747,9 @@ always_ff @(posedge clk) begin
                         cache_write_count <= cache_write_count + 1'd1;
                         bucket_descriptor <=
                             cache_write_count[CACHE_ADDR_WIDTH-1:0];
-                        bucket_y <= build_first_y;
-                        bucket_last_y <= build_last_y;
-                        line_count_addr <= build_first_y;
+                        bucket_y <= build_first_y_q;
+                        bucket_last_y <= build_last_y_q;
+                        line_count_addr <= build_first_y_q;
                         state <= BUILD_BUCKET_READ;
                     end
                 end
@@ -645,11 +823,63 @@ always_ff @(posedge clk) begin
             RENDER_READ: begin
                 cache_read_index <= line_entry_q;
                 cache_render_index <= line_entry_q;
+                state <= RENDER_DECODE;
+            end
+            // Keep the M10K output separate from coordinate/decode arithmetic.
+            // This extra register removes the cache-to-position critical path.
+            RENDER_DECODE: begin
+                cache_decode_q <= cache_q;
                 state <= RENDER_PREP;
             end
             RENDER_PREP: begin
-                if (!calc_tilemap && (calc_line_rel >= 0) &&
-                    (calc_line_rel < $signed({1'b0, calc_height}))) begin
+                if (calc_tilemap) begin
+                    if (calc_tilemap_active &&
+                        ($signed({1'b0, target_y_latched}) >=
+                         calc_tilemap_sy) &&
+                        ($signed({1'b0, target_y_latched}) <
+                         calc_tilemap_bottom) &&
+                        ((cached_tile_mode & 16'he000) != 0)) begin
+                        // Adjacent 64-pixel tilemap slices overlap by one
+                        // inclusive line in MAME. If the same scroll group
+                        // is repeated with no intervening draw, its second
+                        // rendering is pixel-for-pixel identical.
+                        if (last_was_tilemap &&
+                            (last_tilemap_group == cached_l0[2:0])) begin
+                            state <= RENDER_ADVANCE;
+                        end
+                        else begin
+                            last_was_tilemap <= 1'b1;
+                            last_tilemap_group <= cached_l0[2:0];
+                            render_tilemap <= 1'b1;
+                            tile_mode <= cached_tile_mode;
+                            tile_unknown <= cached_tile_unknown;
+                            tile_map_y <= calc_tile_map_y;
+                            tile_scroll_x <= calc_tile_scroll_x_work[16:0];
+                            if (cached_tile_mode[12]) begin
+                                state <= TILE_ROW_ADDR;
+                            end
+                            else begin
+                                tile_map_x <= calc_tile_scroll_x_work[16:0];
+                                tile_screen_x <=
+                                    -$signed({7'd0,
+                                              calc_tile_scroll_x_work[3:0]});
+                                tile_word_addr <= tile_address(
+                                    calc_tile_scroll_x_work[16:0],
+                                    calc_tile_map_y, cached_tile_mode
+                                );
+                                state <= TILE_CODE_ADDR;
+                            end
+                        end
+                    end
+                    else begin
+                        state <= RENDER_ADVANCE;
+                    end
+                end
+                else if ((calc_line_rel >= 0) &&
+                         (calc_line_rel <
+                          $signed({1'b0, calc_height}))) begin
+                    render_tilemap <= 1'b0;
+                    last_was_tilemap <= 1'b0;
                     sprite_code <= calc_code;
                     sprite_xnum <= calc_xnum;
                     sprite_ynum <= calc_ynum;
@@ -662,15 +892,27 @@ always_ff @(posedge clk) begin
                     flip_y <= calc_flip_y;
                     shadow <= calc_depth[3];
                     color <= cached_l1[8:0];
-                    fetch_code <= code_for_tile(
-                        calc_code, 4'd0, calc_tile_y,
-                        calc_xnum, calc_ynum,
-                        calc_flip_x, calc_flip_y
-                    );
-                    fetch_row <= calc_row;
-                    state <= FETCH_START;
+                    state <= RENDER_SPRITE_PREP;
                 end
-                else if (render_line_slot + 1'd1 < render_line_count) begin
+                else begin
+                    state <= RENDER_ADVANCE;
+                end
+            end
+            // Isolate descriptor decode from the row-fetch address. The
+            // cached values above are registered, breaking the M10K-to-code
+            // arithmetic path while adding only one system-clock cycle.
+            RENDER_SPRITE_PREP: begin
+                fetch_code <= code_for_tile(
+                    sprite_code, 4'd0, sprite_tile_y,
+                    sprite_xnum, sprite_ynum,
+                    flip_x, flip_y
+                );
+                fetch_row <= sprite_row;
+                state <= FETCH_START;
+            end
+
+            RENDER_ADVANCE: begin
+                if (render_line_slot + 1'd1 < render_line_count) begin
                     render_line_slot <= render_line_slot + 1'd1;
                     line_entry_addr <= line_entry_addr + 1'd1;
                     state <= RENDER_LINE_READ;
@@ -682,6 +924,48 @@ always_ff @(posedge clk) begin
                 end
             end
 
+            TILE_ROW_ADDR: state <= TILE_ROW_WAIT;
+            TILE_ROW_WAIT: begin
+                tile_map_x <= tile_scroll_x + {1'b0, spr_data};
+                tile_screen_x <=
+                    -$signed({7'd0,
+                              tile_scroll_x[3:0] + spr_data[3:0]});
+                tile_word_addr <= tile_address(
+                    tile_scroll_x + {1'b0, spr_data},
+                    tile_map_y, tile_mode
+                );
+                state <= TILE_CODE_ADDR;
+            end
+
+            TILE_CODE_ADDR: state <= TILE_CODE_WAIT;
+            TILE_CODE_WAIT: begin
+                tile_code_low <= spr_data;
+                tile_word_addr <= tile_word_addr + 1'd1;
+                state <= TILE_ATTR_ADDR;
+            end
+
+            TILE_ATTR_ADDR: state <= TILE_ATTR_WAIT;
+            TILE_ATTR_WAIT: begin
+                tile_attr <= spr_data;
+                state <= TILE_PREP;
+            end
+
+            TILE_PREP: begin
+                gfx_mode <= tile_mode[10:8];
+                flip_x <= tile_flip_x;
+                flip_y <= tile_flip_y;
+                shadow <= tile_mode[11];
+                color <= tile_attr[8:0];
+                fetch_row <= tile_flip_y ? ~tile_map_y[2:0] :
+                                           tile_map_y[2:0];
+                if (tile_flip_y ? !tile_map_y[3] : tile_map_y[3])
+                    fetch_code <= expand_code(tile_code_low, tile_attr) +
+                                  1'd1;
+                else
+                    fetch_code <= expand_code(tile_code_low, tile_attr);
+                state <= FETCH_START;
+            end
+
             FETCH_START: state <= FETCH_WAIT;
             FETCH_WAIT: begin
                 if (fetch_done) begin
@@ -691,8 +975,23 @@ always_ff @(posedge clk) begin
             end
 
             PLOT: begin
-                if (plot_i == 5'd15) begin
-                    if (sprite_tile_x + 1'd1 < sprite_xnum) begin
+                if (plot_i == 5'd12) begin
+                    if (render_tilemap) begin
+                        if (tile_screen_x + 11'sd16 >
+                            $signed({2'd0, LAST_PIXEL})) begin
+                            state <= RENDER_ADVANCE;
+                        end
+                        else begin
+                            tile_screen_x <= tile_screen_x + 11'sd16;
+                            tile_map_x <= tile_map_x + 17'd16;
+                            tile_word_addr <= tile_address(
+                                tile_map_x + 17'd16,
+                                tile_map_y, tile_mode
+                            );
+                            state <= TILE_CODE_ADDR;
+                        end
+                    end
+                    else if (sprite_tile_x + 1'd1 < sprite_xnum) begin
                         sprite_tile_x <= sprite_tile_x + 1'd1;
                         sprite_sx <= sprite_sx + 17'sd16;
                         fetch_code <= code_for_tile(
@@ -703,19 +1002,12 @@ always_ff @(posedge clk) begin
                         fetch_row <= sprite_row;
                         state <= FETCH_START;
                     end
-                    else if (render_line_slot + 1'd1 < render_line_count) begin
-                        render_line_slot <= render_line_slot + 1'd1;
-                        line_entry_addr <= line_entry_addr + 1'd1;
-                        state <= RENDER_LINE_READ;
-                    end
                     else begin
-                        busy <= 1'b0;
-                        done <= 1'b1;
-                        state <= IDLE;
+                        state <= RENDER_ADVANCE;
                     end
                 end
                 else begin
-                    plot_i <= plot_i + 1'd1;
+                    plot_i <= plot_i + 3'd4;
                 end
             end
         endcase

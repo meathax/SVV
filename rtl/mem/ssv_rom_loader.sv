@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Fixed Dyna Gear index-0 stream:
 //   0x000000..0x0fffff  V60 program (16-bit interleaved by the MRA)
-//   0x100000..0xcfffff  sprite graphics
+//   0x100000..0xcfffff  sprite graphics; Q0/Q1 are interleaved by row
+//                       during download so one 64-bit read supplies four
+//                       bitplanes. Q2 stays at 0x900000..0xcfffff.
 //   0xd00000..0x10fffff ES5506 sample ROM
 
 module ssv_rom_loader (
@@ -28,6 +30,33 @@ logic [7:0] byte_lo;
 logic       busy;
 logic       index0_seen;
 
+function automatic logic [24:0] stream_byte_address(
+    input logic [26:0] stream_addr
+);
+    logic [23:0] sprite_offset;
+    logic [21:0] within_quarter;
+    begin
+        sprite_offset = stream_addr - STREAM_SPRITES;
+        within_quarter = sprite_offset[21:0];
+        if ((stream_addr >= STREAM_SPRITES) &&
+            (stream_addr < STREAM_SPRITES + 27'h0800000)) begin
+            // MAME layout Q0/Q1 are separate 4 MiB quarters. Pack their
+            // corresponding 32-bit rows into one aligned 64-bit beat:
+            // [31:0]=Q0, [63:32]=Q1.
+            stream_byte_address = SDR_SPRITES_BASE +
+                {2'd0, within_quarter[21:5], 6'd0} +
+                {19'd0, within_quarter[4:2], 3'd0} +
+                {22'd0, sprite_offset[22], 2'd0} +
+                {23'd0, within_quarter[1:0]};
+        end
+        else begin
+            stream_byte_address = stream_addr[24:0];
+        end
+    end
+endfunction
+
+wire [24:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
+
 assign ioctl_wait = busy | ~mem_ready;
 
 always_ff @(posedge clk) begin
@@ -53,7 +82,7 @@ always_ff @(posedge clk) begin
                 byte_lo <= ioctl_dout;
             else begin
                 sdr_wr_req  <= 1'b1;
-                sdr_wr_addr <= ioctl_addr[24:1];
+                sdr_wr_addr <= mapped_ioctl_addr[24:1];
                 sdr_wr_din  <= {ioctl_dout, byte_lo};
                 sdr_wr_be   <= 2'b11;
                 busy        <= 1'b1;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Initial Dyna Gear SSV board core: V60, memory map, inputs, IRQs and CRT.
-// Sprite drawing and ES5506 synthesis are separate bring-up milestones.
+// Dyna Gear SSV board core: V60, memory map, inputs, IRQs and scanline video.
+// ES5506 host/register synthesis is present; voice DSP/audio is in bring-up.
 
 module ssv_core (
     input              clk_sys,
@@ -102,6 +102,7 @@ logic [15:0] scroll_q;
 wire [16:0] renderer_spr_addr;
 wire [16:0] bg_spr_addr, obj_spr_addr;
 wire [255:0] sprite_offsets;
+wire [511:0] tilemap_scrolls;
 wire [15:0] spr_video_q;
 wire [14:0] line_color;
 wire [23:0] palette_video_rgb;
@@ -150,6 +151,15 @@ generate
     end
 endgenerate
 
+genvar tilemap_scroll_i;
+generate
+    for (tilemap_scroll_i = 0; tilemap_scroll_i < 32;
+         tilemap_scroll_i = tilemap_scroll_i + 1) begin : g_tilemap_scrolls
+        assign tilemap_scrolls[tilemap_scroll_i * 16 +: 16] =
+            scroll[tilemap_scroll_i];
+    end
+endgenerate
+
 logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
 logic video_enable;
@@ -177,26 +187,29 @@ wire renderer_line_start = video_enable && ce_pixel &&
 wire [8:0] scan_x_ahead = (hcnt < SSV_HBSTART - 1'd1)
                          ? hcnt + 1'd1 : 9'd0;
 wire line_clear_busy, line_clear_done;
-wire renderer_plot_we, renderer_plot_shadow, renderer_shadow_4bit;
-wire [8:0] renderer_plot_x;
-wire [14:0] renderer_plot_color;
-wire [7:0] renderer_plot_pen;
+wire [3:0] renderer_plot_we;
+wire renderer_plot_shadow, renderer_shadow_4bit;
+wire [35:0] renderer_plot_x;
+wire [59:0] renderer_plot_color;
+wire [31:0] renderer_plot_pen;
 wire renderer_busy, renderer_done;
-wire bg_plot_we, bg_plot_shadow, bg_shadow_4bit;
-wire [8:0] bg_plot_x;
-wire [14:0] bg_plot_color;
-wire [7:0] bg_plot_pen;
-wire obj_plot_we, obj_plot_shadow, obj_shadow_4bit;
-wire [8:0] obj_plot_x;
-wire [14:0] obj_plot_color;
-wire [7:0] obj_plot_pen;
+wire [3:0] bg_plot_we;
+wire bg_plot_shadow, bg_shadow_4bit;
+wire [35:0] bg_plot_x;
+wire [59:0] bg_plot_color;
+wire [31:0] bg_plot_pen;
+wire [3:0] obj_plot_we;
+wire obj_plot_shadow, obj_shadow_4bit;
+wire [35:0] obj_plot_x;
+wire [59:0] obj_plot_color;
+wire [31:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
 wire [24:3] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
 wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
 
-assign renderer_spr_addr = obj_cache_busy ? obj_spr_addr : bg_spr_addr;
+assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
 assign sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req;
 assign sdr_p1_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
 assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
@@ -208,7 +221,7 @@ assign renderer_shadow_4bit = obj_busy ? obj_shadow_4bit : bg_shadow_4bit;
 assign renderer_busy = bg_busy | obj_busy;
 assign renderer_done = obj_done;
 
-ssv_line_buffer line_buffer (
+ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
     .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
     .plot_color(renderer_plot_color), .plot_shadow(renderer_plot_shadow),
@@ -242,6 +255,7 @@ ssv_cached_sprite_renderer sprite_renderer (
     .coordinate_control(scroll[61]),
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
     .sprite_offsets(sprite_offsets), .shadow_4bit(scroll[59][7]),
+    .tilemap_scrolls(tilemap_scrolls),
     .spr_addr(obj_spr_addr), .spr_data(spr_video_q),
     .rom_req(obj_rom_req), .rom_addr(obj_rom_addr),
     .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
@@ -363,6 +377,40 @@ end
 logic [15:0] read_mux;
 logic ack_r;
 logic read_wait;
+wire [7:0] sound_rdata;
+wire sound_host_we = m_req && m_we && sel_sound && !ack_r && m_be[0];
+wire sound_host_re = m_req && !m_we && sel_sound &&
+                     !ack_r && !read_wait;
+wire sound_irq_n;
+wire sound_commit;
+wire [6:0] sound_commit_page;
+wire [3:0] sound_commit_reg;
+wire [31:0] sound_commit_data;
+
+ssv_es5506_regs sound_registers (
+    .clk(clk_sys),
+    .rst(rst),
+    .host_we(sound_host_we),
+    .host_re(sound_host_re),
+    .host_addr(a[6:1]),
+    .host_wdata(m_wdata[7:0]),
+    .host_rdata(sound_rdata),
+    .par_data(10'd0),
+    .irq_set(1'b0),
+    .irq_voice(5'd0),
+    .irq_n(sound_irq_n),
+    .current_page(),
+    .active_voices(),
+    .mode(),
+    .word_clock_start(),
+    .word_clock_end(),
+    .lr_clock_end(),
+    .commit(sound_commit),
+    .commit_page(sound_commit_page),
+    .commit_reg(sound_commit_reg),
+    .commit_data(sound_commit_data)
+);
+
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;
 
@@ -400,7 +448,7 @@ always_ff @(posedge clk_sys) begin
                     ? {2'b00, vb, vb, hb, 11'b0} : scroll_q;
                 sel_io: begin
                     unique case (a[4:1])
-                        4'h0: read_mux <= 16'hffff; // watchdog
+                        4'h0: read_mux <= 16'h0000; // Dyna Gear watchdog/unmapped read
                         4'h1: read_mux <= in_dsw1;
                         4'h2: read_mux <= in_dsw2;
                         4'h4: read_mux <= in_p1;
@@ -409,7 +457,7 @@ always_ff @(posedge clk_sys) begin
                         default: read_mux <= 16'hffff;
                     endcase
                 end
-                sel_sound: read_mux <= 16'h00ff;
+                sel_sound: read_mux <= {8'h00, sound_rdata};
                 sel_extra: read_mux <= in_extra;
                 default:   read_mux <= 16'hffff;
             endcase

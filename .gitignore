@@ -29,6 +29,13 @@
 # Local scratch and editor files.
 /scratch/
 *.bak
+/tmp/
+/c5_pin_model_dump.txt
+/jtag.cdf
+__pycache__/
+*.pyc
+
+# Local research clones, manuals, captures, and generated patches.
 *.swp
 *~
 .DS_Store

@@ -19,6 +19,7 @@ logic [8:0] target_y;
 logic [15:0] local_control, flip_control, coordinate_control;
 logic [15:0] global_y_base, global_y_adjust;
 logic [255:0] sprite_offsets;
+logic [511:0] tilemap_scrolls;
 logic shadow_4bit;
 logic [16:0] spr_addr;
 logic [15:0] spr_data;
@@ -26,11 +27,11 @@ logic rom_req;
 logic [24:3] rom_addr;
 logic [63:0] rom_data;
 logic rom_ack;
-logic plot_we;
-logic [8:0] plot_x;
-logic [14:0] plot_color;
+logic [3:0] plot_we;
+logic [35:0] plot_x;
+logic [59:0] plot_color;
 logic plot_shadow;
-logic [7:0] plot_pen;
+logic [31:0] plot_pen;
 logic plot_shadow_4bit;
 logic cache_busy, cache_ready, cache_overflow;
 logic busy, done;
@@ -52,24 +53,51 @@ always_ff @(posedge clk) begin
     if (rom_delay > 0) begin
         rom_delay <= rom_delay - 1;
         if (rom_delay == 1) begin
-            rom_data <= (rom_quarter == 0) ? 64'h0000008000000080
+            rom_data <= (rom_quarter == 0) ? 64'h0000000000000080
                                            : 64'd0;
             rom_ack <= 1'b1;
-            rom_quarter <= (rom_quarter + 1) & 3;
+            rom_quarter <= (rom_quarter + 1) & 1;
         end
     end
 end
 
 integer plots;
 integer first_x;
+integer monitor_lane;
+integer batch_plot_count;
+integer batch_first_lane;
+always_comb begin
+    batch_plot_count = 0;
+    batch_first_lane = -1;
+    for (monitor_lane = 0; monitor_lane < 4;
+         monitor_lane = monitor_lane + 1) begin
+        if (plot_we[monitor_lane]) begin
+            batch_plot_count = batch_plot_count + 1;
+            if (batch_first_lane < 0)
+                batch_first_lane = monitor_lane;
+        end
+    end
+end
+
 always_ff @(posedge clk) begin
-    if (plot_we) begin
-        plots <= plots + 1;
+    if (batch_plot_count != 0) begin
+        plots <= plots + batch_plot_count;
         if (plots == 0)
-            first_x <= plot_x;
-        if (plot_color !== 15'd65 || plot_pen !== 8'd1 ||
-            plot_shadow || plot_shadow_4bit)
-            $fatal(1, "plot metadata mismatch");
+            first_x <= plot_x[batch_first_lane * 9 +: 9];
+    end
+    for (monitor_lane = 0; monitor_lane < 4;
+         monitor_lane = monitor_lane + 1) begin
+        if (plot_we[monitor_lane] &&
+            (plot_color[monitor_lane * 15 +: 15] !== 15'd65 ||
+             plot_pen[monitor_lane * 8 +: 8] !== 8'd1 ||
+             plot_shadow || plot_shadow_4bit))
+            $fatal(1,
+                "plot metadata lane=%0d color=%0d pen=%0d shadow=%0b shadow4=%0b x=%0d addr=%h",
+                monitor_lane,
+                plot_color[monitor_lane * 15 +: 15],
+                plot_pen[monitor_lane * 8 +: 8],
+                plot_shadow, plot_shadow_4bit,
+                plot_x[monitor_lane * 9 +: 9], spr_addr);
     end
 end
 
@@ -110,6 +138,7 @@ initial begin
     global_y_base = 16'd0;
     global_y_adjust = 16'd0;
     sprite_offsets = 256'd0;
+    tilemap_scrolls = 512'd0;
     shadow_4bit = 1'b0;
     spr_data = 16'd0;
     rom_data = 64'd0;
@@ -158,6 +187,74 @@ initial begin
     if (plots != 1)
         $fatal(1, "empty line produced pixels count=%0d", plots);
 
+    // MAME draw_sprites() identifies this as tilemap scroll group 1:
+    // local count is nonzero, code is 1, attr is zero, x size is one
+    // tile and y size is eight. Two identical adjacent slices exercise
+    // exact-consecutive overlap elision; a following group-zero entry is
+    // still excluded.
+    sprite_mem[0] = 16'h0302;
+    sprite_mem[1] = 16'h0400;
+    sprite_mem[2] = 16'd0;
+    sprite_mem[3] = 16'd0;
+    sprite_mem[16'h1000] = 16'd1;
+    sprite_mem[16'h1001] = 16'd0;
+    sprite_mem[16'h1002] = 16'd0;
+    sprite_mem[16'h1003] = 16'd20;
+    sprite_mem[16'h1004] = 16'd1;
+    sprite_mem[16'h1005] = 16'd0;
+    sprite_mem[16'h1006] = 16'd0;
+    sprite_mem[16'h1007] = 16'd20;
+    sprite_mem[16'h1008] = 16'd0;
+    sprite_mem[16'h1009] = 16'd0;
+    sprite_mem[16'h100a] = 16'd0;
+    sprite_mem[16'h100b] = 16'd0;
+
+    // A 512-pixel map on page one. At target line 20, MAME's +2
+    // vertical adjustment selects tile words 0x802/0x803.
+    tilemap_scrolls[4 * 16 +: 16] = 16'h0200;
+    tilemap_scrolls[5 * 16 +: 16] = 16'h0000;
+    tilemap_scrolls[6 * 16 +: 16] = 16'h0000;
+    tilemap_scrolls[7 * 16 +: 16] = 16'h2600;
+    for (i = 0; i < 21; i = i + 1) begin
+        sprite_mem[16'h0802 + i * 64] = 16'd0;
+        sprite_mem[16'h0803 + i * 64] = 16'd1;
+    end
+
+    plots = 0;
+    first_x = -1;
+    cycles = 0;
+    target_y = 9'd20;
+    @(negedge clk);
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+    wait (cache_ready);
+    if (cache_overflow || dut.cache_count != 2)
+        $fatal(1, "tilemap cache mismatch overflow=%0b count=%0d",
+               cache_overflow, dut.cache_count);
+
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    wait (done);
+    @(posedge clk);
+    if (plots != 21 || first_x != 0)
+        $fatal(1, "tilemap line coverage count=%0d first=%0d",
+               plots, first_x);
+
+    target_y = 9'd85;
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    wait (done);
+    @(posedge clk);
+    if (plots != 21)
+        $fatal(1,
+               "tilemap rendered outside 65-line slice count=%0d",
+               plots);
     $display("PASS tb_ssv_cached_sprite_renderer");
     $finish;
 end

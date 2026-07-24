@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$QuartusRoot = "D:\Q",
+    [string]$QuartusRoot = "C:\intelFPGA_lite\17.1",
     [switch]$MapOnly
 )
 

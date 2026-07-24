@@ -12,7 +12,7 @@ ROM image so the design stays within Cyclone V block-RAM capacity.
 | SDRAM byte range | Content |
 |---|---|
 | `0000000-00fffff` | V60 program |
-| `0100000-0cfffff` | sprite graphics |
+| `0100000-0cfffff` | sprite graphics; Q0/Q1 rows packed, Q2 native |
 | `0d00000-10fffff` | ES5506 samples |
 | `1100000-111ffff` | CPU RAM `160000-17ffff` |
 | `1120000-115ffff` | CPU RAM `400000-43ffff` |
@@ -24,3 +24,8 @@ ROM image so the design stays within Cyclone V block-RAM capacity.
 3. Scanline renderer and 32-bit palette path.
 4. ES5506 register and voice engine.
 5. MRA, Quartus fit/timing, MiSTer deployment, and frame/audio comparison.
+
+Steps 1-3 now pass focused tests and a 60-million-clock real-ROM video
+simulation. Quartus analysis and synthesis also passes with the scanline
+buckets and four-bank compositor inferred as M10K memory. Audio, full fitting
+and timing closure, and physical MiSTer validation remain open.

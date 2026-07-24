@@ -16,11 +16,11 @@ logic rom_req;
 logic [24:3] rom_addr;
 logic [63:0] rom_data;
 logic rom_ack;
-logic plot_we;
-logic [8:0] plot_x;
-logic [14:0] plot_color;
+logic [3:0] plot_we;
+logic [35:0] plot_x;
+logic [59:0] plot_color;
 logic plot_shadow;
-logic [7:0] plot_pen;
+logic [31:0] plot_pen;
 logic plot_shadow_4bit;
 logic busy, done;
 
@@ -48,10 +48,10 @@ always_ff @(posedge clk) begin
         rom_delay <= rom_delay - 1;
         if (rom_delay == 1) begin
             // Quarter zero supplies pen bit zero at pixel zero.
-            rom_data <= (rom_quarter == 0) ? 64'h0000008000000080
+            rom_data <= (rom_quarter == 0) ? 64'h0000000000000080
                                            : 64'd0;
             rom_ack <= 1'b1;
-            rom_quarter <= (rom_quarter + 1) & 3;
+            rom_quarter <= (rom_quarter + 1) & 1;
         end
     end
 end
@@ -59,14 +59,38 @@ end
 integer plots;
 integer first_x;
 integer last_x;
+integer monitor_lane;
+integer batch_plot_count;
+integer batch_first_lane;
+always_comb begin
+    batch_plot_count = 0;
+    batch_first_lane = -1;
+    for (monitor_lane = 0; monitor_lane < 4;
+         monitor_lane = monitor_lane + 1) begin
+        if (plot_we[monitor_lane]) begin
+            batch_plot_count = batch_plot_count + 1;
+            if (batch_first_lane < 0)
+                batch_first_lane = monitor_lane;
+        end
+    end
+end
+
 always_ff @(posedge clk) begin
-    if (plot_we) begin
-        if (plots == 0) first_x <= plot_x;
-        last_x <= plot_x;
-        plots <= plots + 1;
-        if (plot_color !== 15'd65 || plot_pen !== 8'd1 ||
-            plot_shadow || plot_shadow_4bit)
-            $fatal(1, "plot metadata mismatch");
+    if (batch_plot_count != 0) begin
+        if (plots == 0)
+            first_x <= plot_x[batch_first_lane * 9 +: 9];
+        plots <= plots + batch_plot_count;
+    end
+    for (monitor_lane = 0; monitor_lane < 4;
+         monitor_lane = monitor_lane + 1) begin
+        if (plot_we[monitor_lane]) begin
+            last_x <= plot_x[monitor_lane * 9 +: 9];
+            if (plot_color[monitor_lane * 15 +: 15] !== 15'd65 ||
+                plot_pen[monitor_lane * 8 +: 8] !== 8'd1 ||
+                plot_shadow || plot_shadow_4bit)
+                $fatal(1, "plot metadata mismatch lane=%0d",
+                       monitor_lane);
+        end
     end
 end
 
@@ -144,7 +168,7 @@ initial begin
     if (plots != 21 || first_x != 0 || last_x != 320)
         $fatal(1, "flipped plot coverage count=%0d first=%0d last=%0d",
                plots, first_x, last_x);
-    if (first_rom_addr != 22'h20007)
+    if (first_rom_addr != 22'h2000f)
         $fatal(1, "vertical-flip row address got %h", first_rom_addr);
 
     $display("PASS tb_ssv_bg_renderer");

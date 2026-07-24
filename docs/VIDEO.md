@@ -24,10 +24,18 @@ drawn automatically as the background layer.
 
 ## Graphics ROM layout
 
-MAME decodes the 12 MiB region as 16x8, 8-bpp tiles split into four equal
-3 MiB quarters. Each quarter contributes two bitplanes. A 16x16 SSV tile is
-two consecutive 16x8 ROM tiles. Runtime depth modes mask the decoded pen to
-4, 6, or 8 bits; pen zero is transparent.
+MAME declares a 16 MiB graphics region and divides it into four 4 MiB plane
+quarters. Dyna Gear populates the first three quarters with six 2 MiB ROMs;
+the fourth quarter is zero, yielding 0x20000 16x8 source tiles with six
+populated bitplanes.
+
+During MiSTer download, the loader interleaves corresponding 32-bit rows from
+quarters zero and one into one aligned 64-bit SDRAM word. Quarter two remains
+in its native `0x900000-0xcfffff` range and the absent fourth quarter is
+generated as zero. The renderer therefore fetches one complete source row in
+two 64-bit reads without changing the 12 MiB graphics footprint or MRA stream.
+A 16x16 SSV tile is two consecutive 16x8 source tiles. Runtime depth modes
+mask the decoded pen to 4, 6, or 8 bits; pen zero is transparent.
 
 ## Palette
 
@@ -36,11 +44,19 @@ V60 bus, the even word is `{green, blue}` and the odd word is `{unused, red}`.
 The renderer stores a 15-bit palette index in its line buffer and resolves the
 RGB value at scanout.
 
-## Planned renderer pipeline
+## Renderer pipeline
 
-1. During each scanline, clear the next 336-entry palette-index line buffer.
-2. Draw scroll-zero background tilemap pixels.
-3. Walk the global and local lists in RAM order and overwrite non-zero pens.
-4. Resolve shadow writes against the existing 15-bit line-buffer value.
-5. Swap buffers at line end and perform dual-bank palette lookup during
-   visible scanout.
+1. Cache visible global/local descriptors during vblank and bucket their
+   indices by scanline in M10K memory.
+2. Swap the double line buffer and clear its four 84-word banks in 84 clocks.
+3. Draw scroll-zero background pixels four at a time.
+4. Replay the scanline bucket in original RAM order, interleaving normal
+   sprites and tilemap sprites exactly as MAME does.
+5. Elide only consecutive, identical tilemap-group redraws caused by MAME's
+   inclusive 65-line slice overlap; any intervening draw cancels elision.
+6. Resolve shadow writes against the existing 15-bit per-pixel value with
+   same-address forwarding.
+7. Resolve palette indices through the live xRGB888 palette during scanout.
+
+The real Dyna Gear ROM completes a 60-million-clock Verilator workload with
+zero scanline overruns.

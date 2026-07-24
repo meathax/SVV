@@ -4,7 +4,7 @@
   <year>1993</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
-  <rom index="0" zip="dynagear.zip" md5="none">
+  <rom index="0" zip="dynagear.zip">
     <interleave output="16">
       <part name="si002-prl.u4" crc="71ba29c6" map="01"/>
       <part name="si002-prh.u3" crc="d0947a12" map="10"/>

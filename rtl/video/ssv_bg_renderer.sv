@@ -25,11 +25,11 @@ module ssv_bg_renderer (
     input  logic [63:0] rom_data,
     input  logic        rom_ack,
 
-    output logic        plot_we,
-    output logic  [8:0] plot_x,
-    output logic [14:0] plot_color,
+    output logic  [3:0] plot_we,
+    output logic [35:0] plot_x,
+    output logic [59:0] plot_color,
     output logic        plot_shadow,
-    output logic  [7:0] plot_pen,
+    output logic [31:0] plot_pen,
     output logic        plot_shadow_4bit,
 
     output logic        busy,
@@ -40,9 +40,9 @@ localparam logic [8:0] LAST_PIXEL = 9'd335;
 
 typedef enum logic [4:0] {
     IDLE, WAIT_CLEAR, ROW_DECIDE,
-    ROW_ADDR, ROW_WAIT, ROW_CAPTURE,
-    TILE_CODE_ADDR, TILE_CODE_WAIT, TILE_CODE_CAPTURE,
-    TILE_ATTR_ADDR, TILE_ATTR_WAIT, TILE_ATTR_CAPTURE,
+    ROW_ADDR, ROW_WAIT,
+    TILE_CODE_ADDR, TILE_CODE_WAIT,
+    TILE_ATTR_ADDR, TILE_ATTR_WAIT,
     TILE_PREP, FETCH_START, FETCH_WAIT, PLOT
 } state_t;
 state_t state;
@@ -119,9 +119,9 @@ ssv_gfx_row_decode decode (
     .gfx_mode(gfx_mode), .flip_x(flip_x), .pens(pens)
 );
 
-wire [7:0] current_pen = pens[plot_i * 8 +: 8];
-wire signed [11:0] current_x = screen_x + $signed({7'd0, plot_i});
-wire current_x_visible = (current_x >= 0) && (current_x <= LAST_PIXEL);
+logic [7:0] batch_pen;
+logic signed [11:0] batch_x;
+integer plot_lane;
 wire tile_flip_x = tile_attr[15] ^
                    (flip_control[12] && !flip_control[13]);
 wire tile_flip_y = tile_attr[14] ^
@@ -129,15 +129,25 @@ wire tile_flip_y = tile_attr[14] ^
 
 always_comb begin
     spr_addr = tile_word_addr;
-    if (state == ROW_ADDR || state == ROW_WAIT || state == ROW_CAPTURE)
+    if (state == ROW_ADDR || state == ROW_WAIT)
         spr_addr = ({9'd0, scroll_mode[7:0]} << 9) + map_y[8:0];
 
     fetch_start = (state == FETCH_START);
 
-    plot_we = (state == PLOT) && current_x_visible && (current_pen != 8'd0);
-    plot_x = current_x[8:0];
-    plot_pen = current_pen;
-    plot_color = ({color, 6'd0} + current_pen) & 15'h7fff;
+    plot_we = 4'd0;
+    plot_x = 36'd0;
+    plot_pen = 32'd0;
+    plot_color = 60'd0;
+    for (plot_lane = 0; plot_lane < 4; plot_lane = plot_lane + 1) begin
+        batch_pen = pens[(plot_i + plot_lane) * 8 +: 8];
+        batch_x = screen_x + $signed(plot_i + plot_lane);
+        plot_we[plot_lane] = (state == PLOT) && (batch_x >= 0) &&
+                             (batch_x <= LAST_PIXEL) && (batch_pen != 0);
+        plot_x[plot_lane * 9 +: 9] = batch_x[8:0];
+        plot_pen[plot_lane * 8 +: 8] = batch_pen;
+        plot_color[plot_lane * 15 +: 15] =
+            ({color, 6'd0} + batch_pen) & 15'h7fff;
+    end
     plot_shadow = shadow;
     plot_shadow_4bit = shadow_4bit;
 end
@@ -205,8 +215,7 @@ always_ff @(posedge clk) begin
             end
 
             ROW_ADDR: state <= ROW_WAIT;
-            ROW_WAIT: state <= ROW_CAPTURE;
-            ROW_CAPTURE: begin
+            ROW_WAIT: begin
                 map_x <= {1'b0, scroll_x} + {1'b0, spr_data};
                 tile_word_addr <= tile_address(
                     {1'b0, scroll_x} + {1'b0, spr_data},
@@ -216,16 +225,14 @@ always_ff @(posedge clk) begin
             end
 
             TILE_CODE_ADDR: state <= TILE_CODE_WAIT;
-            TILE_CODE_WAIT: state <= TILE_CODE_CAPTURE;
-            TILE_CODE_CAPTURE: begin
+            TILE_CODE_WAIT: begin
                 tile_code_low <= spr_data;
                 tile_word_addr <= tile_word_addr + 1'd1;
                 state <= TILE_ATTR_ADDR;
             end
 
             TILE_ATTR_ADDR: state <= TILE_ATTR_WAIT;
-            TILE_ATTR_WAIT: state <= TILE_ATTR_CAPTURE;
-            TILE_ATTR_CAPTURE: begin
+            TILE_ATTR_WAIT: begin
                 tile_attr <= spr_data;
                 state <= TILE_PREP;
             end
@@ -253,7 +260,7 @@ always_ff @(posedge clk) begin
             end
 
             PLOT: begin
-                if (plot_i == 5'd15) begin
+                if (plot_i == 5'd12) begin
                     if (screen_x + 11'sd16 > $signed({2'd0, LAST_PIXEL})) begin
                         busy <= 1'b0;
                         done <= 1'b1;
@@ -269,7 +276,7 @@ always_ff @(posedge clk) begin
                     end
                 end
                 else begin
-                    plot_i <= plot_i + 1'd1;
+                    plot_i <= plot_i + 3'd4;
                 end
             end
         endcase
