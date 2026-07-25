@@ -16,10 +16,10 @@ The core is a **credible Dyna Gear bring-up**, not a playable release.
 |---|---|
 | Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` |
 | Does early machine state match MAME? | **Yes** — ordered writes through **8s attract** + hashes through 2.0M retirements (IRQ schedule) |
-| Has attract mode been proven? | **Partial** — 8s scheduled write-match; no frame CRC / RGB ladder yet |
-| Has coin → start → play been proven? | **No** — inputs idle in core TBs; no gameplay scenario |
-| Is audio present? | **No** — ES5506 register file only; PCM hardwired to zero |
-| Overall toward playable Dyna Gear | **~55%** (medium confidence) |
+| Has attract mode been proven? | **Partial+** — post-VE **frame 0** RGB/IDX CRC matches MAME; loop open |
+| Has coin → start → play been proven? | **Partial** — `coin_start_p1` schedule in sim; full play CRC open |
+| Is audio present? | **Yes (sim)** — voice PCM + REQUIRE_AUDIO peak gate; HW unproven |
+| Overall toward playable Dyna Gear | **~70%** (medium confidence) |
 
 Strongest verified results:
 

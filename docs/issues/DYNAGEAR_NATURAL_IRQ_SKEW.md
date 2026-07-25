@@ -60,7 +60,9 @@ Verification changes:
 - Extended IRQ schedules from PC traces (`mame_irq_schedule_8s.txt`)
 - `tools/extract-v60-irq-schedule.py` accepts `STATE` / `pc=` / `HASH` lines
 - `verif/run_post_ve_diff.sh` prefers long write + long IRQ schedule artifacts
-- Documented TB `/3` vs production fractional CE in `tb_ssv_realrom_boot.sv`
+- Realrom/hang/frame TBs now instantiate `ssv_tb_ce_cpu` (`+21702`) with
+  sticky 8-cycle SDRAM acks so `ext_done` survives CE gaps
+- `DIFF_IRQ_SCHEDULE` remains available as a fallback architectural gate
 
 ## Session results (25 July 2026)
 
@@ -88,3 +90,11 @@ Verification changes:
 Natural (unscheduled) write + hash compares match through at least the current
 scheduled horizon, or any remaining skew is documented as
 `TIMING_UNVERIFIABLE` with board evidence.
+
+## Status update (25 July 2026, evening)
+
+- `ssv_tb_ce_cpu` + 2-cycle sticky ack + `!ack_r` SDRAM restart guard boots to
+  VE under natural vblank (`tb_ssv_hang_watch` PASS, VE ~54.5M cycles).
+- Attract **frame 0** CRC now matches MAME under natural CE.
+- Full multi-second natural write/hash horizon and full attract-loop CRC remain
+  open (see `DYNAGEAR_ATTRACT_FRAME_CRC.md`).

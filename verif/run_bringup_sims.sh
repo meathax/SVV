@@ -77,7 +77,7 @@ run_one tb_ssv_rom_write_ack \
 
 # Natural-vblank boot must raise video_enable (long RAM clear ~35s wall).
 run_one tb_ssv_hang_watch \
-  "${SSV_CORE_FILES[@]}" verif/tb_ssv_hang_watch.sv
+  "${SSV_CORE_FILES[@]}" verif/ssv_tb_ce_cpu.sv verif/tb_ssv_hang_watch.sv
 
 echo "ALL FOCUSED BRING-UP SIMS PASS"
 echo "For full MAME write/hash post-VE diff: verif/run_post_ve_diff.sh"

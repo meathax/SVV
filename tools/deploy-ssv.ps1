@@ -2,13 +2,21 @@
 param(
     [string]$MisterHost = "root@192.168.0.69",
     [string]$RbfPath,
-    [string]$MraPath
+    [string]$MraPath,
+    [switch]$SkipReadyCheck
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $RbfPath) { $RbfPath = Join-Path $repoRoot "releases\SSV.rbf" }
 if (-not $MraPath) { $MraPath = Join-Path $repoRoot "mra\Dyna Gear.mra" }
+
+if (-not $SkipReadyCheck) {
+    & (Join-Path $PSScriptRoot "report-quartus.ps1") -Revision "Arcade-SSV" -RequireReady
+    if ($LASTEXITCODE -ne 0) {
+        throw "Quartus readiness check failed; refusing to deploy. Pass -SkipReadyCheck to override."
+    }
+}
 
 $rbf = (Resolve-Path -LiteralPath $RbfPath).Path
 $mra = (Resolve-Path -LiteralPath $MraPath).Path
@@ -35,3 +43,5 @@ if ($remoteMraHash -ne $mraHash) { throw "MRA hash mismatch after upload." }
 & ssh @sshOptions $MisterHost "mv -f '${remoteCore}.upload' '$remoteCore' && mv -f '${remoteMra}.upload' '$remoteMra' && sync"
 if ($LASTEXITCODE -ne 0) { throw "Could not activate uploaded files." }
 Write-Host "Deployed SSV.rbf and Dyna Gear.mra to $MisterHost"
+Write-Host "RBF SHA-256: $rbfHash"
+Write-Host "MRA SHA-256: $mraHash"

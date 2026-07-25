@@ -33,8 +33,10 @@ The synthesizable Dyna Gear bring-up now includes:
   pages, validated against the Dyna Gear MAME trace with a self-checking
   Verilator test.
 
-ES5506 voice processing/audio output and physical MiSTer play testing remain
-unimplemented, so this is not yet a playable release.
+Sim gameplay gates (attract frame-0 CRC, soak, coin/start schedule, input
+matrix, ES5506 PCM peak) are wired through `verif/run_gameplay_sims.sh`.
+Full attract-loop CRC match and physical MiSTer play testing remain open, so
+this is not yet a playable release.
 
 ## Build
 

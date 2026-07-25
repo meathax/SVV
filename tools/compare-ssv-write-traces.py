@@ -32,6 +32,7 @@ def main() -> int:
     args = parser.parse_args()
 
     count = 0
+    lockout_idx = None
     mame = records(args.mame)
     rtl = records(args.rtl)
     while True:
@@ -39,11 +40,18 @@ def main() -> int:
             m_record = next(mame)
         except StopIteration:
             print(f"PASS: all {count} MAME writes match RTL")
+            if lockout_idx is not None:
+                print(f"lockout 0x21000e matched at write {lockout_idx}")
             return 0
         try:
             r_record = next(rtl)
         except StopIteration:
             print(f"PASS: {count} available RTL writes match MAME")
+            if lockout_idx is not None:
+                print(
+                    f"lockout 0x21000e matched at write {lockout_idx}; "
+                    f"{count - lockout_idx - 1} post-lockout writes matched"
+                )
             return 0
         if m_record != r_record:
             print(
@@ -53,7 +61,15 @@ def main() -> int:
                 f"RTL=(addr={r_record[0]:08x},data={r_record[1]:04x},"
                 f"mask={r_record[2]:04x})"
             )
+            if lockout_idx is not None:
+                print(f"prior lockout match at write {lockout_idx}")
             return 1
+        if m_record[0] == 0x21000E and lockout_idx is None:
+            lockout_idx = count
+            print(
+                f"LOCKOUT match write={count} data={m_record[1]:04x} "
+                f"mask={m_record[2]:04x}"
+            )
         count += 1
 
 

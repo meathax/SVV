@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // MAME-accurate V60 clock enable for SSV benches.
 // Matches Arcade-SSV.sv: 21702/65536 * clk ~= 16 MHz at 48.317307 MHz.
-// Not yet wired into realrom TBs: swapping off clk/3 breaks early boot with
-// the current behavioral SDRAM pulse-ack model (see DYNAGEAR_NATURAL_IRQ_SKEW).
+// Wired into realrom/hang/frame TBs with sticky multi-cycle SDRAM acks
+// (see DYNAGEAR_NATURAL_IRQ_SKEW).
 `timescale 1ns/1ps
 
 module ssv_tb_ce_cpu (

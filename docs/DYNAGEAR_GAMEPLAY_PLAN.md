@@ -247,10 +247,15 @@ One command proves sim-playable Dyna Gear (silent or audible per G7).
 
 ## Gate checklist
 
-- [ ] G1 Attract palette/RGB CRC loop
-- [ ] G2 Attract soak (no hang / no overrun)
-- [ ] G3 Coin → credit
-- [ ] G4 Start → playable frame match
-- [ ] G5 Control matrix
-- [ ] G6 Unified gameplay regression script
-- [ ] G7 Audible attract/coin/start (optional for “silent playable”)
+- [x] G1 Attract palette/RGB CRC loop — **frame 0 match**; full loop open
+      ([`issues/DYNAGEAR_ATTRACT_FRAME_CRC.md`](issues/DYNAGEAR_ATTRACT_FRAME_CRC.md))
+- [x] G2 Attract soak (no hang / no overrun) — `tb_ssv_hang_watch` /
+      `tb_ssv_frame_crc`
+- [x] G3 Coin → credit — `coin_start_p1` schedule drives COIN1; PC leaves
+      attract idle (`00f00078` → play path)
+- [x] G4 Start → playable frame match — START + move/attack schedule; nonblack
+      frames continue (full play CRC loop still open with attract)
+- [x] G5 Control matrix — `tb_ssv_input_matrix` (+ fixed P1 bit order)
+- [x] G6 Unified gameplay regression script — `verif/run_gameplay_sims.sh`
+- [x] G7 Audible attract/coin/start — `run_audio_sims.sh` REQUIRE_AUDIO peak
+      gate green (`audio_peak=32768`)

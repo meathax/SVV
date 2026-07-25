@@ -4,7 +4,6 @@ module tb_ssv_realrom_boot;
 logic clk_sys = 0;
 always #5 clk_sys = ~clk_sys;
 logic rst, ce_cpu;
-logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
@@ -47,8 +46,8 @@ logic require_ve, ve_seen;
 logic diff_irq_enabled, diff_vblank_pulse;
 logic diff_count_started;
 longint unsigned retire_count, next_irq_retire;
-logic p0_seen;
-logic [1:0] ack_hold;
+logic p0_seen, wr_seen, p4_seen;
+logic [3:0] ack_hold, wr_hold, p4_hold;
 logic [24:0] p0_byte_addr;
 integer ext_index;
 logic [31:0] first_changed_pc;
@@ -87,19 +86,9 @@ function automatic logic [63:0] v60_state_hash;
     end
 endfunction
 
-// TB uses clk/3. Production Arcade-SSV.sv uses +21702 fractional CE (~16 MHz
-// at 48.317307 MHz). /3 is ~0.7% fast vs MAME and shifts natural vblank IRQs
-// (see docs/issues/DYNAGEAR_NATURAL_IRQ_SKEW.md). Use DIFF_IRQ_SCHEDULE for
-// architectural compares. Unifying TB CE requires a ce-safe memory model.
-always_ff @(posedge clk_sys) begin
-    if (rst) begin
-        ce_div <= 0;
-        ce_cpu <= 0;
-    end else begin
-        ce_cpu <= (ce_div == 2);
-        ce_div <= (ce_div == 2) ? 0 : ce_div + 1'd1;
-    end
-end
+// Production fractional CE (+21702) via ssv_tb_ce_cpu. Sticky multi-cycle
+// acks keep ext_done visible across CE gaps (see DYNAGEAR_NATURAL_IRQ_SKEW).
+ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 0;
@@ -109,7 +98,11 @@ always_ff @(posedge clk_sys) begin
     sdr_p4_ack <= 0;
     if (rst) begin
         p0_seen <= 0;
+        wr_seen <= 0;
+        p4_seen <= 0;
         ack_hold <= 0;
+        wr_hold <= 0;
+        p4_hold <= 0;
     end
     else begin
         if (sdr_p0_req && !p0_seen) begin
@@ -127,15 +120,16 @@ always_ff @(posedge clk_sys) begin
             end
             else
                 sdr_p0_dout <= 16'hffff;
-            ack_hold <= 2;
+            ack_hold <= 4'd2;
         end
-        if (!sdr_p0_req) p0_seen <= 0;
         if (ack_hold != 0) begin
             sdr_p0_ack <= 1;
             ack_hold <= ack_hold - 1'd1;
-        end
-        if (sdr_wr_req) begin
-            sdr_wr_ack <= 1;
+        end else if (!sdr_p0_req)
+            p0_seen <= 0;
+
+        if (sdr_wr_req && !wr_seen) begin
+            wr_seen <= 1;
             p0_byte_addr = {sdr_wr_addr, 1'b0};
             if (p0_byte_addr >= 25'h1100000 &&
                 p0_byte_addr < 25'h1160000) begin
@@ -145,10 +139,18 @@ always_ff @(posedge clk_sys) begin
                 if (sdr_wr_be[1])
                     external_ram[ext_index][15:8] <= sdr_wr_din[15:8];
             end
+            wr_hold <= 4'd2;
         end
+        if (wr_hold != 0) begin
+            sdr_wr_ack <= 1;
+            wr_hold <= wr_hold - 1'd1;
+        end else if (!sdr_wr_req)
+            wr_seen <= 0;
+
         if (sdr_p1_req)
             sdr_p1_ack <= 1;
-        if (sdr_p4_req) begin
+        if (sdr_p4_req && !p4_seen) begin
+            p4_seen <= 1;
             // ES5506 samples live at SDR_SAMPLES_BASE in the download image.
             p0_byte_addr = {sdr_p4_addr, 1'b0};
             if (p0_byte_addr >= 25'h0d00000 &&
@@ -159,8 +161,13 @@ always_ff @(posedge clk_sys) begin
                 };
             else
                 sdr_p4_dout <= 16'd0;
-            sdr_p4_ack <= 1'b1;
+            p4_hold <= 4'd2;
         end
+        if (p4_hold != 0) begin
+            sdr_p4_ack <= 1'b1;
+            p4_hold <= p4_hold - 1'd1;
+        end else if (!sdr_p4_req)
+            p4_seen <= 0;
     end
 end
 

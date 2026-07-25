@@ -5,7 +5,6 @@ logic clk_sys = 1'b0;
 always #5 clk_sys = ~clk_sys;
 
 logic rst, ce_cpu;
-logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
@@ -45,8 +44,8 @@ integer wram0_writes;
 integer bg_overruns;
 integer obj_overruns;
 logic booted;
-logic p0_seen, p1_seen;
-logic [2:0] p0_ack_hold, p1_ack_hold;
+logic p0_seen, p1_seen, wr_seen;
+logic [3:0] p0_ack_hold, p1_ack_hold, wr_ack_hold;
 logic [24:0] p0_byte_addr;
 logic [24:0] p1_byte_addr;
 logic [31:0] pc_ring [0:63];
@@ -62,6 +61,8 @@ integer raw_q1_index;
 integer nonzero_global_words;
 integer nonzero_palette_entries;
 integer first_nonzero_global;
+
+ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
@@ -83,16 +84,6 @@ ssv_core dut (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst) begin
-        ce_div <= 2'd0;
-        ce_cpu <= 1'b0;
-    end else begin
-        ce_cpu <= (ce_div == 2'd2);
-        ce_div <= (ce_div == 2'd2) ? 2'd0 : ce_div + 1'd1;
-    end
-end
-
-always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
     sdr_p1_ack <= 1'b0;
     sdr_wr_ack <= 1'b0;
@@ -101,8 +92,10 @@ always_ff @(posedge clk_sys) begin
     if (rst) begin
         p0_seen <= 1'b0;
         p1_seen <= 1'b0;
-        p0_ack_hold <= 3'd0;
-        p1_ack_hold <= 3'd0;
+        wr_seen <= 1'b0;
+        p0_ack_hold <= 4'd0;
+        p1_ack_hold <= 4'd0;
+        wr_ack_hold <= 4'd0;
         p1_transactions <= 0;
     end
     else begin
@@ -123,14 +116,13 @@ always_ff @(posedge clk_sys) begin
             else begin
                 sdr_p0_dout <= 16'hffff;
             end
-            p0_ack_hold <= 3'd2;
+            p0_ack_hold <= 4'd2;
         end
-        if (!sdr_p0_req)
-            p0_seen <= 1'b0;
         if (p0_ack_hold != 0) begin
             p0_ack_hold <= p0_ack_hold - 1'd1;
             sdr_p0_ack <= 1'b1;
-        end
+        end else if (!sdr_p0_req)
+            p0_seen <= 1'b0;
 
         if (sdr_p1_req && !p1_seen) begin
             p1_seen <= 1'b1;
@@ -171,17 +163,17 @@ always_ff @(posedge clk_sys) begin
             else begin
                 sdr_p1_dout <= 64'd0;
             end
-            p1_ack_hold <= 3'd2;
+            p1_ack_hold <= 4'd2;
             p1_transactions <= p1_transactions + 1;
         end
-        if (!sdr_p1_req)
-            p1_seen <= 1'b0;
         if (p1_ack_hold != 0) begin
             p1_ack_hold <= p1_ack_hold - 1'd1;
             sdr_p1_ack <= 1'b1;
-        end
+        end else if (!sdr_p1_req)
+            p1_seen <= 1'b0;
 
-        if (sdr_wr_req) begin
+        if (sdr_wr_req && !wr_seen) begin
+            wr_seen <= 1'b1;
             if ({sdr_wr_addr, 1'b0} >= 25'h1100000 &&
                 {sdr_wr_addr, 1'b0} < 25'h1160000) begin
                 ext_index = ({sdr_wr_addr, 1'b0} - 25'h1100000) >> 1;
@@ -190,7 +182,17 @@ always_ff @(posedge clk_sys) begin
                 if (sdr_wr_be[1])
                     external_ram[ext_index][15:8] <= sdr_wr_din[15:8];
             end
+            wr_ack_hold <= 4'd2;
+        end
+        if (wr_ack_hold != 0) begin
+            wr_ack_hold <= wr_ack_hold - 1'd1;
             sdr_wr_ack <= 1'b1;
+        end else if (!sdr_wr_req)
+            wr_seen <= 1'b0;
+
+        if (sdr_p4_req) begin
+            sdr_p4_dout <= 16'd0;
+            sdr_p4_ack <= 1'b1;
         end
     end
 end

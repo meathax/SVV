@@ -7,7 +7,6 @@ module tb_ssv_hang_watch;
 logic clk_sys = 0;
 always #5 clk_sys = ~clk_sys;
 logic rst, ce_cpu;
-logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
@@ -30,8 +29,8 @@ logic [23:0] debug_status;
 byte main_rom [0:1048575];
 logic [15:0] external_ram [0:196607]; // 0x1100000..0x115ffff
 integer fd, n, cycles;
-logic p0_seen;
-logic [2:0] p0_hold;
+logic p0_seen, wr_seen;
+logic [3:0] p0_hold, wr_hold;
 logic [31:0] last_pc;
 integer stuck;
 integer ve_rise;
@@ -40,6 +39,13 @@ integer f3_hits;
 integer lockout_writes;
 integer rom_writes;
 logic [24:0] p0_byte;
+integer post_ve_frames;
+logic vs_d;
+integer soak_frames;
+integer post_ve_nonblack;
+integer bg_overruns, obj_overruns;
+
+ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
@@ -61,16 +67,6 @@ ssv_core dut (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst) begin
-        ce_div <= 0;
-        ce_cpu <= 0;
-    end else begin
-        ce_cpu <= (ce_div == 2);
-        ce_div <= (ce_div == 2) ? 0 : ce_div + 1'd1;
-    end
-end
-
-always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 0;
     sdr_p1_ack <= 0;
     sdr_wr_ack <= 0;
@@ -78,7 +74,9 @@ always_ff @(posedge clk_sys) begin
     sdr_p1_dout <= 64'd0;
     if (rst) begin
         p0_seen <= 0;
+        wr_seen <= 0;
         p0_hold <= 0;
+        wr_hold <= 0;
     end
     else begin
         if (sdr_p0_req && !p0_seen) begin
@@ -93,16 +91,16 @@ always_ff @(posedge clk_sys) begin
                 sdr_p0_dout <= external_ram[(p0_byte - 25'h1100000) >> 1];
             else
                 sdr_p0_dout <= 16'hffff;
-            p0_hold <= 3'd2;
+            p0_hold <= 4'd2;
         end
-        if (!sdr_p0_req)
-            p0_seen <= 0;
         if (p0_hold != 0) begin
             sdr_p0_ack <= 1;
             p0_hold <= p0_hold - 1'd1;
-        end
-        if (sdr_wr_req) begin
-            sdr_wr_ack <= 1;
+        end else if (!sdr_p0_req)
+            p0_seen <= 0;
+
+        if (sdr_wr_req && !wr_seen) begin
+            wr_seen <= 1;
             p0_byte = {sdr_wr_addr, 1'b0};
             if (p0_byte >= 25'h1100000 && p0_byte < 25'h1160000) begin
                 if (sdr_wr_be[0])
@@ -112,7 +110,14 @@ always_ff @(posedge clk_sys) begin
                     external_ram[(p0_byte - 25'h1100000) >> 1][15:8] <=
                         sdr_wr_din[15:8];
             end
+            wr_hold <= 4'd2;
         end
+        if (wr_hold != 0) begin
+            sdr_wr_ack <= 1;
+            wr_hold <= wr_hold - 1'd1;
+        end else if (!sdr_wr_req)
+            wr_seen <= 0;
+
         if (sdr_p1_req)
             sdr_p1_ack <= 1;
         if (sdr_p4_req) begin
@@ -132,20 +137,28 @@ initial begin
              main_rom[0], main_rom[1],
              main_rom[32'h1f3d0], main_rom[32'h1f3d1]);
 
+    if (!$value$plusargs("SOAK_FRAMES=%d", soak_frames))
+        soak_frames = 30;
+
     rst = 1;
     last_pc = 0;
     stuck = 0;
     ve_rise = -1;
     ve_d = 0;
+    vs_d = 1;
     f3_hits = 0;
     lockout_writes = 0;
     rom_writes = 0;
+    post_ve_frames = 0;
+    post_ve_nonblack = 0;
+    bg_overruns = 0;
+    obj_overruns = 0;
     for (n = 0; n < 196608; n = n + 1)
         external_ram[n] = 16'd0;
     repeat (8) @(posedge clk_sys);
     rst = 0;
 
-    for (cycles = 0; cycles < 70000000; cycles = cycles + 1) begin
+    for (cycles = 0; cycles < 200000000; cycles = cycles + 1) begin
         @(posedge clk_sys);
         if (dut.m_req && dut.m_we && dut.sel_rom && !dut.m_ack) begin
             rom_writes = rom_writes + 1;
@@ -164,6 +177,16 @@ initial begin
             $display("VE_RISE cyc=%0d pc=%08x", cycles, debug_pc);
         end
         ve_d = debug_status[22];
+
+        if (debug_status[22] && !vs_d && vs)
+            post_ve_frames = post_ve_frames + 1;
+        vs_d = vs;
+        if (debug_status[22] && ce_pixel && !hb && !vb && rgb != 24'd0)
+            post_ve_nonblack = post_ve_nonblack + 1;
+        if (dut.renderer_line_start && dut.bg_busy)
+            bg_overruns = bg_overruns + 1;
+        if (dut.renderer_line_start && dut.obj_busy)
+            obj_overruns = obj_overruns + 1;
 
         if (debug_pc == 32'h00F1F3D6) begin
             f3_hits = f3_hits + 1;
@@ -188,14 +211,21 @@ initial begin
             $fatal(1, "STUCK pc=%08x cyc=%0d a=%06x we=%b ack=%b busy=%b",
                    debug_pc, cycles, dut.a, dut.m_we, dut.m_ack, dut.ext_busy);
 
-        if (debug_status[22] && (cycles > ve_rise + 1000) && (ve_rise >= 0))
+        if (debug_status[22] && (ve_rise >= 0) &&
+            post_ve_frames >= soak_frames)
             break;
     end
     if (!(debug_status[22] && (ve_rise >= 0)))
         $fatal(1, "TIMEOUT pc=%08x ve=%b ve_rise=%0d lockouts=%0d",
                debug_pc, debug_status[22], ve_rise, lockout_writes);
-    $display("PASS tb_ssv_hang_watch pc=%08x cyc=%0d lockouts=%0d rom_wr=%0d",
-             debug_pc, cycles, lockout_writes, rom_writes);
+    if (post_ve_frames < soak_frames)
+        $fatal(1, "soak frames=%0d need=%0d", post_ve_frames, soak_frames);
+    if (bg_overruns != 0 || obj_overruns != 0)
+        $fatal(1, "renderer overrun bg=%0d obj=%0d", bg_overruns, obj_overruns);
+    // This TB has no sprite ROM; nonblack pixels are checked in tb_ssv_frame_crc.
+    $display("PASS tb_ssv_hang_watch pc=%08x cyc=%0d frames=%0d lockouts=%0d rom_wr=%0d nonblack=%0d",
+             debug_pc, cycles, post_ve_frames, lockout_writes, rom_writes,
+             post_ve_nonblack);
     $finish;
 end
 endmodule

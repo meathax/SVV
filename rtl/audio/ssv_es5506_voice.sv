@@ -86,6 +86,7 @@ logic [3:0] filtcount [0:31];
 logic signed [23:0] mix_l, mix_r;
 logic signed [15:0] s1, s2;
 logic        got_ack;
+logic [7:0]  wait_cnt;
 logic [15:0] cr;
 logic        cr_valid;
 logic [16:0] fc;
@@ -173,6 +174,7 @@ always_ff @(posedge clk) begin
         audio_r <= '0;
         sample_tick <= 1'b0;
         underrun <= 1'b0;
+        wait_cnt <= 8'd0;
         eng_wr_accum <= 1'b0;
         eng_wr_cr <= 1'b0;
         eng_wr_filt <= 1'b0;
@@ -207,10 +209,20 @@ always_ff @(posedge clk) begin
             if (state == S_WAIT1 && !got_ack) begin
                 s1 <= sdr_dout;
                 got_ack <= 1'b1;
+                wait_cnt <= 8'd0;
             end else if (state == S_WAIT2 && !got_ack) begin
                 s2 <= sdr_dout;
                 got_ack <= 1'b1;
+                wait_cnt <= 8'd0;
             end
+        end else if ((state == S_WAIT1 || state == S_WAIT2) && !got_ack) begin
+            // Sample deadline miss: SDRAM did not return S1/S2 in time.
+            if (wait_cnt == 8'hff)
+                underrun <= 1'b1;
+            else
+                wait_cnt <= wait_cnt + 8'd1;
+        end else begin
+            wait_cnt <= 8'd0;
         end
 
         if (ce) begin

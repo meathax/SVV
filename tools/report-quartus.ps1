@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = "",
-    [string]$Revision = "Arcade-SegaSystem32",
+    [string]$Revision = "Arcade-SSV",
     [switch]$AsJson,
     [switch]$RequireReady
 )

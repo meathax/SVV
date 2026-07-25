@@ -31,6 +31,7 @@ CORE=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   rtl/ssv_core.sv
+  verif/ssv_tb_ce_cpu.sv
 )
 
 echo "=== BUILD/RUN tb_ssv_es5506_regs ==="
