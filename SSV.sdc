@@ -1,12 +1,10 @@
-# SSV MiSTer timing constraints.
-create_clock -name CLK_50M -period 20.000 [get_ports {CLK_50M}]
+# SSV MiSTer core timing constraints.
+# Board clocks (FPGA_CLK*_50, HPS user clocks) are created in sys/sys_top.sdc.
+# Do not invent a CLK_50M / RESET / HPS_BUS top-level here — the compiled
+# entity is sys_top, and those emu-wrapper names do not exist as ports.
+
 derive_pll_clocks
 derive_clock_uncertainty
-
-# HPS and front-panel controls are asynchronous to the FPGA core clocks and
-# are synchronised by the MiSTer framework / local reset synchronisers.
-set_false_path -from [get_ports {RESET}]
-set_false_path -from [get_ports {HPS_BUS[*]}]
 
 # The V60 is clock-enabled at approximately 16.1 MHz from clk_sys.  The
 # accumulator ratio guarantees at least three clk_sys periods between enable
