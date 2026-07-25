@@ -10,6 +10,10 @@ No copyrighted game ROMs are included. Place locally owned ROM archives under
 
 ## Current status
 
+Full audit and sim-first path to attract/gameplay:
+[`docs/DYNAGEAR_CORE_AUDIT.md`](docs/DYNAGEAR_CORE_AUDIT.md),
+[`docs/DYNAGEAR_GAMEPLAY_PLAN.md`](docs/DYNAGEAR_GAMEPLAY_PLAN.md).
+
 The synthesizable Dyna Gear bring-up now includes:
 
 - MiSTer shell, PLL, SDRAM controller, and V60 CPU ported from the nearby

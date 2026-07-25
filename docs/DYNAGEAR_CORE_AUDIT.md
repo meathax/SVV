@@ -1,601 +1,260 @@
-# Dyna Gear SSV MiSTer Core Audit
+# Dyna Gear SSV MiSTer Core — Full Audit
 
-Audit date: 24 July 2026  
+Audit date: 25 July 2026  
 Repository: `D:\Arcade\AI\SVV`  
-Audited branch/commit: `main` at `b0fa575` (`Cache SSV sprite lists by scanline`) plus an extensive uncommitted working tree  
-Target: Sammy/Seta/Visco SSV, Dyna Gear, MiSTer Cyclone V
+Tree: `8b8312b` plus uncommitted bring-up fixes (ROM-write ack, dual video mux,
+DIP OSD, diag `use_core_video`, hang-watch / post-VE gates)  
+Target: Sammy/Seta/Visco SSV — **Dyna Gear** only for this release path  
+Scope of this audit: RTL, verification, and sim evidence. **No Quartus/RBF
+claims.** Hardware RBF deploy is out of band for the companion gameplay plan.
 
 ## Executive verdict
 
-The project is a substantial, synthesizable SSV bring-up, but it is **not yet a
-working Dyna Gear core**.
+The core is a **credible Dyna Gear bring-up**, not a playable release.
 
-The strongest verified result is that the V60 reaches the same early program
-states and writes as MAME in Verilator, and the current video pipeline produces
-non-black pixels in a direct `ssv_core` simulation. The current Quartus build
-fits the MiSTer FPGA and meets the reported timing constraints.
+| Question | Answer |
+|---|---|
+| Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` |
+| Does early machine state match MAME? | **Yes** — ordered writes + full-state hashes through post-lockout (IRQ schedule) |
+| Has attract mode been proven? | **No** — no attract-length frame CRC / RGB ladder |
+| Has coin → start → play been proven? | **No** — inputs idle in core TBs; no gameplay scenario |
+| Is audio present? | **No** — ES5506 register file only; PCM hardwired to zero |
+| Overall toward playable Dyna Gear | **~55%** (medium confidence) |
 
-The strongest contrary result is physical hardware: MiSTer loads
-`SSV_20260724` and `Dyna Gear.mra`, but the captured output is completely black.
-No attract mode or gameplay has been observed. The current wrapper resets the
-video timing together with the rest of the core, so its intended startup colors
-cannot diagnose a ROM-loader, SDRAM-ready, reset-release, or downstream-video
-failure. The first failing physical-hardware boundary is therefore still
-unknown.
+Strongest verified results:
 
-Audio is not implemented beyond the ES5506 host-register file. Both PCM outputs
-are hardwired to zero. Controls exist, but the DIPs are hardcoded and the full
-input set has not been validated on hardware.
+- ROM-region CPU writes no longer hang the bus (`tb_ssv_rom_write_ack`).
+- Natural-vblank boot raises lockout/`video_enable` at ~53.7M `clk_sys`
+  (`tb_ssv_hang_watch`: PC `0xF10983`, data `0x00C3`).
+- Focused bring-up suite and V60 unit suite both **ALL PASS**.
+- With MAME IRQ schedule: ordered writes and complete-state hashes match through
+  the captured RTL horizon (including post-lockout samples).
+- 60M-cycle real-ROM video: `p1=707008`, `nonblack=118457`, cache `1277`,
+  `OVERRUN bg=0 obj=0`, PC `0x00f10575`
+  (`sim_output/realrom_video_timing_pipeline_60m`).
+- Wrapper muxes **core** CE/HS/VS/DE/RGB when diag state 8 (`use_core_video`).
+- Dyna Gear DSW2 defaults map through OSD (`0xFFFD` at status=0: Demo Sounds ON).
 
-Estimated completion against the goal of a fully working, release-quality Dyna
-Gear core:
+Strongest remaining gaps for **real gameplay**:
+
+- No attract-length palette-index / RGB frame CRC vs MAME.
+- No coin/start stimulus scenario or post-credit CPU/video differential.
+- Latent V60 UNHANDLED groups (`59` / `5B` / `5D` / some FP) unused in early
+  boot; may appear in play.
+- ES5506 voices/sample path absent; SDRAM audio ports tied off.
+- Watchdog is a read/kick stub (no board timeout reset).
+- FPGA RAM essentially exhausted (~552/553 blocks) — audio needs a deliberate
+  memory plan, not more BRAM.
+
+Estimated completion against a fully working Dyna Gear core:
 
 | Area | Estimated completion | Confidence |
 |---|---:|---|
-| V60/early boot and SSV bus behavior | 85% | High for the traced early path; low for unexecuted gameplay paths |
-| Video feature implementation | 70% | Medium |
-| Video validation on real hardware | 25% | High that current output is black |
-| ROM packaging and MRA mapping | 90% | High |
-| Controls and DIPs | 40% | Medium |
+| V60 / early boot / SSV bus | 90% | High for traced path; medium for gameplay |
+| Video feature implementation | 75% | Medium |
+| Attract / gameplay video proof (sim) | 35% | Medium |
+| Controls and DIPs (wiring) | 70% | Medium (wired; not scenario-tested) |
+| Coin → play transition (sim) | 10% | High that it is unproven |
 | ES5506 audio | 15% | High |
-| Build, release, and reproducibility | 35% | High |
-| **Overall fully working-core goal** | **about 40%** | Medium |
+| Build / release / HW validation | 40% | High (out of this plan’s critical path) |
+| **Overall playable-core goal** | **~55%** | Medium |
 
-The percentage is deliberately based on the final playable goal, not on lines
-of RTL written. A silent simulation scaffold would score higher, but it is not
-the requested deliverable.
+---
 
-## Severity-ranked findings
+## Subsystem audit
 
-### Critical: physical MiSTer output is black
+### Memory map (`rtl/ssv_core.sv`, `rtl/ssv_pkg.sv`)
 
-On the final audit check, MiSTerClaw reported:
+| CPU range | Function | Placement | Verdict |
+|---|---|---|---|
+| `000000–00ffff` | Work RAM | On-chip | Strong |
+| `100000–13ffff` | Sprite / list RAM | On-chip | Strong |
+| `140000–15ffff` | Palette RAM | On-chip | Strong |
+| `160000–17ffff` | XRAM | SDRAM `@0x1100000` | Strong in sim |
+| `1c0000–1c007f` | Scroll / CRT (+ blanking peek) | Regs | Present |
+| `210000–210011` | Watchdog / DSW / P1 / P2 / SYSTEM | IO mux | Partial (WD stub) |
+| `230000` / `240000` / `260000` | IRQ vector / ack / enable | `ssv_irq` | Vblank only |
+| `300000–30007f` | ES5506 host | Reg file | Partial |
+| `400000–43ffff` | Dyna RAM | SDRAM `@0x1120000` | Strong in sim |
+| `500008–500009` | Extra inputs | Tied `0xFFFF` | OK for Dyna Gear |
+| `f00000–ffffff` | Program ROM | SDRAM read; writes nop-acked | Fixed hang |
 
-```text
-Core: SSV_20260724
-Game: /media/fat/_Arcade/Dyna Gear.mra
+SDRAM layout: program `0–0xfffff`, GFX `0x100000–0xcfffff`, samples
+`0xd00000–0x10fffff`, then XRAM / Dyna RAM windows.
+
+### CPU (V60)
+
+- Production instance uses `FAST_IFETCH=0` (correctness over CPI).
+- Unit suite: 28/28 PASS (`verif/v60/run_v60_verilator.sh`).
+- Open opcode surface (reserved-inst / MAME-UNHANDLED style):
+  - `0x59` decimal — partial
+  - `0x5B` bit-string — partial
+  - `0x5D` bit-field — partial
+  - `0x5C` / `0x5F` FP — validated subset only
+- Early Dyna Gear boot has not required the missing subs; **gameplay may**.
+
+### Bus / hang history
+
+**Fixed in tree:** writes into `sel_rom` waited on `ext_done` without starting
+an SDRAM cycle → permanent stall (`ext_busy=0`), matching prior MiSTer freeze
+at `PC=0x00F1F3D6`. ROM writes are now nop-acked; only ROM reads use SDRAM.
+Gate: `verif/tb_ssv_rom_write_ack.sv`.
+
+### IRQ / timing
+
+- `ssv_irq`: vblank sets `requested[3]`; vectors/enable/ack at documented ports.
+- `ssv_video_timing`: 454×262, active 336×240, vblank IRQ line 240.
+- Sync widths are MiSTer-oriented, not PCB-measured — OK for bring-up; frame
+  CRC work will expose any IRQ-line vs MAME mismatch.
+- ES5506 `sound_irq_n` is produced by the reg block but **not** fed into
+  `ssv_irq` (`irq_set` tied 0). Silent until voices exist; then may matter.
+
+### Video pipeline
+
+Present and integrated when `video_enable=1`:
+
+1. Timing → BG (`ssv_bg_renderer`) + cached sprites (`ssv_cached_sprite_renderer`)
+2. GFX row fetch / decode (packed Q0/Q1 + native Q2)
+3. Four-bank compositor (`ssv_line_buffer4`) with shadow resolve
+4. Palette (`ssv_palette_ram`) → xRGB888 scanout
+5. RGB forced black while `!video_enable` or blanking
+
+**Fixed in tree:** dual-raster tear — diag CE/HS/VS/DE previously always drove
+HDMI while only RGB switched in state 8. Now `use_core_video` muxes all five
+from the core. Gate: `verif/tb_ssv_diag_video.sv`.
+
+Gaps: attract-length pixel proof; legacy `ssv_sprite_renderer` TB still a
+dead-path fail (release uses cached renderer).
+
+### Inputs / DIPs (`Arcade-SSV.sv` → `ssv_core`)
+
+```
+hps_io joysticks / status
+  → player_port / system_port / dsw1 / dsw2
+  → in_p1 / in_p2 / in_system / in_dsw1 / in_dsw2 / in_extra
+  → $21000x / $500008 read mux
 ```
 
-The screenshot was uniformly black. This confirms the intended core and MRA
-were selected, but does not prove that the ROM stream completed or that the core
-left reset.
+- Joystick bit map matches MAME `ssv_joystick` (START, buttons, directions).
+- SYSTEM: COIN1/2, SERVICE1, TILT=0, TEST.
+- DSW2 OSD → active-low bits; status=0 yields `0xFD` (MAME dynagear default).
+- DSW1 coinage hardwired `0xFFFF` (extended defaults / all Off).
+- Pause (`status[7]`) freezes `ce_cpu` — can fake a hang on hardware if left on.
+- **No Verilator TB drives coin/start after VE.**
+
+### Audio (ES5506)
 
-The deployed ROM exists at:
+| Layer | Status |
+|---|---|
+| 4-byte host protocol + 32-voice reg pages | Yes (`ssv_es5506_regs`) |
+| `commit` pulse | Exposed, no consumer |
+| Sample fetch / interpolate / filter / mix | Missing |
+| Core `audio_l` / `audio_r` | Hardwired `0` |
+| Wrapper SDRAM p2–p5 | Tied off |
+| Evidence | Focused reg TB; MAME 879 completed writes / 10s |
+
+Critical for audible play; **not** on the critical path for silent attract /
+silent playable proof in simulation.
 
-```text
-/media/fat/games/mame/dynagear.zip
-```
+### Watchdog
+
+`$210000` returns `0` (MAME `reset16_r` value); kick is a nop. Board-level
+timeout reset is not implemented. Treat as medium until soak shows reliance.
+
+---
+
+## Verification evidence (do not re-run for this audit)
+
+| Gate | Result | Where |
+|---|---|---|
+| `verif/run_bringup_sims.sh` | ALL PASS | diag, loader, loader-core-boot, rom_write_ack, hang_watch |
+| Hang watch VE | `LOCKOUT/VE @ ~53738421` pc=`00f10983` | bring-up logs |
+| Post-VE write diff | ~554k ordered writes match; ~21k post-lockout | `run_post_ve_diff.sh` artifacts |
+| Post-VE hash diff | ~2.0M complete-state hashes match (IRQ schedule) | same |
+| Post-VE boot | `TRACE_CYCLES=120000000` ve=1 | post-ve boot log |
+| Real-ROM 60M video | PASS, nonblack pixels, 0 overruns | `sim_output/realrom_video_timing_pipeline_60m` |
+| V60 units | 28 passed, 0 failed | `verif/v60/run_v60_verilator.sh` |
+| Full-core lint | Large warning set | `sim_output/audit/verilator-lint.log` (non-blocking) |
+
+**Not evidenced:** attract-loop frame CRC; coin/start → gameplay; audible PCM;
+current-RTL MiSTer attract (requires RBF — out of scope here).
+
+### Subsystem status matrix
+
+| Subsystem | Implemented | Sim evidence | Verdict for gameplay |
+|---|---|---|---|
+| MRA / ROM interleave | Yes | Stream hashes | Strong |
+| HPS ROM loader | Yes | Focused + loader-core boot | Strong in sim |
+| SDRAM CPU / GFX path | Yes | Behavioral in core TBs | Strong early |
+| V60 CPU | Substantial | Unit + early MAME match | Strong early; latent gaps |
+| ROM-write bus | Yes | rom_write_ack + hang_watch | Fixed |
+| IRQ / vblank | Yes | VE rise; IRQ-scheduled diff | Strong early |
+| BG / sprite / palette | Present | Focused + realrom pixels | Attract CRC missing |
+| Dual video mux | Yes | diag TB | Fixed in tree |
+| Inputs | Wired | Limited | Needs coin/start scenario |
+| DIPs | OSD → DSW2 | Defaults = MAME | Improved |
+| ES5506 regs | Yes | Focused | Partial |
+| ES5506 voices | No | None | Missing |
+| Attract / gameplay | Partial (VE) | Boot to VE only | **Next milestone** |
+
+---
+
+## Severity-ranked open findings
+
+### Critical (gameplay path)
+
+1. **Attract video not proven at pixel level** — CPU hashes ≠ palette/RGB proof
+   for one attract loop.
+2. **Coin → start → play not proven in sim** — no input schedule, no post-credit
+   differential.
+3. **ES5506 PCM absent** — blocks audible gameplay; defer until visual play works.
+
+### High
+
+4. **V60 latent UNHANDLED** — triage from a gameplay MAME opcode/trace before
+   implementing unused FP/bitstring surface.
+5. **No input-matrix regression** locking P1/P2/SYSTEM/DSW2 vs MAME.
+6. **FPGA RAM headroom** — audio architecture must be time-multiplexed / MLAB;
+   do not add large BRAM voice banks.
+
+### Medium
+
+7. Watchdog timeout not implemented.
+8. ES5506 IRQ not integrated into `ssv_irq`.
+9. DSW1 coinage not OSD-exposed.
+10. Video sync widths approximate vs PCB.
+11. Legacy `ssv_sprite_renderer` TB still failing (dead path).
+
+### Low
+
+12. Full-core Verilator lint debt.
+13. Dirty working tree / incomplete commit freeze relative to `8b8312b`.
+
+### Fixed in tree (preserve)
+
+- ROM-write hang → nop ack + TB.
+- Dual CE/HS/VS after VE → `use_core_video` mux + TB.
+- Hardcoded DSW2 → OSD mapping with MAME defaults.
+- Stale top-level SDC names cleaned.
 
-The deployed MRA correctly uses:
+---
 
-```xml
-<rom index="0" zip="dynagear.zip">
-```
+## What “real gameplay” means here
 
-MiSTer searches the configured MAME ROM paths for this archive. The previous
-`games/mame/dynagear.zip` path and invalid `md5="none"` form are no longer
-present.
+For the companion plan, **real gameplay** means Verilator (and later HW) can:
 
-### Critical: startup diagnostics are held in reset
+1. Cold-boot to a stable **attract** sequence with non-black game pixels.
+2. Accept **coin** and **start** and enter a playable stage/character control
+   loop without CPU/bus hang or renderer overrun.
+3. Keep P1 controls and vblank IRQs coherent with MAME for a short play window.
+4. (Stretch) produce audible ES5506 PCM for the same window.
 
-The top-level wrapper defines:
+Silent but controllable play **counts** as the primary gameplay gate. Audio is
+the secondary gate. Quartus/RBF is explicitly **not** required to declare the
+sim gameplay gates met.
 
-```systemverilog
-wire video_reset = RESET | status[0] | buttons[1] | ~pll_locked;
-wire core_reset = video_reset | ioctl_download | ~rom_loaded | ~sdram_ready_sys;
-```
+## Immediate pointer
 
-The entire `ssv_core`, including its timing generator and pixel clock-enable
-generation, receives `core_reset`. The wrapper then selects startup colors for
-download, ROM-not-loaded, and reset states. Because timing and pixel activity
-are also stopped in those states, these colors are not a reliable visible
-diagnostic.
-
-Consequences:
-
-- Black cannot distinguish a missing ROM from a stuck SDRAM-ready signal.
-- Black cannot distinguish a reset failure from a running core whose video is
-  disabled.
-- The existing color-state logic creates the appearance of observability
-  without ensuring a valid output raster.
-- Remote testing cannot read `LED_USER`, which is the only other direct
-  `rom_loaded` indication.
-
-This is the first issue to correct. Hardware debugging should not continue as a
-sequence of blind RBF builds.
-
-### Critical: game audio is absent
-
-In `rtl/ssv_core.sv`, the final output logic contains:
-
-```systemverilog
-audio_l = 16'sd0;
-audio_r = 16'sd0;
-```
-
-The project has a synthesizable ES5506 register interface, but not the voice
-scheduler, sample-ROM fetch, accumulators, looping, envelopes, filters, channel
-routing, mixer, or PCM output path needed by Dyna Gear.
-
-The JTSFTM `sftm5506` RTL is a useful architecture/reference source but is not a
-drop-in solution: it implements only four voices in its present form and its
-own repository describes it as incomplete. MAME's `es5506.cpp` and
-`vgsound_emu` should remain the behavioral oracles.
-
-The current fit uses 552 of 553 RAM blocks. Audio cannot safely be added by
-replicating large per-voice structures in block RAM. The implementation needs a
-time-multiplexed arithmetic pipeline and a deliberate memory/resource plan,
-preceded by reduction or repacking of existing RAM use.
-
-### High: the successful real-ROM simulation bypasses the failing integration
-
-The 60-million-`clk_sys` regression passed:
-
-```text
-PASS tb_ssv_realrom_video p1=707008 active=6032207 nonblack=118457 pc=00f10575
-```
-
-This is meaningful evidence that the direct core can execute and draw. It is
-not an end-to-end MiSTer boot test. The testbench instantiates `ssv_core`
-directly and supplies behavioral memory ports. It bypasses:
-
-- the MiSTer `emu` wrapper;
-- HPS `ioctl` ROM download;
-- `ssv_rom_loader` integration at the top level;
-- the physical SDRAM controller and arbitration;
-- PLL lock and reset synchronization;
-- the MiSTer video output path;
-- the MRA parser and real archive loading.
-
-At approximately 48.3 MHz, 60 million system clocks are about 1.24 seconds.
-This is not long enough to claim attract-mode operation.
-
-### High: differential traces validate only the available early trace
-
-The current comparison tools report:
-
-```text
-PASS: 1072678 available RTL complete-state hashes match MAME
-PASS: 549383 available RTL writes match MAME
-```
-
-This is excellent evidence for the V60 and bus behavior represented in those
-traces. It does not prove:
-
-- execution after the captured RTL trace ends;
-- attract mode;
-- full interrupt timing;
-- complete sprite/background frame equivalence;
-- input-dependent/gameplay code paths;
-- ES5506 behavior;
-- MiSTer wrapper and SDRAM integration.
-
-The method is correct and should continue, but the trace horizon and compared
-signals must expand until at least one complete attract loop is matched.
-
-### High: V60 opcode groups remain explicitly unimplemented
-
-`rtl/cpu/v60/s32_v60.sv` still reports unimplemented `59`, `5B`, `5D`, and
-floating-point subgroups. The current trace has not required all of them. These
-are latent failures until a complete attract and gameplay trace demonstrates
-that Dyna Gear never executes them, or the needed operations are implemented
-and tested.
-
-### High: release readiness is not enforced by deployment
-
-`tools/report-quartus.ps1` defaults to the copied System 32 revision:
-
-```powershell
-[string]$Revision = "Arcade-SegaSystem32"
-```
-
-Running it without an explicit revision therefore fails to audit the SSV build.
-With `-Revision Arcade-SSV`, it reports the current build as ready. This default
-is a release-tooling defect and risks checking the wrong product.
-
-`tools/deploy-ssv.ps1` hashes and uploads artifacts but does not require a
-successful current fit/timing report before deployment. A manually copied or
-stale RBF can therefore be deployed without a release gate.
-
-Required behavior:
-
-1. SSV must be the default/only revision for SSV scripts.
-2. Deployment must call the readiness checker with `-RequireReady`.
-3. The promoted RBF must be produced by the exact audited source commit.
-4. The manifest must record source commit, dirty-state policy, tool version,
-   report hashes, RBF hash, and MRA hash.
-
-### High: the audited source is not reproducible
-
-The repository is on `main` at `b0fa575`, but the working tree contains many
-modified and untracked source, verification, documentation, and tool files.
-The deployed RBF therefore cannot be reconstructed from the named commit
-without capturing all uncommitted state.
-
-ROMs, generated RBFs, simulator output, and scratch traces are correctly ignored
-and no ROM is tracked. That legal/repository hygiene is good. The source state,
-however, needs to be frozen into reviewable commits before further release
-claims.
-
-### Medium: DIPs are hardcoded
-
-The top-level connects:
-
-```systemverilog
-.in_dsw1(16'hffff), .in_dsw2(16'hfffd)
-```
-
-There is no complete MiSTer menu mapping for Dyna Gear's DIP switches. Controls
-are wired, but coin/start/player buttons, service/test behavior, DIP defaults,
-and reset-on-setting-change still require MAME-referenced simulation and
-physical-controller validation.
-
-### Medium: timing constraints contain stale top-level names
-
-`SSV.sdc` attempts to constrain `CLK_50M`, `RESET`, and `HPS_BUS` as top-level
-ports. The compiled entity is `sys_top`, whose board clock is
-`FPGA_CLK2_50`; the wrapper-level port patterns do not all match at that
-hierarchy. Quartus warns that the `CLK_50M` clock target is ignored.
-
-The framework SDC creates the actual top clocks, and the timing report is
-positive, so this is not proof of an unconstrained design. It is still unsafe
-constraint hygiene. Every exception and multicycle path must be checked with
-Quartus reports showing:
-
-- the intended objects matched;
-- no critical clocks are unconstrained;
-- the V60 multicycle exception applies only to legitimate clock-enabled
-  register-to-register paths;
-- there are no broad false paths hiding functional timing.
-
-### Medium: FPGA memory is effectively exhausted
-
-Current fit summary:
-
-| Resource | Used | Available | Utilization |
-|---|---:|---:|---:|
-| ALMs | 28,409 | 41,910 | 68% |
-| Registers | 18,142 | — | — |
-| Block memory bits | 4,392,722 | 5,662,720 | 78% |
-| RAM blocks | 552 | 553 | 100% rounded |
-| DSP blocks | 39 | 112 | 35% |
-| PLLs | 3 | 6 | 50% |
-
-Only one RAM block remains. The design has useful ALM and DSP headroom, but the
-audio implementation and any additional frame/trace buffers need a new memory
-allocation strategy.
-
-### Medium: video timing is not hardware-verified
-
-`rtl/ssv_video_timing.sv` documents that exact board sync widths were not
-available from MAME's `set_raw` definition and describes the chosen pulses as
-suitable for MiSTer. This may be acceptable for output compatibility, but it is
-not yet validated against SSV hardware or a known-good reference capture.
-
-Visible geometry, blanking, IRQ positions, field behavior, and pixel clock need
-to be treated separately from the arbitrary placement of MiSTer-compatible sync
-pulses.
-
-### Medium: one legacy renderer regression fails
-
-A clean focused Verilator rebuild from the current sources produced:
-
-```text
-PASS bg_renderer
-PASS cached_sprite_renderer
-PASS es5506_regs
-PASS gfx_row_decode
-PASS gfx_row_fetch
-PASS irq
-PASS line_buffer
-PASS line_buffer4
-PASS palette_ram
-PASS rom_loader
-PASS sprite_decode
-FAIL sprite_renderer: plot metadata mismatch
-PASS video_timing
-```
-
-The failing `ssv_sprite_renderer.sv` is not included by `files.qip`; the release
-uses `ssv_cached_sprite_renderer.sv`, whose test passes. This is not evidence
-that the synthesized renderer fails. It is evidence that a dead/legacy module
-and test remain in the tree. They should either be removed with provenance
-preserved, or clearly marked and excluded from the release regression.
-
-### Low/medium: lint debt obscures future defects
-
-Full-core Verilator lint succeeds but emits 191 warnings:
-
-| Warning class | Count |
-|---|---:|
-| WIDTHEXPAND | 80 |
-| UNUSEDSIGNAL | 59 |
-| WIDTHTRUNC | 16 |
-| PINCONNECTEMPTY | 9 |
-| UNUSEDPARAM | 9 |
-| BLKSEQ | 8 |
-| MULTIDRIVEN | 5 |
-| VARHIDDEN | 4 |
-| CASEOVERLAP | 1 |
-
-The `MULTIDRIVEN` warnings are primarily caused by a shared loop variable in
-the four-bank line buffer, not multiple functional drivers. The V60 case
-overlap appears to be intentional ordering of explicit branches before a broad
-group. These should still be rewritten or locally waived with explanations.
-
-The ROM loader's 27-bit-to-24-bit sprite-offset truncation is safe for the
-current stream range, but it should be explicit and asserted so a future layout
-change cannot silently wrap an address.
-
-The complete log is:
-
-```text
-sim_output/audit/verilator-lint.log
-```
-
-### Low/medium: documentation and provenance lag the implementation
-
-The README and architecture documents still say that physical testing has not
-occurred, while a real MiSTer black-screen result now exists. The frozen-video
-issue contains older artifact hashes. The provenance record identifies System
-32 and MAME sources conceptually but does not pin every imported source to an
-exact upstream commit.
-
-All copied/adapted RTL must record:
-
-- upstream URL;
-- exact commit;
-- original path;
-- license;
-- local changes;
-- whether code or only behavior was used.
-
-## ROM and MRA audit
-
-MAME's Dyna Gear definitions in
-`D:\Arcade\AI\MAMESOURCE\mame\src\mame\seta\ssv.cpp` were used as the
-authoritative region/interleave definition.
-
-The MRA stream was independently assembled and verified:
-
-| Stream section | Bytes | MD5 | SHA-256 |
-|---|---:|---|---|
-| Main program | 1,048,576 | `c5aaace0c7acaab5558616cd44407110` | `c29d3bf...c66289` |
-| Sprites/graphics | 12,582,912 | `4873cfbb98e06b74a47dff0c664463ec` | `5738ad3a...eab4f` |
-| Samples | 4,194,304 | `566311a64570e1fdf13601d059d6c2eb` | `2f187215...d31aa` |
-| **Complete stream** | **17,825,792** | `1b3c7ce30ece381d16a5a4fb8bbc90e4` | `d86207cf...55d684` |
-
-Only shortened SHA-256 values are shown above for the component streams because
-the full verification output remains in the audit logs. The deployed artifact
-hashes are:
-
-```text
-RBF SHA-256:
-B187887A89D832F8BE75D8448CD92DF3FB0C9DD50426280E473B36B3B4CB2318
-
-MRA SHA-256:
-C6472457E98EB0C524E82BC1138B1DF5B983A6F27E7AA58E8E1FB872725372BB
-
-ROM ZIP SHA-256:
-E0088D91679FEAFF026DE267919700C86243C3823F5A1FB55894E1DBC4F7109D
-```
-
-The MRA mapping is no longer the leading suspect. The loader/top-level
-handshake on hardware remains unproven.
-
-## Quartus result
-
-With the correct `Arcade-SSV` revision specified, the audit script reports:
-
-- map successful and current;
-- fit successful and current;
-- reported worst timing is positive, including a 0.086 ns worst hold slack;
-- `ReadyToDeploy = true`.
-
-This proves that the current artifact fits and that Quartus reports timing
-closure under the applied constraints. It does not prove functional operation,
-correct constraint coverage, or source/artifact reproducibility.
-
-The flow previously experienced a Quartus STA process failure after printing
-positive slacks. Release automation must distinguish a complete successful STA
-process from useful partial report output and must never promote an RBF after a
-failed required stage.
-
-## Tooling observations
-
-### Verilator
-
-Verilator simulation and lint are operational. Two Windows/MSYS2 integration
-issues were found:
-
-- FST-enabled builds fail because `lz4.h` is not available.
-- Native linking with the installed Verilator library requires
-  `_GLIBCXX_USE_CXX11_ABI=0` to match the library ABI.
-
-These environment requirements should be encoded in one checked-in regression
-script so clean rebuilds do not depend on shell history.
-
-### GTKWave MCP
-
-The GTKWave connection is working, but its current signal extraction does not
-provide useful name-based inspection of the generated traces:
-
-- FST extraction reports that non-VCD input is unsupported.
-- VCD extraction returned identifiers rather than usable hierarchical signal
-  references.
-
-This is a tooling/parser limitation, not a pass result. Waveform-based
-differential debugging should use a generated VCD subset with stable signal
-names, or a scripted trace-to-CSV path, until interactive extraction is
-reliable.
-
-### MiSTerClaw
-
-MiSTerClaw is working for status and screenshot capture. It confirms the core
-and MRA selection and the black output. It does not currently expose the FPGA
-LED, loader state, SDRAM-ready state, CPU PC, or internal video enable.
-
-## Subsystem status matrix
-
-| Subsystem | Implemented | Simulation evidence | Physical MiSTer evidence | Verdict |
-|---|---|---|---|---|
-| MRA/ROM interleave | Yes | Independent byte/hash assembly | Archive present and MRA selected | Strong |
-| HPS ROM loader | RTL present | Focused loader test passes | Completion unknown | Needs observability |
-| SDRAM integration | RTL/framework present | Behavioral ports used in core test | Ready/traffic unknown | Unproven |
-| V60 CPU | Substantial, some groups missing | Early trace/hash/write match | Execution unknown | Strong early, incomplete overall |
-| SSV memory map/IRQ | Substantial | Focused and trace tests pass | Unknown | Strong in simulation |
-| Background renderer | Present | Focused test and real-ROM pixels | Black output | Integration unproven |
-| Sprite renderer | Cached renderer present | Cached test passes | Black output | Integration unproven |
-| Palette/compositor | Present | Focused tests pass | Black output | Integration unproven |
-| Raster timing | Present | Focused test passes | No visible raster | Hardware unproven |
-| Inputs | Basic wiring present | Limited | Not validated | Incomplete |
-| DIPs | Hardcoded | N/A | Not configurable | Incomplete |
-| ES5506 registers | Present | Focused MAME-derived test passes | Unknown | Partial |
-| ES5506 voices/mixer | Absent | None | Silent by construction | Missing |
-| Build/fit | Present | N/A | RBF loads | Fits, process needs gates |
-| Attract/gameplay | Not demonstrated | Trace too short | Not seen | Failing final goal |
-
-## Required implementation order
-
-### 1. Make the first hardware boundary observable
-
-Build a diagnostic wrapper that keeps a valid raster alive whenever the PLL is
-locked, independently of game-core reset. Display a small status overlay or
-unambiguous full-screen state code containing at least:
-
-- PLL locked;
-- `ioctl_download`;
-- ROM byte count and expected terminal address;
-- `rom_loaded`;
-- SDRAM initialization/ready;
-- `core_reset`;
-- V60 reset release;
-- low bits of V60 PC or a heartbeat counter;
-- `video_enable`;
-- frame counter;
-- main/program and graphics read activity;
-- loader/controller error or timeout.
-
-The normal game core can remain reset while this diagnostic timing generator
-runs. This single build should distinguish loader, SDRAM, CPU, and video
-failures without guessing.
-
-### 2. Exercise the real integration in simulation
-
-Add a top-level simulation that drives the same `ioctl` byte stream generated
-from the MRA, instantiates the actual ROM loader and SDRAM arbitration logic,
-waits for the same reset sequence, and checks:
-
-1. exact downloaded byte count;
-2. every region's first/last address and checksum;
-3. `rom_loaded` assertion;
-4. SDRAM-ready behavior;
-5. core reset release;
-6. first V60 fetch and expected early PCs;
-7. first video-enable write;
-8. first non-black visible pixel.
-
-The behavioral SDRAM storage can remain a model, but the controller-facing
-request/acknowledge behavior and all wrapper state must be exercised.
-
-### 3. Extend MAME/RTL differential testing to attract mode
-
-Use one deterministic input and DIP configuration. Compare in increasing cost:
-
-1. V60 PC/opcode and complete-state hashes;
-2. memory and I/O reads/writes;
-3. interrupt request, acknowledge, vector, and scanline;
-4. palette writes;
-5. background/tile/sprite descriptors;
-6. per-scanline object lists;
-7. palette-index frame CRCs;
-8. final RGB frame CRCs and PNG differences.
-
-Run until MAME and RTL complete at least one matching attract loop. On the first
-divergence, reduce to the earliest causal bus/IRQ/render event, fix it, add a
-regression, and repeat. Do not debug from a late screenshot if an earlier
-machine-state divergence exists.
-
-### 4. Close video on real hardware
-
-Once the diagnostic build shows CPU and frame progress:
-
-- verify actual pixel clock and sync geometry;
-- verify `video_enable` is written;
-- compare frame/scanline signatures with Verilator;
-- validate graphics SDRAM addresses and data;
-- validate output color width/order;
-- test rotation/aspect behavior through the MiSTer video chain.
-
-An attract-mode screenshot is a milestone, not the final video sign-off.
-
-### 5. Complete controls and DIPs
-
-Add MRA/menu entries from MAME's Dyna Gear input definition. Validate default
-DIPs, coin, start, both players, all action buttons, service/test, pause, reset,
-and controller remapping. Include a simulation test that checks exact SSV port
-bits for each MiSTer input.
-
-### 6. Implement ES5506 audio under a resource budget
-
-Before adding voices, recover RAM blocks or redesign the current line/sprite
-storage. Then:
-
-- use MAME and `vgsound_emu` as golden behavior;
-- adapt ideas from JTSFTM with license/provenance recorded;
-- store 32-voice state compactly;
-- time-multiplex shared interpolation/envelope/filter arithmetic;
-- implement sample-ROM SDRAM reads and buffering;
-- implement looping, bidirectional mode, IRQs, envelopes, filters, volume,
-  channel routing, clamp/saturation, and any sample modes Dyna Gear uses;
-- compare register transactions and PCM sample streams;
-- validate audio clock/rate, stereo routing, gain, and clipping on MiSTer.
-
-Dyna Gear may not exercise every theoretical ES5506 mode, but every used mode
-must match, and unsupported modes must be documented rather than silently
-misimplemented.
-
-### 7. Make releases reproducible
-
-- Commit the current source in logical, reviewable changes.
-- Pin all upstream source revisions and licenses.
-- Provide one command for a clean full regression.
-- Make all focused tests pass or explicitly remove dead tests.
-- Reduce lint to an explained waiver list.
-- Require clean Quartus map/fit/STA and correct revision.
-- Require MRA stream reconstruction and hash checks.
-- Require a clean or explicitly captured source tree.
-- Generate a manifest tying source, reports, RBF, MRA, and test results
-  together.
-- Deploy only the artifact named in that manifest.
-
-## Release gates
-
-The core should not be called fully working until all of these are true:
-
-- [ ] Real MiSTer shows a stable attract mode from a cold load.
-- [ ] At least one full MAME/RTL attract loop matches at machine-state and
-      frame-signature levels.
-- [ ] Coin/start and complete gameplay controls work for both players.
-- [ ] Service/test mode and configurable DIPs behave correctly.
-- [ ] Backgrounds, normal sprites, tilemap sprites, priorities, shadows,
-      scrolling, flips, and transitions have been visually/frame-diff checked.
-- [ ] ES5506 output is audible and PCM-differential-tested for the modes used.
-- [ ] A representative gameplay session completes without CPU, bus, video,
-      SDRAM, or audio errors.
-- [ ] Full clean Verilator regression passes from source.
-- [ ] Quartus map, fit, and STA complete successfully with reviewed constraint
-      coverage and acceptable margins.
-- [ ] Resource use leaves a documented safety margin.
-- [ ] Source tree and all upstream provenance are committed and reproducible.
-- [ ] Generated RBF and MRA hashes match the release manifest.
-- [ ] The release is tested again on the exact deployed artifacts.
-
-## Immediate next milestone
-
-The next milestone is **not** audio and is **not** another blind MRA edit. It is
-a diagnostic RBF that keeps video timing active and visibly reports loader,
-SDRAM, reset, CPU, and video state. That build will identify the first failing
-physical boundary. The MAME/Verilator differential method can then be applied
-to the correct subsystem until a real attract-mode frame appears.
-
+See [`DYNAGEAR_GAMEPLAY_PLAN.md`](DYNAGEAR_GAMEPLAY_PLAN.md) for the ordered
+sim-first plan to attract + coin/start play. Do not start audio or Quartus work
+until that plan’s visual/input gates pass.

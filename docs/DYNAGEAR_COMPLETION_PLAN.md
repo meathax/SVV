@@ -4,6 +4,11 @@ This is the dependency-ordered plan for taking the current SSV RTL from its
 simulation bring-up state to a reliable, fully playable Dyna Gear core on a
 real MiSTer FPGA.
 
+**Sim-first gameplay (attract + coin/start, no RBF):** follow
+[`DYNAGEAR_GAMEPLAY_PLAN.md`](DYNAGEAR_GAMEPLAY_PLAN.md). Use this document for
+the full release path (audio depth, Quartus, physical MiSTer) after those sim
+gates pass. Status snapshot: [`DYNAGEAR_CORE_AUDIT.md`](DYNAGEAR_CORE_AUDIT.md).
+
 ## Governing debug method
 
 All behavioural fixes in this plan must follow
