@@ -62,8 +62,24 @@ logic        irq_n;
 logic  [7:0] irq_vector;
 logic        cpu_halted;
 
-s32_v60 #(.START_PC(32'hFFFF_FFF0)) cpu (
+// Dedicated wide instruction-fetch port (FAST_IFETCH): prefetch reads whole
+// 8-byte ROM icache lines at clk_sys latency, bypassing the ce-gated 16-bit
+// data adapter that otherwise bottlenecks fetch bandwidth.
+wire        if_req;
+wire [23:0] if_addr;
+logic [63:0] if_data;
+logic        if_served;
+wire         if_ack = if_served;
+
+// FAST_IFETCH defaults on; override at build time (+define+FAST_IFETCH_EN=1'b0)
+// to A/B-test the wide fetch path against the legacy ce-gated adapter fetch.
+`ifndef FAST_IFETCH_EN
+ `define FAST_IFETCH_EN 1'b1
+`endif
+
+s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
+    .if_req(if_req), .if_addr(if_addr), .if_data(if_data), .if_ack(if_ack),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr),
     .bus_size(c_size), .bus_wdata(c_wdata),
     .bus_rdata(c_rdata), .bus_ack(c_ack),
@@ -319,32 +335,189 @@ function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
 endfunction
 
 wire [24:0] ext_phys_addr = external_byte_addr(a);
-wire [19:0] rom_offset = a[19:0];
 logic      ext_busy;
 logic      ext_is_write;
 logic [15:0] ext_read_data;
 logic      ext_done;
+logic      ext_p0_req_r;
+logic [24:1] ext_p0_addr_r;
+
+// Forward-declared: icache lookup suppresses re-arming a completed ROM read
+// while the V60 bus still holds m_req (ack_r driven in the read-mux block).
+logic        ack_r;
+logic [15:0] read_mux;
+logic        read_wait;
+
+// ---------------------------------------------------------------------------
+// V60 ROM fetch via SDRAM p0, through a small I/D cache (from s32):
+//   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
+//   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.
+// p0 is shared with XRAM/Dyna RAM reads — icache fills have priority.
+// ---------------------------------------------------------------------------
+logic        rom_req_r;
+logic [23:1] rom_addr_r;
+logic [63:0] icache_data [0:31];
+logic [12:0] icache_tag  [0:31];      // addr[20:8]
+logic [31:0] icache_valid;
+
+// MAME: map(0xf00000, 0xffffff).rom().region("maincpu", 0) — top window
+// mirrors the FIRST megabyte (reset stub at 0xFFFFF0 → maincpu 0xFFFF0).
+wire [20:0] rom_byte_a = {1'b0, a[19:0]};
+wire [4:0]  ic_line    = rom_byte_a[7:3];
+wire [12:0] ic_tag     = rom_byte_a[20:8];
+wire        ic_hit     = icache_valid[ic_line] && (icache_tag[ic_line] == ic_tag);
+wire [63:0] ic_ldata   = icache_data[ic_line];
+wire [15:0] ic_word    = ic_ldata[{rom_byte_a[2:1], 4'b0000} +: 16];
+
+// Instruction-fetch lookup (whole 8-byte line). Same romhi mirroring as data.
+wire        if_romhi   = (if_addr[23:20] == 4'hF);
+wire [20:0] if_byte_a  = if_romhi ? {1'b0, if_addr[19:3], 3'b000}
+                                  : {if_addr[20:3], 3'b000};
+wire [4:0]  if_line_ix = if_byte_a[7:3];
+wire [12:0] if_tag_ix  = if_byte_a[20:8];
+wire        if_hit     = icache_valid[if_line_ix] &&
+                         (icache_tag[if_line_ix] == if_tag_ix);
+// Pre-align so byte 0 is the frontier byte (if_addr[2:0] = intra-line offset).
+wire [63:0] if_hit_data = icache_data[if_line_ix] >> {if_addr[2:0], 3'b000};
+
+logic [1:0]  fill_word;
+logic        rom_filling;
+logic        rom_ready;
+logic [15:0] rom_word_r;
+logic [4:0]  fill_line;
+logic [12:0] fill_tag;
+logic [17:0] fill_wbase;
+logic        fill_isfetch;
+logic [1:0]  fill_dsel;
+logic [2:0]  fill_foff;
+logic        fill_awaiting;   // waiting for rising ack of current fill word
+logic        fill_need_req;   // issue next word req after stretched ack falls
+logic        sdr_p0_ack_d;
+wire         sdr_p0_ack_rise = sdr_p0_ack && !sdr_p0_ack_d;
+
+wire icache_p0_busy = rom_filling || rom_req_r || (if_req && !if_served);
+
+assign sdr_p0_req  = ext_p0_req_r | rom_req_r;
+assign sdr_p0_addr = ext_p0_req_r ? ext_p0_addr_r
+                                  : {5'b00000, rom_addr_r[19:1]};
 
 always_ff @(posedge clk_sys) begin
     if (rst) begin
-        ext_busy     <= 1'b0;
-        ext_is_write <= 1'b0;
+        rom_req_r     <= 1'b0;
+        rom_filling   <= 1'b0;
+        rom_ready     <= 1'b0;
+        icache_valid  <= 32'h0;
+        if_served     <= 1'b0;
+        fill_awaiting <= 1'b0;
+        fill_need_req <= 1'b0;
+        sdr_p0_ack_d  <= 1'b0;
+    end
+    else begin
+        sdr_p0_ack_d <= sdr_p0_ack;
+        rom_req_r <= 1'b0;
+        rom_ready <= 1'b0;
+        // Re-arm the fetch port once the CPU drops if_req (consumed if_ack).
+        if (!if_req)
+            if_served <= 1'b0;
+
+        if (rom_filling) begin
+            // Wait for stretched ack to drop before the next rising-edge req
+            // (TB models and the real SDRAM both need a fresh req edge).
+            if (fill_need_req && !sdr_p0_ack && !ext_p0_req_r) begin
+                fill_need_req <= 1'b0;
+                fill_awaiting <= 1'b1;
+                rom_req_r     <= 1'b1;
+                rom_addr_r    <= {3'b000, fill_wbase, fill_word};
+            end
+            else if (fill_awaiting && sdr_p0_ack_rise && !ext_p0_req_r) begin
+                icache_data[fill_line][{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
+                fill_awaiting <= 1'b0;
+                if (fill_word == 2'd3) begin
+                    rom_filling <= 1'b0;
+                    icache_tag[fill_line]   <= fill_tag;
+                    icache_valid[fill_line] <= 1'b1;
+                    if (fill_isfetch) begin
+                        if_data   <= ({sdr_p0_dout, icache_data[fill_line][47:0]})
+                                     >> {fill_foff, 3'b000};
+                        if_served <= 1'b1;
+                    end
+                    else begin
+                        rom_word_r <= (fill_dsel == 2'd3) ? sdr_p0_dout
+                                     : icache_data[fill_line][{fill_dsel, 4'b0000} +: 16];
+                        rom_ready  <= 1'b1;
+                    end
+                end
+                else begin
+                    fill_word     <= fill_word + 1'd1;
+                    fill_need_req <= 1'b1;
+                end
+            end
+        end
+        // Instruction fetch has priority (common ROM access path).
+        else if (if_req && !if_served && !ext_p0_req_r) begin
+            if (if_hit) begin
+                if_data   <= if_hit_data;
+                if_served <= 1'b1;
+            end
+            else begin
+                rom_filling   <= 1'b1;
+                fill_isfetch  <= 1'b1;
+                fill_foff     <= if_addr[2:0];
+                fill_line     <= if_line_ix;
+                fill_tag      <= if_tag_ix;
+                fill_wbase    <= if_byte_a[20:3];
+                fill_word     <= 2'd0;
+                fill_awaiting <= 1'b1;
+                fill_need_req <= 1'b0;
+                rom_req_r     <= 1'b1;
+                rom_addr_r    <= {3'b000, if_byte_a[20:3], 2'b00};
+            end
+        end
+        // Data ROM read (constants/tables). See !ack_r note above.
+        else if (m_req && !m_we && sel_rom && !rom_ready && !ack_r &&
+                 !ext_p0_req_r) begin
+            if (ic_hit) begin
+                rom_word_r <= ic_word;
+                rom_ready  <= 1'b1;
+            end
+            else begin
+                rom_filling   <= 1'b1;
+                fill_isfetch  <= 1'b0;
+                fill_line     <= ic_line;
+                fill_tag      <= ic_tag;
+                fill_wbase    <= rom_byte_a[20:3];
+                fill_dsel     <= rom_byte_a[2:1];
+                fill_word     <= 2'd0;
+                fill_awaiting <= 1'b1;
+                fill_need_req <= 1'b0;
+                rom_req_r     <= 1'b1;
+                rom_addr_r    <= {3'b000, rom_byte_a[20:3], 2'b00};
+            end
+        end
+    end
+end
+
+// XRAM / Dyna Gear RAM via SDRAM p0/wr (not cached). Yields to icache fills.
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        ext_busy      <= 1'b0;
+        ext_is_write  <= 1'b0;
         ext_read_data <= 16'hffff;
-        ext_done     <= 1'b0;
-        sdr_p0_req   <= 1'b0;
-        sdr_p0_addr  <= '0;
-        sdr_wr_req   <= 1'b0;
-        sdr_wr_addr  <= '0;
-        sdr_wr_din   <= '0;
-        sdr_wr_be    <= 2'b00;
+        ext_done      <= 1'b0;
+        ext_p0_req_r  <= 1'b0;
+        ext_p0_addr_r <= '0;
+        sdr_wr_req    <= 1'b0;
+        sdr_wr_addr   <= '0;
+        sdr_wr_din    <= '0;
+        sdr_wr_be     <= 2'b00;
     end
     else begin
         ext_done <= 1'b0;
-        if (sdr_p0_ack) begin
-            sdr_p0_req   <= 1'b0;
-            ext_busy     <= 1'b0;
+        if (sdr_p0_ack_rise && ext_p0_req_r) begin
+            ext_p0_req_r  <= 1'b0;
+            ext_busy      <= 1'b0;
             ext_read_data <= sdr_p0_dout;
-            ext_done     <= 1'b1;
+            ext_done      <= 1'b1;
         end
         if (sdr_wr_ack) begin
             sdr_wr_req <= 1'b0;
@@ -352,35 +525,30 @@ always_ff @(posedge clk_sys) begin
             ext_done   <= 1'b1;
         end
 
-        if (m_req && !ext_busy && !ext_done) begin
-            if (!m_we && sel_rom) begin
-                sdr_p0_req  <= 1'b1;
-                sdr_p0_addr <= {5'b00000, rom_offset[19:1]};
-                ext_busy    <= 1'b1;
-                ext_is_write <= 1'b0;
+        // Do not start a new SDRAM beat while ack_r is still posted. With a
+        // sparse ce_cpu the CPU may leave m_req high for several clk_sys
+        // cycles after ext_done; without this guard the TB/hardware can
+        // issue a spurious second fetch and corrupt the outstanding read.
+        // Also wait for the ROM icache to release p0.
+        if (m_req && sel_extmem && !ext_busy && !ext_done && !ack_r &&
+            !icache_p0_busy) begin
+            if (m_we) begin
+                sdr_wr_req   <= 1'b1;
+                sdr_wr_addr  <= ext_phys_addr[24:1];
+                sdr_wr_din   <= m_wdata;
+                sdr_wr_be    <= m_be;
+                ext_is_write <= 1'b1;
+                ext_busy     <= 1'b1;
             end
-            else if (sel_extmem) begin
-                if (m_we) begin
-                    sdr_wr_req  <= 1'b1;
-                    sdr_wr_addr <= ext_phys_addr[24:1];
-                    sdr_wr_din  <= m_wdata;
-                    sdr_wr_be   <= m_be;
-                    ext_is_write <= 1'b1;
-                end
-                else begin
-                    sdr_p0_req  <= 1'b1;
-                    sdr_p0_addr <= ext_phys_addr[24:1];
-                    ext_is_write <= 1'b0;
-                end
-                ext_busy <= 1'b1;
+            else begin
+                ext_p0_req_r  <= 1'b1;
+                ext_p0_addr_r <= ext_phys_addr[24:1];
+                ext_is_write  <= 1'b0;
+                ext_busy      <= 1'b1;
             end
         end
     end
 end
-
-logic [15:0] read_mux;
-logic ack_r;
-logic read_wait;
 wire [7:0] sound_rdata;
 wire sound_host_we = m_req && m_we && sel_sound && !ack_r && m_be[0];
 wire sound_host_re = m_req && !m_we && sel_sound &&
@@ -510,10 +678,16 @@ always_ff @(posedge clk_sys) begin
         read_wait <= 1'b0;
     end
     else if (!ack_r) begin
-        // ROM is read-only in MAME; CPU writes into the program image must
-        // still complete (nop) or a stack/exception push into 0xFxxxxx hangs
-        // forever with ext_busy=0 (no SDRAM cycle is ever started).
-        if ((sel_rom && !m_we) || sel_extmem) begin
+        // ROM reads complete via the icache (rom_ready). ROM writes are nops
+        // (MAME image is read-only) but must still ack or a push into 0xFxxxxx
+        // hangs forever.
+        if (sel_rom && !m_we) begin
+            if (rom_ready) begin
+                read_mux <= rom_word_r;
+                ack_r    <= 1'b1;
+            end
+        end
+        else if (sel_extmem) begin
             if (ext_done) begin
                 read_mux <= ext_is_write ? 16'hffff : ext_read_data;
                 ack_r    <= 1'b1;

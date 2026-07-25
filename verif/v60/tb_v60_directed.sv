@@ -132,8 +132,9 @@ initial begin
     // enable IE in PSW? PSW.IE starts 0. Program doesn't set IE — test IRQ path
     // by forcing PSW.IE for the check (white-box) once main is running:
     @(posedge clk);
-    force cpu.psw_rest = cpu.psw_rest | 32'h0004_0000;
-    release cpu.psw_rest;
+    // White-box IE enable for the IRQ path check. Avoid Verilator /*verilator
+    // force*/ on this packed register (VlForceVec / BADVLTPRAGMA on 5.048).
+    cpu.psw_rest = cpu.psw_rest | 32'h0004_0000;
     irq_vector = 8'h05;
     irq_n = 0;
     repeat (400) @(posedge clk);
