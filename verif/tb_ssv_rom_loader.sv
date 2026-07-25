@@ -10,6 +10,7 @@ logic ioctl_wait, sdr_wr_req, rom_loaded;
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
+logic [26:0] download_max_addr;
 
 ssv_rom_loader dut (.*);
 

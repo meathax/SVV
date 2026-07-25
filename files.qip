@@ -6,6 +6,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE Arcade-SSV.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_diag_video.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_sprite_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_fetch.sv
@@ -14,6 +15,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_line_buffer4.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_bg_renderer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_cached_sprite_renderer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv

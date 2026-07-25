@@ -13,6 +13,10 @@ logic [24:3] sdr_p1_addr;
 logic [63:0] sdr_p1_dout;
 
 logic sdr_wr_req, sdr_wr_ack;
+logic sdr_p4_req, sdr_p4_ack;
+logic [24:1] sdr_p4_addr;
+logic [15:0] sdr_p4_dout;
+
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
@@ -22,8 +26,13 @@ logic signed [15:0] audio_l, audio_r;
 logic [31:0] debug_pc;
 logic [23:0] debug_status;
 byte rom_bytes [0:1048575];
+byte sample_bytes [0:4194303]; // 4 MiB ES5506 bank image
 logic [15:0] external_ram [0:196607]; // SDR 0x1100000..0x115ffff
 string rom_path;
+string samples_path;
+integer samples_fd, samples_count;
+logic require_audio;
+integer audio_peak;
 string trace_path;
 string irq_schedule_path;
 string write_trace_path;
@@ -54,6 +63,8 @@ ssv_core dut (
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
+    .sdr_p4_req(sdr_p4_req), .sdr_p4_addr(sdr_p4_addr),
+    .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack),
     .in_dsw1(16'hffff), .in_dsw2(16'hfffd),
     .in_p1(16'hffff), .in_p2(16'hffff),
     .in_system(16'hffff), .in_extra(16'hffff),
@@ -95,6 +106,7 @@ always_ff @(posedge clk_sys) begin
     sdr_p1_ack <= 0;
     sdr_p1_dout <= 64'd0;
     sdr_wr_ack <= 0;
+    sdr_p4_ack <= 0;
     if (rst) begin
         p0_seen <= 0;
         ack_hold <= 0;
@@ -136,6 +148,19 @@ always_ff @(posedge clk_sys) begin
         end
         if (sdr_p1_req)
             sdr_p1_ack <= 1;
+        if (sdr_p4_req) begin
+            // ES5506 samples live at SDR_SAMPLES_BASE in the download image.
+            p0_byte_addr = {sdr_p4_addr, 1'b0};
+            if (p0_byte_addr >= 25'h0d00000 &&
+                p0_byte_addr < 25'h1100000)
+                sdr_p4_dout <= {
+                    sample_bytes[p0_byte_addr - 25'h0d00000 + 1],
+                    sample_bytes[p0_byte_addr - 25'h0d00000]
+                };
+            else
+                sdr_p4_dout <= 16'd0;
+            sdr_p4_ack <= 1'b1;
+        end
     end
 end
 
@@ -215,6 +240,21 @@ initial begin
     if (read_count != 1048576)
         $fatal(1, "short ROM read: %0d", read_count);
 
+    if (!$value$plusargs("SAMPLES=%s", samples_path))
+        samples_path = "sim_output/rom/samples.bin";
+    samples_fd = $fopen(samples_path, "rb");
+    if (samples_fd == 0) begin
+        $display("WARN: no samples image at %s — ES5506 reads as zero",
+                 samples_path);
+        for (ram_i = 0; ram_i < 4194304; ram_i = ram_i + 1)
+            sample_bytes[ram_i] = 8'd0;
+    end else begin
+        samples_count = $fread(sample_bytes, samples_fd);
+        $fclose(samples_fd);
+        if (samples_count != 4194304)
+            $fatal(1, "short samples read: %0d", samples_count);
+    end
+
     trace_fd = 0;
     trace_last_pc = 32'hffffffff;
     trace_window_start = 0;
@@ -247,7 +287,9 @@ initial begin
         if (write_trace_fd == 0) $fatal(1, "cannot open write trace: %s", write_trace_path);
     end
     require_ve = $test$plusargs("REQUIRE_VE");
+    require_audio = $test$plusargs("REQUIRE_AUDIO");
     ve_seen = 1'b0;
+    audio_peak = 0;
     if (!$value$plusargs("TRACE_CYCLES=%d", trace_cycles))
         trace_cycles = 0;
 
@@ -262,14 +304,25 @@ initial begin
             @(posedge clk_sys);
             if (debug_status[22])
                 ve_seen = 1'b1;
+            if (audio_l < 0) begin
+                if (-audio_l > audio_peak) audio_peak = -audio_l;
+            end else if (audio_l > audio_peak)
+                audio_peak = audio_l;
+            if (audio_r < 0) begin
+                if (-audio_r > audio_peak) audio_peak = -audio_r;
+            end else if (audio_r > audio_peak)
+                audio_peak = audio_r;
         end
         if (trace_fd != 0) $fclose(trace_fd);
         if (write_trace_fd != 0) $fclose(write_trace_fd);
         if (require_ve && !ve_seen)
             $fatal(1, "REQUIRE_VE: video_enable never rose pc=%08x cycles=%0d",
                    debug_pc, trace_cycles);
-        $display("PASS tb_ssv_realrom_boot trace cycles=%0d pc=%08x ve=%b",
-                 trace_cycles, debug_pc, ve_seen);
+        if (require_audio && audio_peak < 32)
+            $fatal(1, "REQUIRE_AUDIO: peak=%0d pc=%08x ve=%b",
+                   audio_peak, debug_pc, ve_seen);
+        $display("PASS tb_ssv_realrom_boot trace cycles=%0d pc=%08x ve=%b audio_peak=%0d",
+                 trace_cycles, debug_pc, ve_seen, audio_peak);
         $finish;
     end
 

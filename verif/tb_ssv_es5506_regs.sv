@@ -32,7 +32,22 @@ ssv_es5506_regs dut (
     .par_data, .irq_set, .irq_voice, .irq_n,
     .current_page, .active_voices, .mode,
     .word_clock_start, .word_clock_end, .lr_clock_end,
-    .commit, .commit_page, .commit_reg, .commit_data
+    .commit, .commit_page, .commit_reg, .commit_data,
+    .eng_voice(5'd0),
+    .eng_cr(), .eng_cr_valid(), .eng_fc(),
+    .eng_lvol(), .eng_lvramp(), .eng_rvol(), .eng_rvramp(),
+    .eng_ecount(), .eng_k1(), .eng_k1ramp(), .eng_k2(), .eng_k2ramp(),
+    .eng_start(), .eng_end(), .eng_accum(),
+    .eng_o4n1(), .eng_o3n1(), .eng_o3n2(),
+    .eng_o2n1(), .eng_o2n2(), .eng_o1n1(),
+    .eng_wr_accum(1'b0), .eng_accum_w(32'd0),
+    .eng_wr_cr(1'b0), .eng_cr_w(16'd0),
+    .eng_wr_filt(1'b0),
+    .eng_o4n1_w(18'd0), .eng_o3n1_w(18'd0), .eng_o3n2_w(18'd0),
+    .eng_o2n1_w(18'd0), .eng_o2n2_w(18'd0), .eng_o1n1_w(18'd0),
+    .eng_wr_env(1'b0),
+    .eng_lvol_w(16'd0), .eng_rvol_w(16'd0),
+    .eng_k1_w(16'd0), .eng_k2_w(16'd0), .eng_ecount_w(9'd0)
 );
 
 task automatic write_byte(input [5:0] address, input [7:0] data);

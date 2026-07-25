@@ -13,6 +13,10 @@ logic sdr_p1_req, sdr_p1_ack;
 logic [24:3] sdr_p1_addr;
 logic [63:0] sdr_p1_dout;
 logic sdr_wr_req, sdr_wr_ack;
+logic sdr_p4_req, sdr_p4_ack;
+logic [24:1] sdr_p4_addr;
+logic [15:0] sdr_p4_dout;
+
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
@@ -68,6 +72,8 @@ ssv_core dut (
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
+    .sdr_p4_req(sdr_p4_req), .sdr_p4_addr(sdr_p4_addr),
+    .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack),
     .in_dsw1(16'hffff), .in_dsw2(16'hfffd),
     .in_p1(16'hffff), .in_p2(16'hffff),
     .in_system(16'hffff), .in_extra(16'hffff),
@@ -80,8 +86,7 @@ always_ff @(posedge clk_sys) begin
     if (rst) begin
         ce_div <= 2'd0;
         ce_cpu <= 1'b0;
-    end
-    else begin
+    end else begin
         ce_cpu <= (ce_div == 2'd2);
         ce_div <= (ce_div == 2'd2) ? 2'd0 : ce_div + 1'd1;
     end
@@ -91,6 +96,7 @@ always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
     sdr_p1_ack <= 1'b0;
     sdr_wr_ack <= 1'b0;
+    sdr_p4_ack <= 1'b0;
 
     if (rst) begin
         p0_seen <= 1'b0;
@@ -251,7 +257,7 @@ initial begin
     if (!$value$plusargs("SPRROM=%s", sprite_path))
         sprite_path = "sim_output/rom/sprites.bin";
     if (!$value$plusargs("CYCLES=%d", max_cycles))
-        max_cycles = 10000000;
+        max_cycles = 70000000;
 
     main_fd = $fopen(main_path, "rb");
     sprite_fd = $fopen(sprite_path, "rb");
@@ -338,6 +344,9 @@ initial begin
              nonzero_palette_entries);
     if (!booted)
         $fatal(1, "V60 did not reach Dyna Gear entry point");
+    if (!debug_status[22])
+        $fatal(1, "video_enable never rose pc=%08x cycles=%0d",
+               debug_pc, cycle_count);
     if (p1_transactions == 0)
         $fatal(1, "renderer issued no graphics SDRAM reads");
     if (active_pixels == 0 || nonblack_pixels == 0)

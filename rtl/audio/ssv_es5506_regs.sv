@@ -31,7 +31,49 @@ module ssv_es5506_regs (
     output logic        commit,
     output logic [6:0]  commit_page,
     output logic [3:0]  commit_reg,
-    output logic [31:0] commit_data
+    output logic [31:0] commit_data,
+
+    // Voice-engine dual port (read current voice; writeback next state).
+    input  logic [4:0]  eng_voice,
+    output logic [15:0] eng_cr,
+    output logic        eng_cr_valid,
+    output logic [16:0] eng_fc,
+    output logic [15:0] eng_lvol,
+    output logic [7:0]  eng_lvramp,
+    output logic [15:0] eng_rvol,
+    output logic [7:0]  eng_rvramp,
+    output logic [8:0]  eng_ecount,
+    output logic [15:0] eng_k1,
+    output logic [8:0]  eng_k1ramp,
+    output logic [15:0] eng_k2,
+    output logic [8:0]  eng_k2ramp,
+    output logic [31:0] eng_start,
+    output logic [31:0] eng_end,
+    output logic [31:0] eng_accum,
+    output logic [17:0] eng_o4n1,
+    output logic [17:0] eng_o3n1,
+    output logic [17:0] eng_o3n2,
+    output logic [17:0] eng_o2n1,
+    output logic [17:0] eng_o2n2,
+    output logic [17:0] eng_o1n1,
+
+    input  logic        eng_wr_accum,
+    input  logic [31:0] eng_accum_w,
+    input  logic        eng_wr_cr,
+    input  logic [15:0] eng_cr_w,
+    input  logic        eng_wr_filt,
+    input  logic [17:0] eng_o4n1_w,
+    input  logic [17:0] eng_o3n1_w,
+    input  logic [17:0] eng_o3n2_w,
+    input  logic [17:0] eng_o2n1_w,
+    input  logic [17:0] eng_o2n2_w,
+    input  logic [17:0] eng_o1n1_w,
+    input  logic        eng_wr_env,
+    input  logic [15:0] eng_lvol_w,
+    input  logic [15:0] eng_rvol_w,
+    input  logic [15:0] eng_k1_w,
+    input  logic [15:0] eng_k2_w,
+    input  logic [8:0]  eng_ecount_w
 );
 
 logic [31:0] write_latch;
@@ -64,6 +106,28 @@ logic [31:0] voice_control_valid;
 wire [1:0] host_byte = host_addr[1:0];
 wire [3:0] host_reg  = host_addr[5:2];
 wire [4:0] voice     = current_page[4:0];
+
+assign eng_cr       = voice_control[eng_voice];
+assign eng_cr_valid = voice_control_valid[eng_voice];
+assign eng_fc       = voice_fc[eng_voice];
+assign eng_lvol     = voice_lvol[eng_voice];
+assign eng_lvramp   = voice_lvramp[eng_voice];
+assign eng_rvol     = voice_rvol[eng_voice];
+assign eng_rvramp   = voice_rvramp[eng_voice];
+assign eng_ecount   = voice_ecount[eng_voice];
+assign eng_k1       = voice_k1[eng_voice];
+assign eng_k1ramp   = voice_k1ramp[eng_voice];
+assign eng_k2       = voice_k2[eng_voice];
+assign eng_k2ramp   = voice_k2ramp[eng_voice];
+assign eng_start    = voice_start[eng_voice];
+assign eng_end      = voice_end[eng_voice];
+assign eng_accum    = voice_accum[eng_voice];
+assign eng_o4n1     = voice_o4n1[eng_voice];
+assign eng_o3n1     = voice_o3n1[eng_voice];
+assign eng_o3n2     = voice_o3n2[eng_voice];
+assign eng_o2n1     = voice_o2n1[eng_voice];
+assign eng_o2n2     = voice_o2n2[eng_voice];
+assign eng_o1n1     = voice_o1n1[eng_voice];
 
 logic [31:0] assembled_write;
 always_comb begin
@@ -237,6 +301,31 @@ always_ff @(posedge clk) begin
 
                 // Any byte-three write commits and clears the shared latch.
                 write_latch <= 32'd0;
+            end
+        end
+
+        // Engine writebacks (host commit in the same cycle wins).
+        if (!(host_we && host_byte == 2'd3)) begin
+            if (eng_wr_accum)
+                voice_accum[eng_voice] <= eng_accum_w;
+            if (eng_wr_cr) begin
+                voice_control[eng_voice] <= eng_cr_w;
+                voice_control_valid[eng_voice] <= 1'b1;
+            end
+            if (eng_wr_filt) begin
+                voice_o4n1[eng_voice] <= eng_o4n1_w;
+                voice_o3n1[eng_voice] <= eng_o3n1_w;
+                voice_o3n2[eng_voice] <= eng_o3n2_w;
+                voice_o2n1[eng_voice] <= eng_o2n1_w;
+                voice_o2n2[eng_voice] <= eng_o2n2_w;
+                voice_o1n1[eng_voice] <= eng_o1n1_w;
+            end
+            if (eng_wr_env) begin
+                voice_lvol[eng_voice]   <= eng_lvol_w;
+                voice_rvol[eng_voice]   <= eng_rvol_w;
+                voice_k1[eng_voice]     <= eng_k1_w;
+                voice_k2[eng_voice]     <= eng_k2_w;
+                voice_ecount[eng_voice] <= eng_ecount_w;
             end
         end
     end

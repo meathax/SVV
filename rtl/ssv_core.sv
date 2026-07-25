@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Dyna Gear SSV board core: V60, memory map, inputs, IRQs and scanline video.
-// ES5506 host/register synthesis is present; voice DSP/audio is in bring-up.
+// ES5506 host/register file + voice PCM engine (bank-2 linear PCM for Dyna Gear).
 
 module ssv_core (
     input              clk_sys,
@@ -22,6 +22,12 @@ module ssv_core (
     output logic [15:0] sdr_wr_din,
     output logic [1:0] sdr_wr_be,
     input              sdr_wr_ack,
+
+    // ES5506 sample fetches (16-bit SDRAM words)
+    output logic       sdr_p4_req,
+    output logic [24:1] sdr_p4_addr,
+    input       [15:0] sdr_p4_dout,
+    input              sdr_p4_ack,
 
     input       [15:0] in_dsw1,
     input       [15:0] in_dsw2,
@@ -301,10 +307,8 @@ end
 
 // Line-buffer indices resolve through the live xRGB888 palette.
 always_comb begin
-    rgb     = (!video_enable || hb || vb) ? 24'h000000 :
-              palette_video_rgb;
-    audio_l = 16'sd0;
-    audio_r = 16'sd0;
+    rgb = (!video_enable || hb || vb) ? 24'h000000 :
+          palette_video_rgb;
 end
 
 function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
@@ -386,6 +390,39 @@ wire sound_commit;
 wire [6:0] sound_commit_page;
 wire [3:0] sound_commit_reg;
 wire [31:0] sound_commit_data;
+wire [4:0] sound_active_voices;
+wire [4:0] eng_voice;
+wire [15:0] eng_cr;
+wire        eng_cr_valid;
+wire [16:0] eng_fc;
+wire [15:0] eng_lvol, eng_rvol, eng_k1, eng_k2;
+wire [7:0]  eng_lvramp, eng_rvramp;
+wire [8:0]  eng_ecount, eng_k1ramp, eng_k2ramp;
+wire [31:0] eng_start, eng_end, eng_accum;
+wire [17:0] eng_o4n1, eng_o3n1, eng_o3n2, eng_o2n1, eng_o2n2, eng_o1n1;
+wire        eng_wr_accum, eng_wr_cr, eng_wr_filt, eng_wr_env;
+wire [31:0] eng_accum_w;
+wire [15:0] eng_cr_w, eng_lvol_w, eng_rvol_w, eng_k1_w, eng_k2_w;
+wire [17:0] eng_o4n1_w, eng_o3n1_w, eng_o3n2_w, eng_o2n1_w, eng_o2n2_w, eng_o1n1_w;
+wire [8:0]  eng_ecount_w;
+wire        eng_irq_set;
+wire [4:0]  eng_irq_voice;
+wire        sound_sample_tick, sound_underrun;
+
+// Same 16 MHz enable ratio as Arcade-SSV.sv CPU CE (48.317307 MHz * 21702/65536).
+logic        ce_snd;
+logic [15:0] snd_acc;
+always_ff @(posedge clk_sys) begin
+    logic [16:0] snd_sum;
+    if (rst) begin
+        snd_acc <= 16'd0;
+        ce_snd  <= 1'b0;
+    end else begin
+        snd_sum = {1'b0, snd_acc} + 17'd21702;
+        ce_snd  <= snd_sum[16];
+        snd_acc <= snd_sum[15:0];
+    end
+end
 
 ssv_es5506_regs sound_registers (
     .clk(clk_sys),
@@ -396,11 +433,11 @@ ssv_es5506_regs sound_registers (
     .host_wdata(m_wdata[7:0]),
     .host_rdata(sound_rdata),
     .par_data(10'd0),
-    .irq_set(1'b0),
-    .irq_voice(5'd0),
+    .irq_set(eng_irq_set),
+    .irq_voice(eng_irq_voice),
     .irq_n(sound_irq_n),
     .current_page(),
-    .active_voices(),
+    .active_voices(sound_active_voices),
     .mode(),
     .word_clock_start(),
     .word_clock_end(),
@@ -408,7 +445,55 @@ ssv_es5506_regs sound_registers (
     .commit(sound_commit),
     .commit_page(sound_commit_page),
     .commit_reg(sound_commit_reg),
-    .commit_data(sound_commit_data)
+    .commit_data(sound_commit_data),
+    .eng_voice(eng_voice),
+    .eng_cr(eng_cr), .eng_cr_valid(eng_cr_valid),
+    .eng_fc(eng_fc),
+    .eng_lvol(eng_lvol), .eng_lvramp(eng_lvramp),
+    .eng_rvol(eng_rvol), .eng_rvramp(eng_rvramp),
+    .eng_ecount(eng_ecount),
+    .eng_k1(eng_k1), .eng_k1ramp(eng_k1ramp),
+    .eng_k2(eng_k2), .eng_k2ramp(eng_k2ramp),
+    .eng_start(eng_start), .eng_end(eng_end), .eng_accum(eng_accum),
+    .eng_o4n1(eng_o4n1), .eng_o3n1(eng_o3n1), .eng_o3n2(eng_o3n2),
+    .eng_o2n1(eng_o2n1), .eng_o2n2(eng_o2n2), .eng_o1n1(eng_o1n1),
+    .eng_wr_accum(eng_wr_accum), .eng_accum_w(eng_accum_w),
+    .eng_wr_cr(eng_wr_cr), .eng_cr_w(eng_cr_w),
+    .eng_wr_filt(eng_wr_filt),
+    .eng_o4n1_w(eng_o4n1_w), .eng_o3n1_w(eng_o3n1_w), .eng_o3n2_w(eng_o3n2_w),
+    .eng_o2n1_w(eng_o2n1_w), .eng_o2n2_w(eng_o2n2_w), .eng_o1n1_w(eng_o1n1_w),
+    .eng_wr_env(eng_wr_env),
+    .eng_lvol_w(eng_lvol_w), .eng_rvol_w(eng_rvol_w),
+    .eng_k1_w(eng_k1_w), .eng_k2_w(eng_k2_w), .eng_ecount_w(eng_ecount_w)
+);
+
+ssv_es5506_voice sound_voices (
+    .clk(clk_sys), .rst(rst), .ce(ce_snd),
+    .active_voices(sound_active_voices),
+    .eng_voice(eng_voice),
+    .eng_cr(eng_cr), .eng_cr_valid(eng_cr_valid),
+    .eng_fc(eng_fc),
+    .eng_lvol(eng_lvol), .eng_lvramp(eng_lvramp),
+    .eng_rvol(eng_rvol), .eng_rvramp(eng_rvramp),
+    .eng_ecount(eng_ecount),
+    .eng_k1(eng_k1), .eng_k1ramp(eng_k1ramp),
+    .eng_k2(eng_k2), .eng_k2ramp(eng_k2ramp),
+    .eng_start(eng_start), .eng_end(eng_end), .eng_accum(eng_accum),
+    .eng_o4n1(eng_o4n1), .eng_o3n1(eng_o3n1), .eng_o3n2(eng_o3n2),
+    .eng_o2n1(eng_o2n1), .eng_o2n2(eng_o2n2), .eng_o1n1(eng_o1n1),
+    .eng_wr_accum(eng_wr_accum), .eng_accum_w(eng_accum_w),
+    .eng_wr_cr(eng_wr_cr), .eng_cr_w(eng_cr_w),
+    .eng_wr_filt(eng_wr_filt),
+    .eng_o4n1_w(eng_o4n1_w), .eng_o3n1_w(eng_o3n1_w), .eng_o3n2_w(eng_o3n2_w),
+    .eng_o2n1_w(eng_o2n1_w), .eng_o2n2_w(eng_o2n2_w), .eng_o1n1_w(eng_o1n1_w),
+    .eng_wr_env(eng_wr_env),
+    .eng_lvol_w(eng_lvol_w), .eng_rvol_w(eng_rvol_w),
+    .eng_k1_w(eng_k1_w), .eng_k2_w(eng_k2_w), .eng_ecount_w(eng_ecount_w),
+    .eng_irq_set(eng_irq_set), .eng_irq_voice(eng_irq_voice),
+    .sdr_req(sdr_p4_req), .sdr_addr(sdr_p4_addr),
+    .sdr_dout(sdr_p4_dout), .sdr_ack(sdr_p4_ack),
+    .audio_l(audio_l), .audio_r(audio_r),
+    .sample_tick(sound_sample_tick), .underrun(sound_underrun)
 );
 
 assign m_rdata = read_mux;
@@ -425,7 +510,10 @@ always_ff @(posedge clk_sys) begin
         read_wait <= 1'b0;
     end
     else if (!ack_r) begin
-        if (sel_rom || sel_extmem) begin
+        // ROM is read-only in MAME; CPU writes into the program image must
+        // still complete (nop) or a stack/exception push into 0xFxxxxx hangs
+        // forever with ext_busy=0 (no SDRAM cycle is ever started).
+        if ((sel_rom && !m_we) || sel_extmem) begin
             if (ext_done) begin
                 read_mux <= ext_is_write ? 16'hffff : ext_read_data;
                 ack_r    <= 1'b1;
@@ -448,7 +536,10 @@ always_ff @(posedge clk_sys) begin
                     ? {2'b00, vb, vb, hb, 11'b0} : scroll_q;
                 sel_io: begin
                     unique case (a[4:1])
-                        4'h0: read_mux <= 16'h0000; // Dyna Gear watchdog/unmapped read
+                        // MAME survarts/dynagear: watchdog_timer reset16_r.
+                        // Kick is a nop here (no board-level timeout reset);
+                        // value is unused by the game but must not stall.
+                        4'h0: read_mux <= 16'h0000;
                         4'h1: read_mux <= in_dsw1;
                         4'h2: read_mux <= in_dsw2;
                         4'h4: read_mux <= in_p1;
