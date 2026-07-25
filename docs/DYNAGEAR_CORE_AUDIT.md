@@ -15,8 +15,8 @@ The core is a **credible Dyna Gear bring-up**, not a playable release.
 | Question | Answer |
 |---|---|
 | Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` |
-| Does early machine state match MAME? | **Yes** — ordered writes + full-state hashes through post-lockout (IRQ schedule) |
-| Has attract mode been proven? | **No** — no attract-length frame CRC / RGB ladder |
+| Does early machine state match MAME? | **Yes** — ordered writes through **8s attract** + hashes through 2.0M retirements (IRQ schedule) |
+| Has attract mode been proven? | **Partial** — 8s scheduled write-match; no frame CRC / RGB ladder yet |
 | Has coin → start → play been proven? | **No** — inputs idle in core TBs; no gameplay scenario |
 | Is audio present? | **No** — ES5506 register file only; PCM hardwired to zero |
 | Overall toward playable Dyna Gear | **~55%** (medium confidence) |
@@ -27,8 +27,9 @@ Strongest verified results:
 - Natural-vblank boot raises lockout/`video_enable` at ~53.7M `clk_sys`
   (`tb_ssv_hang_watch`: PC `0xF10983`, data `0x00C3`).
 - Focused bring-up suite and V60 unit suite both **ALL PASS**.
-- With MAME IRQ schedule: ordered writes and complete-state hashes match through
-  the captured RTL horizon (including post-lockout samples).
+- With MAME IRQ schedule: ordered writes match an **8-second** MAME capture
+  (`869693`/`869699` writes, lockout + `336625` post-lockout) and complete-state
+  hashes match all `2027025` short MAME records.
 - 60M-cycle real-ROM video: `p1=707008`, `nonblack=118457`, cache `1277`,
   `OVERRUN bg=0 obj=0`, PC `0x00f10575`
   (`sim_output/realrom_video_timing_pipeline_60m`).

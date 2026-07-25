@@ -22,10 +22,20 @@ def main() -> int:
     entries: list[int] = []
     with args.trace.open("r", encoding="ascii", errors="replace") as stream:
         for line in stream:
-            if not line.startswith("STATE "):
+            pc: int | None = None
+            if line.startswith("STATE "):
+                fields = line.split()
+                if len(fields) >= 2:
+                    pc = int(fields[1], 16)
+            elif line.startswith("pc="):
+                pc = int(line.split()[0].split("=", 1)[1], 16)
+            elif line.startswith("HASH "):
+                fields = line.split()
+                if len(fields) >= 2:
+                    pc = int(fields[1], 16)
+            else:
                 continue
-            fields = line.split()
-            if len(fields) >= 2 and int(fields[1], 16) == args.handler_pc:
+            if pc == args.handler_pc:
                 entries.append(state_index)
             state_index += 1
 

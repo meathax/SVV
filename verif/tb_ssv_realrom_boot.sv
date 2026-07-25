@@ -22,22 +22,26 @@ logic signed [15:0] audio_l, audio_r;
 logic [31:0] debug_pc;
 logic [23:0] debug_status;
 byte rom_bytes [0:1048575];
+logic [15:0] external_ram [0:196607]; // SDR 0x1100000..0x115ffff
 string rom_path;
 string trace_path;
 string irq_schedule_path;
 string write_trace_path;
-integer fd, read_count, cycles;
+integer fd, read_count, cycles, ram_i;
 integer trace_fd, write_trace_fd, trace_cycles;
 integer irq_schedule_fd, irq_scan_result;
 logic [31:0] trace_last_pc;
 logic [31:0] trace_window_start, trace_window_end;
 logic trace_window_enabled, trace_window_active;
 logic trace_pc_only, trace_hash_only;
+logic require_ve, ve_seen;
 logic diff_irq_enabled, diff_vblank_pulse;
 logic diff_count_started;
 longint unsigned retire_count, next_irq_retire;
 logic p0_seen;
 logic [1:0] ack_hold;
+logic [24:0] p0_byte_addr;
+integer ext_index;
 logic [31:0] first_changed_pc;
 logic booted;
 
@@ -72,12 +76,15 @@ function automatic logic [63:0] v60_state_hash;
     end
 endfunction
 
+// TB uses clk/3. Production Arcade-SSV.sv uses +21702 fractional CE (~16 MHz
+// at 48.317307 MHz). /3 is ~0.7% fast vs MAME and shifts natural vblank IRQs
+// (see docs/issues/DYNAGEAR_NATURAL_IRQ_SKEW.md). Use DIFF_IRQ_SCHEDULE for
+// architectural compares. Unifying TB CE requires a ce-safe memory model.
 always_ff @(posedge clk_sys) begin
     if (rst) begin
         ce_div <= 0;
         ce_cpu <= 0;
-    end
-    else begin
+    end else begin
         ce_cpu <= (ce_div == 2);
         ce_div <= (ce_div == 2) ? 0 : ce_div + 1'd1;
     end
@@ -95,10 +102,19 @@ always_ff @(posedge clk_sys) begin
     else begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1;
-            sdr_p0_dout <= {
-                rom_bytes[{sdr_p0_addr[19:1], 1'b0} + 1],
-                rom_bytes[{sdr_p0_addr[19:1], 1'b0}]
-            };
+            p0_byte_addr = {sdr_p0_addr, 1'b0};
+            if (p0_byte_addr < 25'h0100000)
+                sdr_p0_dout <= {
+                    rom_bytes[p0_byte_addr[19:0] + 1],
+                    rom_bytes[p0_byte_addr[19:0]]
+                };
+            else if (p0_byte_addr >= 25'h1100000 &&
+                     p0_byte_addr < 25'h1160000) begin
+                ext_index = (p0_byte_addr - 25'h1100000) >> 1;
+                sdr_p0_dout <= external_ram[ext_index];
+            end
+            else
+                sdr_p0_dout <= 16'hffff;
             ack_hold <= 2;
         end
         if (!sdr_p0_req) p0_seen <= 0;
@@ -106,7 +122,20 @@ always_ff @(posedge clk_sys) begin
             sdr_p0_ack <= 1;
             ack_hold <= ack_hold - 1'd1;
         end
-        if (sdr_wr_req) sdr_wr_ack <= 1;
+        if (sdr_wr_req) begin
+            sdr_wr_ack <= 1;
+            p0_byte_addr = {sdr_wr_addr, 1'b0};
+            if (p0_byte_addr >= 25'h1100000 &&
+                p0_byte_addr < 25'h1160000) begin
+                ext_index = (p0_byte_addr - 25'h1100000) >> 1;
+                if (sdr_wr_be[0])
+                    external_ram[ext_index][7:0] <= sdr_wr_din[7:0];
+                if (sdr_wr_be[1])
+                    external_ram[ext_index][15:8] <= sdr_wr_din[15:8];
+            end
+        end
+        if (sdr_p1_req)
+            sdr_p1_ack <= 1;
     end
 end
 
@@ -217,17 +246,30 @@ initial begin
         write_trace_fd = $fopen(write_trace_path, "w");
         if (write_trace_fd == 0) $fatal(1, "cannot open write trace: %s", write_trace_path);
     end
+    require_ve = $test$plusargs("REQUIRE_VE");
+    ve_seen = 1'b0;
     if (!$value$plusargs("TRACE_CYCLES=%d", trace_cycles))
         trace_cycles = 0;
+
+    for (ram_i = 0; ram_i < 196608; ram_i = ram_i + 1)
+        external_ram[ram_i] = 16'd0;
 
     rst = 1;
     repeat (8) @(posedge clk_sys);
     rst = 0;
     if (trace_cycles > 0) begin
-        repeat (trace_cycles) @(posedge clk_sys);
+        for (cycles = 0; cycles < trace_cycles; cycles = cycles + 1) begin
+            @(posedge clk_sys);
+            if (debug_status[22])
+                ve_seen = 1'b1;
+        end
         if (trace_fd != 0) $fclose(trace_fd);
         if (write_trace_fd != 0) $fclose(write_trace_fd);
-        $display("PASS tb_ssv_realrom_boot trace cycles=%0d pc=%08x", trace_cycles, debug_pc);
+        if (require_ve && !ve_seen)
+            $fatal(1, "REQUIRE_VE: video_enable never rose pc=%08x cycles=%0d",
+                   debug_pc, trace_cycles);
+        $display("PASS tb_ssv_realrom_boot trace cycles=%0d pc=%08x ve=%b",
+                 trace_cycles, debug_pc, ve_seen);
         $finish;
     end
 
@@ -237,6 +279,8 @@ initial begin
     while (!booted && cycles < 200000) begin
         @(posedge clk_sys);
         cycles = cycles + 1;
+        if (debug_status[22])
+            ve_seen = 1'b1;
         if (debug_pc != 32'hfffffff0 && debug_pc != 0 && first_changed_pc == 0)
             first_changed_pc = debug_pc;
         if (debug_pc[31:24] == 8'h00 && debug_pc != 0)
@@ -245,8 +289,19 @@ initial begin
     if (!booted)
         $fatal(1, "V60 did not leave reset ROM window: pc=%08x first=%08x status=%06x",
                debug_pc, first_changed_pc, debug_status);
-    $display("PASS tb_ssv_realrom_boot pc=%08x first=%08x cycles=%0d",
-             debug_pc, first_changed_pc, cycles);
+    if (require_ve) begin
+        while (!ve_seen && cycles < 70000000) begin
+            @(posedge clk_sys);
+            cycles = cycles + 1;
+            if (debug_status[22])
+                ve_seen = 1'b1;
+        end
+        if (!ve_seen)
+            $fatal(1, "REQUIRE_VE: video_enable never rose pc=%08x cycles=%0d",
+                   debug_pc, cycles);
+    end
+    $display("PASS tb_ssv_realrom_boot pc=%08x first=%08x cycles=%0d ve=%b",
+             debug_pc, first_changed_pc, cycles, ve_seen);
     $finish;
 end
 endmodule
