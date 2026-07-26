@@ -3,6 +3,7 @@
 // Plusargs:
 //   +MAINROM= +SPRROM= +FRAME_CRC=path +FRAMES=N +SOAK_FRAMES=N
 //   +SCENARIO=attract_idle|coin_start_p1
+//   +DUMP_FRAME_DIAG (IRQ/list/scroll/pal snapshots at vb-edge)
 //   +USE_FRAC_CE (default on) uses ssv_tb_ce_cpu
 
 module tb_ssv_frame_crc;
@@ -56,11 +57,15 @@ integer stuck, last_pc_i;
 logic [31:0] last_pc;
 integer bg_overruns, obj_overruns;
 integer dump_x, dump_y, dump_count;
-logic dump_pixels;
+logic dump_pixels, dump_frame_diag;
 string irq_schedule_path;
 integer irq_schedule_fd, irq_scan_result;
 logic diff_irq_enabled, diff_vblank_pulse, diff_count_started;
 longint unsigned retire_count, next_irq_retire;
+longint unsigned last_vb_retire, last_irq_entry_retire;
+integer irq_entries_post_ve, vb_pulses_post_ve;
+integer diag_i;
+logic [31:0] list_crc, scroll_crc, spr8k_crc, pal_crc;
 
 ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
@@ -241,6 +246,8 @@ always_ff @(posedge clk_sys) begin
         obj_overruns <= 0;
         stuck <= 0;
         last_pc <= 32'hffffffff;
+        irq_entries_post_ve <= 0;
+        vb_pulses_post_ve <= 0;
     end else begin
         if (debug_status[22])
             ve_seen <= 1'b1;
@@ -283,6 +290,54 @@ always_ff @(posedge clk_sys) begin
                 if (post_ve_frames == 0)
                     $display("FRAME0 px=%0d idx=%08x rgb=%08x",
                              px_count, ~idx_crc, ~rgb_crc);
+                if (dump_frame_diag && post_ve_frames < 4) begin
+                    list_crc = 32'hffffffff;
+                    spr8k_crc = 32'hffffffff;
+                    for (diag_i = 0; diag_i < 8192; diag_i = diag_i + 1) begin
+                        spr8k_crc = ssv_crc32_byte(
+                            ssv_crc32_byte(spr8k_crc,
+                                dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
+                            dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                        if (diag_i < 512)
+                            list_crc = ssv_crc32_byte(
+                                ssv_crc32_byte(list_crc,
+                                    dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
+                                dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                    end
+                    scroll_crc = 32'hffffffff;
+                    for (diag_i = 0; diag_i < 64; diag_i = diag_i + 1) begin
+                        scroll_crc = ssv_crc32_byte(
+                            ssv_crc32_byte(scroll_crc,
+                                dut.scroll[diag_i][7:0]),
+                            dut.scroll[diag_i][15:8]);
+                    end
+                    pal_crc = 32'hffffffff;
+                    for (diag_i = 0; diag_i < 512; diag_i = diag_i + 1) begin
+                        pal_crc = ssv_crc32_byte(
+                            ssv_crc32_byte(pal_crc,
+                                dut.palette_ram.even_words.sim_peek(
+                                    diag_i[14:0])[7:0]),
+                            dut.palette_ram.even_words.sim_peek(
+                                diag_i[14:0])[15:8]);
+                        pal_crc = ssv_crc32_byte(
+                            ssv_crc32_byte(pal_crc,
+                                dut.palette_ram.odd_words.sim_peek(
+                                    diag_i[14:0])[7:0]),
+                            dut.palette_ram.odd_words.sim_peek(
+                                diag_i[14:0])[15:8]);
+                    end
+                    $display("FRAMEDIAG f=%0d retire=%0d dretire=%0d irq_entries=%0d vb_pulses=%0d list512=%08x spr8k=%08x scroll64=%08x pal512=%08x scr0=%04x scr1=%04x scr3=%04x scr53=%04x scr56=%04x scr58=%04x scr59=%04x scr61=%04x cache_cnt=%0d pc=%08x",
+                             post_ve_frames, retire_count,
+                             (last_vb_retire == 0) ? 0 :
+                                (retire_count - last_vb_retire),
+                             irq_entries_post_ve, vb_pulses_post_ve,
+                             ~list_crc, ~spr8k_crc, ~scroll_crc, ~pal_crc,
+                             dut.scroll[0], dut.scroll[1], dut.scroll[3],
+                             dut.scroll[53], dut.scroll[56], dut.scroll[58],
+                             dut.scroll[59], dut.scroll[61],
+                             dut.sprite_renderer.cache_count, debug_pc);
+                    last_vb_retire = retire_count;
+                end
                 apply_inputs(post_ve_frames);
                 post_ve_frames <= post_ve_frames + 1;
                 frame_idx <= frame_idx + 1;
@@ -292,6 +347,52 @@ always_ff @(posedge clk_sys) begin
             px_count <= 0;
         end
         vb_d <= vb;
+
+        if (ve_seen && dut.vblank_pulse) begin
+            vb_pulses_post_ve <= vb_pulses_post_ve + 1;
+            // Snapshot descriptors at cache_start for the upcoming frame.
+            if (dump_frame_diag && post_ve_frames < 3) begin
+                list_crc = 32'hffffffff;
+                spr8k_crc = 32'hffffffff;
+                for (diag_i = 0; diag_i < 8192; diag_i = diag_i + 1) begin
+                    spr8k_crc = ssv_crc32_byte(
+                        ssv_crc32_byte(spr8k_crc,
+                            dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
+                        dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                    if (diag_i < 512)
+                        list_crc = ssv_crc32_byte(
+                            ssv_crc32_byte(list_crc,
+                                dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
+                            dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                end
+                scroll_crc = 32'hffffffff;
+                for (diag_i = 0; diag_i < 64; diag_i = diag_i + 1) begin
+                    scroll_crc = ssv_crc32_byte(
+                        ssv_crc32_byte(scroll_crc,
+                            dut.scroll[diag_i][7:0]),
+                        dut.scroll[diag_i][15:8]);
+                end
+                $display("CACHESNAP retire=%0d next_f=%0d list512=%08x spr8k=%08x scroll64=%08x scr0=%04x scr1=%04x scr3=%04x",
+                         retire_count, post_ve_frames,
+                         ~list_crc, ~spr8k_crc, ~scroll_crc,
+                         dut.scroll[0], dut.scroll[1], dut.scroll[3]);
+            end
+        end
+
+        if (ce_cpu && dut.cpu.st == 7'd3 && debug_pc == 32'h00f1_1124) begin
+            if (ve_seen)
+                irq_entries_post_ve <= irq_entries_post_ve + 1;
+            if (dump_frame_diag &&
+                (last_irq_entry_retire == 0 ||
+                 retire_count != last_irq_entry_retire)) begin
+                $display("IRQENTRY retire=%0d dretire=%0d ve=%0d f=%0d",
+                         retire_count,
+                         (last_irq_entry_retire == 0) ? 0 :
+                            (retire_count - last_irq_entry_retire),
+                         ve_seen, post_ve_frames);
+                last_irq_entry_retire = retire_count;
+            end
+        end
 
         if (dut.renderer_line_start && dut.bg_busy)
             bg_overruns <= bg_overruns + 1;
@@ -323,7 +424,12 @@ initial begin
     if (!$value$plusargs("CYCLES=%d", max_cycles))
         max_cycles = 200000000;
     dump_pixels = $test$plusargs("DUMP_PIXELS");
+    dump_frame_diag = $test$plusargs("DUMP_FRAME_DIAG");
     dump_count = 0;
+    last_vb_retire = 0;
+    last_irq_entry_retire = 0;
+    irq_entries_post_ve = 0;
+    vb_pulses_post_ve = 0;
     diff_irq_enabled = 1'b0;
     irq_schedule_fd = 0;
     if ($value$plusargs("DIFF_IRQ_SCHEDULE=%s", irq_schedule_path)) begin

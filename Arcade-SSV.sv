@@ -396,7 +396,7 @@ ssv_core core (
 
 // Set ENABLE_DIAG_VIDEO=0 before a release RBF to strip the second raster
 // timing path (~200 ALUTs + routing). Keep 1 for bring-up color bars.
-localparam bit ENABLE_DIAG_VIDEO = 1'b1;
+localparam bit ENABLE_DIAG_VIDEO = 1'b0;
 
 wire diag_rst = ~pll_locked;
 wire cpu_halted = debug_status[23];

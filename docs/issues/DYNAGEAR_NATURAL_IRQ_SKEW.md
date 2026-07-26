@@ -23,7 +23,7 @@ schedule forced, ordered writes and hashes match through multi-second attract.
 | Natural writes | `DIVERGE write=532907` stack word `0x7904` data `7500` vs `7b00` (idle PC high byte) |
 | Natural hashes | `DIVERGE state=731058` MAME `pc=00f11124` vs RTL still in idle `00f1057b` |
 | RTL first IRQ | retirement `733486` (**+2428** vs MAME `731058`) |
-| RTL steady IRQ period | ~`32086` instr/frame |
+| RTL steady IRQ period | ~`32760` instr/frame under `ssv_tb_ce_cpu` (+21702); older ~`32086` was `/3` CE |
 | MAME IRQ period | ~`33230` instr/frame (= CPI-8 ideal at 16 MHz / 7.159 MHz) |
 | Scheduled writes (8s MAME) | PASS through available RTL horizon (see session notes) |
 | Scheduled hashes | PASS all `2027025` short MAME complete-state hashes |
@@ -98,3 +98,7 @@ scheduled horizon, or any remaining skew is documented as
 - Attract **frame 0** CRC now matches MAME under natural CE.
 - Full multi-second natural write/hash horizon and full attract-loop CRC remain
   open (see `DYNAGEAR_ATTRACT_FRAME_CRC.md`).
+- 2026-07-26 frame-CRC diag: first IRQ entry retire `730673` (**−385** vs MAME
+  `731058`); post-VE steady period ~`32760` (still ~470 short of `33230`).
+  Attract frame≥1 residual is not explained by per-frame list/scroll motion —
+  see attract CRC issue for palette/`cache_count` evidence.

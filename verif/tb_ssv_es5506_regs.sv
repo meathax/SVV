@@ -82,6 +82,10 @@ begin
         host_addr = {reg_index, byte_index[1:0]};
         host_re   = 1'b1;
         @(posedge clk);
+        // Byte 0 steals the MLAB port; read_latch fills one cycle later.
+        if (byte_index == 0) begin
+            @(posedge clk);
+        end
         #1;
         data[31 - byte_index * 8 -: 8] = host_rdata;
         @(negedge clk);

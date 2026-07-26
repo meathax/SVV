@@ -27,6 +27,7 @@ CORE=(
   rtl/video/ssv_palette_ram.sv rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv rtl/video/ssv_cached_sprite_renderer.sv
+  rtl/audio/ssv_mlab32_sdp.sv
   rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
@@ -38,7 +39,8 @@ echo "=== BUILD/RUN tb_ssv_es5506_regs ==="
 rm -rf "$OUT/regs"; mkdir -p "$OUT/regs"
 verilator "${VFLAGS[@]}" --top-module tb_ssv_es5506_regs \
   --Mdir "$OUT/regs" -o tb_ssv_es5506_regs \
-  rtl/ssv_pkg.sv rtl/audio/ssv_es5506_regs.sv verif/tb_ssv_es5506_regs.sv \
+  rtl/ssv_pkg.sv rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv \
+  verif/tb_ssv_es5506_regs.sv \
   >"$OUT/regs/build.log" 2>&1
 "$OUT/regs/tb_ssv_es5506_regs" | tee "$OUT/regs/run.log"
 

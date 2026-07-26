@@ -34,7 +34,7 @@ CORE=(
   rtl/video/ssv_palette_ram.sv rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv rtl/video/ssv_cached_sprite_renderer.sv
-  rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   rtl/ssv_core.sv

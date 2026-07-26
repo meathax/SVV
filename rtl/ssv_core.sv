@@ -553,9 +553,11 @@ always_ff @(posedge clk_sys) begin
     end
 end
 wire [7:0] sound_rdata;
+// ES5506 MLAB banks need 2 wait cycles: steal addr, then latch q → read_latch.
+logic [1:0] sound_rd_cnt;
 wire sound_host_we = m_req && m_we && sel_sound && !ack_r && m_be[0];
 wire sound_host_re = m_req && !m_we && sel_sound &&
-                     !ack_r && !read_wait;
+                     !ack_r && (sound_rd_cnt == 2'd0);
 wire sound_irq_n;
 wire sound_commit;
 wire [6:0] sound_commit_page;
@@ -688,13 +690,15 @@ end
 
 always_ff @(posedge clk_sys) begin
     if (rst) begin
-        ack_r     <= 1'b0;
-        read_wait <= 1'b0;
-        read_mux  <= 16'hffff;
+        ack_r        <= 1'b0;
+        read_wait    <= 1'b0;
+        sound_rd_cnt <= 2'd0;
+        read_mux     <= 16'hffff;
     end
     else if (!m_req) begin
-        ack_r     <= 1'b0;
-        read_wait <= 1'b0;
+        ack_r        <= 1'b0;
+        read_wait    <= 1'b0;
+        sound_rd_cnt <= 2'd0;
     end
     else if (!ack_r) begin
         // ROM reads complete via the icache (rom_ready). ROM writes are nops
@@ -714,6 +718,15 @@ always_ff @(posedge clk_sys) begin
         end
         else if (m_we) begin
             ack_r <= 1'b1;
+        end
+        else if (sel_sound) begin
+            if (sound_rd_cnt < 2'd2)
+                sound_rd_cnt <= sound_rd_cnt + 2'd1;
+            else begin
+                sound_rd_cnt <= 2'd0;
+                ack_r        <= 1'b1;
+                read_mux     <= {8'h00, sound_rdata};
+            end
         end
         else if (!read_wait) begin
             read_wait <= 1'b1;
@@ -740,7 +753,6 @@ always_ff @(posedge clk_sys) begin
                         default: read_mux <= 16'hffff;
                     endcase
                 end
-                sel_sound: read_mux <= {8'h00, sound_rdata};
                 sel_extra: read_mux <= in_extra;
                 default:   read_mux <= 16'hffff;
             endcase

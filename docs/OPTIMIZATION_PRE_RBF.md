@@ -13,25 +13,31 @@ Last full fit before this pass: **99% ALMs**, **100% M10K**, voice setup
 | Icache + scroll `ramstyle=MLAB` | Pull distributed RAM out of ALMs |
 | Sprite `CACHE_ENTRIES` 2048→1536 | Free M10K (attract used ~1277) |
 | QSF `BALANCED` + no reg duplication | Recover ALMs vs HIGH PERFORMANCE SPEED |
-| `ENABLE_DIAG_VIDEO` localparam | Set `0` before release RBF to strip diag raster |
+| `ENABLE_DIAG_VIDEO=0` | Strip diag raster for release candidate |
+| ES5506 banks → `ssv_mlab32_sdp` (altsyncram MLAB) | Inference failed on array-in-always_ff; map rose to ~42.4k ALMs |
 
-Gates re-run green: `run_audio_sims.sh`, `run_bringup_sims.sh`, Wave C frame 0.
+Gates re-run green: `run_audio_sims.sh` (regs/voice/realrom audio).
+
+## Map-only history
+
+| Build | Est. ALMs | Notes |
+|---|---|---|
+| Pre-regfile serialize | ~41,115 | Still fat; dual async reads |
+| Host-steal single-port arrays | **42,381** | Worse — most banks `can't infer memory` |
+| Explicit `ssv_mlab32_sdp` | **33,785** | −8.6k vs failed-infer map; regs ~21.2k |
 
 ## Next steps before building an RBF
 
-1. **Map-only Quartus** (`tools/build-ssv.ps1 -MapOnly`) — confirm ALM estimate
-   drops below ~90% and M10K ≤552. Do not fit/assemble yet if map is still ≥97%.
-2. **ES5506 regfile single-port / true MLAB** (`rtl/audio/ssv_es5506_regs.sv`) —
-   host+eng dual async reads currently duplicate MLABs as logic (~2–4k ALMs).
-   Serialize or register one port.
-3. **Full fit + STA** — require voice slack ≥0 with the narrowed MCP; re-check
-   sprite cache→decode path (`DYNAGEAR_FROZEN_VIDEO.md`).
-4. **Set `ENABLE_DIAG_VIDEO=0`** for the candidate bitstream.
-5. **`report-quartus.ps1 -RequireReady`** must be true before any deploy.
-6. **Optional area:** prove unused V60 FP/bitstring/decimal via MAME opcode
+1. ~~**Map-only after MLAB wrapper**~~ — done: **~33.8k ALMs** (~80% of 41.9k),
+   all 20 voice banks via `altsyncram` MLAB. Fit is now worth trying.
+2. **Full fit + STA** — voice slack ≥0 with narrowed MCP; re-check sprite
+   cache→decode (`DYNAGEAR_FROZEN_VIDEO.md`). Still no RBF until Ready.
+3. **`report-quartus.ps1 -RequireReady`** must be true before any deploy.
+4. **Optional area:** prove unused V60 FP/bitstring/decimal via MAME opcode
    hit list, then parameter-gate; shrink `LINE_SLOTS` if overflow never trips.
-7. **Sim residual (parallel):** attract CRC frame≥1 / IRQ period skew — not an
+5. **Sim residual (parallel):** attract CRC frame≥1 / IRQ period skew — not an
    RBF blocker for silent attract smoke, but needed for CRC-closed release.
+   See `docs/issues/DYNAGEAR_ATTRACT_FRAME_CRC.md`.
 
 ## Explicit non-goals until ReadyToDeploy
 

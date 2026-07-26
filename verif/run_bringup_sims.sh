@@ -25,7 +25,7 @@ CORE_FILES=(
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_cached_sprite_renderer.sv
-  rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
@@ -44,7 +44,7 @@ SSV_CORE_FILES=(
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_cached_sprite_renderer.sv
-  rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
