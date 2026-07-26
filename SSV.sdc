@@ -18,10 +18,47 @@ set_multicycle_path -setup 3 \
 set_multicycle_path -hold 2 \
     -from $v60_registers -to $v60_registers
 
-# ES5506 voice engine shares the same ~16 MHz CE as the CPU. Filter/mix
-# stages are CE-gated register updates inside ssv_es5506_voice.
-set voice_registers [get_registers {*|ssv_es5506_voice:sound_voices|*}]
+# ES5506 voice CE domain (~16 MHz, same ratio as V60). Only CE-updated
+# registers get the multicycle; SDRAM handshake regs (sdr_*, got_ack,
+# wait_cnt, s1/s2) stay single-cycle on clk_sys.
+set voice_ce_registers [get_registers {*|ssv_es5506_voice:sound_voices|state*}]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|voice_i*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|proc_*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|mix_*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|audio_*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|cr*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|fc*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|lvol*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|rvol*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|accum*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|o*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|eng_*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|filtcount*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|vstart*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|vend*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|k1*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|k2*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|ecount*}]]
+set voice_ce_registers [add_to_collection $voice_ce_registers \
+    [get_registers {*|ssv_es5506_voice:sound_voices|sample_tick*}]]
 set_multicycle_path -setup 3 \
-    -from $voice_registers -to $voice_registers
+    -from $voice_ce_registers -to $voice_ce_registers
 set_multicycle_path -hold 2 \
-    -from $voice_registers -to $voice_registers
+    -from $voice_ce_registers -to $voice_ce_registers

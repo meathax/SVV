@@ -115,7 +115,7 @@ wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
 wire sel_rom     = (a >= 24'hf00000);
 wire sel_extmem  = sel_xram | sel_dynaram;
 
-logic [15:0] scroll [0:63];
+(* ramstyle = "MLAB, no_rw_check" *) logic [15:0] scroll [0:63];
 
 wire [14:0] wram_addr = a[15:1];
 wire [16:0] spr_addr  = a[17:1];
@@ -359,8 +359,8 @@ logic        read_wait;
 // ---------------------------------------------------------------------------
 logic        rom_req_r;
 logic [23:1] rom_addr_r;
-logic [63:0] icache_data [0:31];
-logic [12:0] icache_tag  [0:31];      // addr[20:8]
+(* ramstyle = "MLAB, no_rw_check" *) logic [63:0] icache_data [0:31];
+(* ramstyle = "MLAB, no_rw_check" *) logic [12:0] icache_tag  [0:31]; // addr[20:8]
 logic [31:0] icache_valid;
 
 // MAME: map(0xf00000, 0xffffff).rom().region("maincpu", 0) — top window
@@ -580,20 +580,9 @@ wire        eng_irq_set;
 wire [4:0]  eng_irq_voice;
 wire        sound_sample_tick, sound_underrun;
 
-// Same 16 MHz enable ratio as Arcade-SSV.sv CPU CE (48.317307 MHz * 21702/65536).
-logic        ce_snd;
-logic [15:0] snd_acc;
-always_ff @(posedge clk_sys) begin
-    logic [16:0] snd_sum;
-    if (rst) begin
-        snd_acc <= 16'd0;
-        ce_snd  <= 1'b0;
-    end else begin
-        snd_sum = {1'b0, snd_acc} + 17'd21702;
-        ce_snd  <= snd_sum[16];
-        snd_acc <= snd_sum[15:0];
-    end
-end
+// Share the CPU enable so voice and V60 stay phase-aligned (saves a second
+// fractional accumulator and matches board 16 MHz OTTO / V60 clocking).
+wire ce_snd = ce_cpu;
 
 ssv_es5506_regs sound_registers (
     .clk(clk_sys),

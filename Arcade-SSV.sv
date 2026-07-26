@@ -394,7 +394,10 @@ ssv_core core (
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
 
-// Diagnostic raster stays alive on PLL lock even while the game core is reset.
+// Set ENABLE_DIAG_VIDEO=0 before a release RBF to strip the second raster
+// timing path (~200 ALUTs + routing). Keep 1 for bring-up color bars.
+localparam bit ENABLE_DIAG_VIDEO = 1'b1;
+
 wire diag_rst = ~pll_locked;
 wire cpu_halted = debug_status[23];
 wire video_enable = debug_status[22];
@@ -407,46 +410,62 @@ wire use_core_video;
 logic [15:0] diag_frame;
 logic diag_vs_d;
 
-always_ff @(posedge clk_sys) begin
-    if (diag_rst) begin
+generate
+if (ENABLE_DIAG_VIDEO) begin : g_diag
+    always_ff @(posedge clk_sys) begin
+        if (diag_rst) begin
+            diag_frame <= 16'd0;
+            diag_vs_d <= 1'b1;
+        end
+        else begin
+            diag_vs_d <= diag_vs;
+            if (diag_vs_d && !diag_vs)
+                diag_frame <= diag_frame + 1'd1;
+        end
+    end
+
+    ssv_diag_video diag_video (
+        .clk(clk_sys), .rst(diag_rst),
+        .show_core(1'b1), .core_rgb(core_rgb),
+        .pll_locked(pll_locked),
+        .ioctl_download(ioctl_download),
+        .rom_loaded(rom_loaded),
+        .sdram_ready(sdram_ready_sys),
+        .video_reset(video_reset),
+        .core_reset(core_reset),
+        .video_enable(video_enable),
+        .cpu_halted(cpu_halted),
+        .cpu_pause(status[7]),
+        .service_mode(status[6]),
+        .irq_n(irq_n_dbg),
+        .irq_enabled(irq_enabled),
+        .ext_busy(ext_busy),
+        .rom_sig_ok(rom_sig_ok),
+        .probe_done(probe_done),
+        .probe_sig0(probe_sig0),
+        .probe_sig1(probe_sig1),
+        .debug_pc(debug_pc),
+        .ioctl_addr(ioctl_addr),
+        .download_max_addr(download_max_addr),
+        .frame_count(diag_frame),
+        .rgb(diag_rgb), .ce_pixel(diag_ce),
+        .hs(diag_hs), .vs(diag_vs), .hb(diag_hb), .vb(diag_vb),
+        .use_core_video(use_core_video)
+    );
+end else begin : g_no_diag
+    assign diag_rgb = 24'd0;
+    assign diag_ce = 1'b0;
+    assign diag_hs = 1'b0;
+    assign diag_vs = 1'b0;
+    assign diag_hb = 1'b1;
+    assign diag_vb = 1'b1;
+    assign use_core_video = 1'b1;
+    always_ff @(posedge clk_sys) begin
         diag_frame <= 16'd0;
         diag_vs_d <= 1'b1;
     end
-    else begin
-        diag_vs_d <= diag_vs;
-        if (diag_vs_d && !diag_vs)
-            diag_frame <= diag_frame + 1'd1;
-    end
 end
-
-ssv_diag_video diag_video (
-    .clk(clk_sys), .rst(diag_rst),
-    .show_core(1'b1), .core_rgb(core_rgb),
-    .pll_locked(pll_locked),
-    .ioctl_download(ioctl_download),
-    .rom_loaded(rom_loaded),
-    .sdram_ready(sdram_ready_sys),
-    .video_reset(video_reset),
-    .core_reset(core_reset),
-    .video_enable(video_enable),
-    .cpu_halted(cpu_halted),
-    .cpu_pause(status[7]),
-    .service_mode(status[6]),
-    .irq_n(irq_n_dbg),
-    .irq_enabled(irq_enabled),
-    .ext_busy(ext_busy),
-    .rom_sig_ok(rom_sig_ok),
-    .probe_done(probe_done),
-    .probe_sig0(probe_sig0),
-    .probe_sig1(probe_sig1),
-    .debug_pc(debug_pc),
-    .ioctl_addr(ioctl_addr),
-    .download_max_addr(download_max_addr),
-    .frame_count(diag_frame),
-    .rgb(diag_rgb), .ce_pixel(diag_ce),
-    .hs(diag_hs), .vs(diag_vs), .hb(diag_hb), .vb(diag_vb),
-    .use_core_video(use_core_video)
-);
+endgenerate
 
 // Bring-up states 0-7/A/B keep the independent diag raster. Once the game
 // enables video (state 8), drive HDMI from the core's own timing so pixels

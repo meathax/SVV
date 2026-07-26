@@ -77,7 +77,8 @@ localparam logic [15:0] CR_LEI  = 16'h0004;
 localparam logic [15:0] CR_CMPD = 16'h2000;
 
 typedef enum logic [3:0] {
-    S_START, S_WAIT1, S_REQ2, S_WAIT2, S_PROC, S_FILT, S_MIX, S_NEXT
+    S_START, S_WAIT1, S_REQ2, S_WAIT2,
+    S_PROC, S_POLE12, S_FILT, S_MIX, S_NEXT
 } st_t;
 
 st_t state;
@@ -95,11 +96,12 @@ logic [7:0]  lvramp, rvramp;
 logic [8:0]  ecount, k1ramp, k2ramp;
 logic [31:0] vstart, vend, accum;
 logic [17:0] o4n1, o3n1, o3n2, o2n1, o2n2, o1n1;
-// Pipeline break: filter/lerp in S_PROC, volume/mix/env in S_MIX (timing).
+// Pipeline: lerp/loop → poles 1-2 → poles 3-4 → volume/mix (timing).
 logic        proc_active;
 logic        proc_do_irq;
 logic [31:0] proc_accn;
 logic [15:0] proc_crn;
+logic signed [17:0] proc_xin;
 logic [17:0] proc_p1, proc_p2, proc_p3, proc_p4;
 
 wire stopped = !cr_valid || |(cr & CR_STOP) || |(cr & CR_CMPD);
@@ -204,6 +206,7 @@ always_ff @(posedge clk) begin
         proc_do_irq <= 1'b0;
         proc_accn <= '0;
         proc_crn <= '0;
+        proc_xin <= '0;
         proc_p1 <= '0;
         proc_p2 <= '0;
         proc_p3 <= '0;
@@ -300,11 +303,12 @@ always_ff @(posedge clk) begin
                 end
 
                 S_PROC: begin
-                    // Stage 1: lerp + first two filter poles + loop/IRQ math.
+                    // Stage 1: lerp + accumulator/loop/IRQ only (no filters).
                     proc_active <= 1'b0;
                     proc_do_irq <= 1'b0;
                     proc_accn <= accum;
                     proc_crn <= cr;
+                    proc_xin <= o1n1;
                     proc_p1 <= o1n1;
                     proc_p2 <= o2n1;
                     proc_p3 <= o3n1;
@@ -312,7 +316,6 @@ always_ff @(posedge clk) begin
 
                     if (!stopped) begin
                         logic signed [15:0] ip;
-                        logic signed [17:0] p1, p2, xin;
                         logic [31:0] accn;
                         logic [15:0] crn;
                         logic do_irq;
@@ -345,14 +348,21 @@ always_ff @(posedge clk) begin
                             endcase
                         end
 
-                        xin = {{2{ip[15]}}, ip};
-                        p1 = lp(xin, k1, o1n1);
-                        p2 = lp(p1, k1, o2n1);
-
                         proc_active <= 1'b1;
                         proc_do_irq <= do_irq;
                         proc_accn <= accn;
                         proc_crn <= crn;
+                        proc_xin <= {{2{ip[15]}}, ip};
+                    end
+                    state <= S_POLE12;
+                end
+
+                S_POLE12: begin
+                    // Stage 2: first two filter poles.
+                    if (proc_active) begin
+                        logic signed [17:0] p1, p2;
+                        p1 = lp(proc_xin, k1, o1n1);
+                        p2 = lp(p1, k1, o2n1);
                         proc_p1 <= p1;
                         proc_p2 <= p2;
                     end
@@ -360,7 +370,7 @@ always_ff @(posedge clk) begin
                 end
 
                 S_FILT: begin
-                    // Stage 2: remaining filter poles (mode-dependent).
+                    // Stage 3: remaining filter poles (mode-dependent).
                     if (proc_active) begin
                         logic signed [17:0] p3, p4;
                         unique case (cr[9:8])
@@ -388,7 +398,7 @@ always_ff @(posedge clk) begin
                 end
 
                 S_MIX: begin
-                    // Stage 2: volume, mix accumulate, register writebacks.
+                    // Stage 4: volume, mix accumulate, register writebacks.
                     eng_accum_w <= accum;
                     eng_cr_w <= cr;
                     eng_o1n1_w <= o1n1;

@@ -3,7 +3,8 @@
 `timescale 1ns/1ps
 
 module ssv_cached_sprite_renderer #(
-    parameter integer CACHE_ENTRIES = 2048
+    // 1536 entries: Dyna Gear attract soak used ~1277; frees M10K vs 2048.
+    parameter integer CACHE_ENTRIES = 1536
 ) (
     input  logic         clk,
     input  logic         rst,
