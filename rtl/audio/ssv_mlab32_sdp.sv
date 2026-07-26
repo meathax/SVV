@@ -78,6 +78,9 @@ initial begin
         mem[__i] = {WIDTH{1'b0}};
 end
 
+// Same-address RDW returns the prior value (NBA write after read sample),
+// matching the common "old data" MLAB behaviour. Hardware is DONT_CARE;
+// the regs host-steal path avoids relying on conflicted reads.
 always_ff @(posedge clk) begin
     if (we)
         mem[wr_addr] <= wdata;

@@ -504,7 +504,10 @@ always_ff @(posedge clk) begin
     else begin
         commit <= 1'b0;
         host_rd_pending <= host_rd_steal;
-        eng_hold        <= host_rd_steal;
+        // Hold engine snapshots through the steal cycle and the following
+        // cycle while MLAB q still reflects the host rd_addr (address_reg_b).
+        // Dropping hold with steal alone lets eng_* sample host voice data.
+        eng_hold        <= host_rd_steal || host_rd_pending;
 
         if (host_rd_steal) begin
             page_r <= current_page;

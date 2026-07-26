@@ -3,7 +3,7 @@
 `timescale 1ns/1ps
 
 module ssv_cached_sprite_renderer #(
-    // 1536 entries: Dyna Gear attract soak used ~1277; frees M10K vs 2048.
+    // Attract soak used ~1277; keep margin for denser in-game lists.
     parameter integer CACHE_ENTRIES = 1536
 ) (
     input  logic         clk,
@@ -50,10 +50,14 @@ localparam integer CACHE_ADDR_WIDTH = $clog2(CACHE_ENTRIES);
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_COUNT_VALUE = CACHE_ENTRIES;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
     CACHE_ENTRIES - 1;
-localparam integer LINE_SLOTS = 64;
+// 56 slots/line: frees M10K vs 64 while covering typical Dyna Gear density.
+// Index as y*LINE_SLOTS+slot (not a shifted concat) so non-power-of-two depths
+// do not overrun the packed table.
+localparam integer LINE_SLOTS = 56;
 localparam integer LINE_SLOT_WIDTH = $clog2(LINE_SLOTS);
 localparam integer LINE_COUNT_WIDTH = LINE_SLOT_WIDTH + 1;
-localparam integer LINE_ADDR_WIDTH = 8 + LINE_SLOT_WIDTH;
+localparam integer LINE_TABLE_WORDS = 240 * LINE_SLOTS;
+localparam integer LINE_ADDR_WIDTH = $clog2(LINE_TABLE_WORDS);
 localparam logic [LINE_COUNT_WIDTH-1:0] LINE_SLOTS_VALUE = LINE_SLOTS;
 
 typedef enum logic [5:0] {
@@ -90,15 +94,17 @@ logic [CACHE_ADDR_WIDTH:0] cache_render_index;
 logic [127:0] cache_q;
 logic [127:0] cache_decode_q;
 logic cache_pending;
+// After storing the last cache slot, finish its line buckets then stop.
+logic cache_stop_after_bucket;
 (* ramstyle = "M10K, no_rw_check" *)
 logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
 
-(* ramstyle = "M10K, no_rw_check" *)
+(* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
 logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
 (* ramstyle = "M10K, no_rw_check" *)
-logic [CACHE_ADDR_WIDTH-1:0] line_entries [0:240*LINE_SLOTS-1];
+logic [CACHE_ADDR_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
 logic [7:0] clear_y;
 logic [7:0] bucket_y, bucket_last_y;
 logic [CACHE_ADDR_WIDTH-1:0] bucket_descriptor;
@@ -590,6 +596,7 @@ always_ff @(posedge clk) begin
         cache_ready <= 1'b0;
         cache_overflow <= 1'b0;
         cache_pending <= 1'b0;
+        cache_stop_after_bucket <= 1'b0;
         build_screen_visible_q <= 1'b0;
         build_first_y_q <= 8'd0;
         build_last_y_q <= 8'd0;
@@ -647,6 +654,7 @@ always_ff @(posedge clk) begin
                     cache_write_count <= '0;
                     cache_ready <= 1'b0;
                     cache_overflow <= 1'b0;
+                    cache_stop_after_bucket <= 1'b0;
                     cache_busy <= 1'b1;
                     cache_pending <= 1'b0;
                     state <= BUILD_CLEAR_LINES;
@@ -735,24 +743,26 @@ always_ff @(posedge clk) begin
             end
 
             BUILD_STORE: begin
-                if (build_screen_visible_q) begin
-                    if (cache_write_count == CACHE_LAST_VALUE) begin
-                        cache_write_count <= cache_write_count + 1'd1;
-                        cache_count <= CACHE_COUNT_VALUE;
-                        cache_ready <= 1'b1;
-                        cache_overflow <= 1'b1;
-                        cache_busy <= 1'b0;
-                        state <= IDLE;
-                    end
-                    else begin
-                        cache_write_count <= cache_write_count + 1'd1;
-                        bucket_descriptor <=
-                            cache_write_count[CACHE_ADDR_WIDTH-1:0];
-                        bucket_y <= build_first_y_q;
-                        bucket_last_y <= build_last_y_q;
-                        line_count_addr <= build_first_y_q;
-                        state <= BUILD_BUCKET_READ;
-                    end
+                if (build_screen_visible_q &&
+                    (cache_write_count < CACHE_COUNT_VALUE)) begin
+                    // Write+bucket every accepted slot, including the last;
+                    // stop after that entry's buckets so it is not orphaned.
+                    cache_write_count <= cache_write_count + 1'd1;
+                    bucket_descriptor <=
+                        cache_write_count[CACHE_ADDR_WIDTH-1:0];
+                    bucket_y <= build_first_y_q;
+                    bucket_last_y <= build_last_y_q;
+                    line_count_addr <= build_first_y_q;
+                    cache_stop_after_bucket <=
+                        (cache_write_count == CACHE_LAST_VALUE);
+                    state <= BUILD_BUCKET_READ;
+                end
+                else if (build_screen_visible_q) begin
+                    cache_count <= cache_write_count;
+                    cache_ready <= 1'b1;
+                    cache_overflow <= 1'b1;
+                    cache_busy <= 1'b0;
+                    state <= IDLE;
                 end
                 else begin
                     state <= BUILD_ADVANCE;
@@ -764,15 +774,26 @@ always_ff @(posedge clk) begin
             BUILD_BUCKET_WRITE: begin
                 if (line_count_q < LINE_SLOTS_VALUE) begin
                     line_entries[
-                        {bucket_y, {LINE_SLOT_WIDTH{1'b0}}} +
+                        (bucket_y * LINE_SLOTS) +
                         line_count_q[LINE_SLOT_WIDTH-1:0]
                     ] <= bucket_descriptor;
                 end
                 else begin
                     cache_overflow <= 1'b1;
                 end
-                if (bucket_y == bucket_last_y)
-                    state <= BUILD_ADVANCE;
+                if (bucket_y == bucket_last_y) begin
+                    if (cache_stop_after_bucket) begin
+                        cache_count <= CACHE_COUNT_VALUE;
+                        cache_ready <= 1'b1;
+                        cache_overflow <= 1'b1;
+                        cache_busy <= 1'b0;
+                        cache_stop_after_bucket <= 1'b0;
+                        state <= IDLE;
+                    end
+                    else begin
+                        state <= BUILD_ADVANCE;
+                    end
+                end
                 else begin
                     bucket_y <= bucket_y + 1'd1;
                     line_count_addr <= line_count_addr + 1'd1;
@@ -806,10 +827,9 @@ always_ff @(posedge clk) begin
                 if (line_count_q != 0) begin
                     render_line_count <= line_count_q;
                     render_line_slot <= '0;
-                    line_entry_addr <= {
-                        target_y_latched[7:0],
-                        {LINE_SLOT_WIDTH{1'b0}}
-                    };
+                    line_entry_addr <= LINE_ADDR_WIDTH'(
+                        target_y_latched[7:0] * LINE_SLOTS
+                    );
                     state <= RENDER_LINE_READ;
                 end
                 else begin

@@ -278,7 +278,8 @@ always_ff @(posedge clk) begin
                         s2 <= '0;
                         state <= S_PROC;
                     end else begin
-                        sdr_addr <= SDR_SAMPLES_BASE[24:1] + {4'd0, eng_accum[31:11]};
+                        // Word offset is 21 bits; pad to [24:1] without a 25-bit sum.
+                        sdr_addr <= SDR_SAMPLES_BASE[24:1] + {3'd0, eng_accum[31:11]};
                         sdr_req  <= 1'b1;
                         got_ack  <= 1'b0;
                         state    <= S_WAIT1;
@@ -291,7 +292,8 @@ always_ff @(posedge clk) begin
                 end
 
                 S_REQ2: begin
-                    sdr_addr <= SDR_SAMPLES_BASE[24:1] + {4'd0, accum[31:11] + 21'd1};
+                    sdr_addr <= SDR_SAMPLES_BASE[24:1] +
+                                ({3'd0, accum[31:11]} + 24'd1);
                     sdr_req  <= 1'b1;
                     got_ack  <= 1'b0;
                     state    <= S_WAIT2;
@@ -422,8 +424,8 @@ always_ff @(posedge clk) begin
                         gR = vol_gain(rvol);
                         aL = $signed(proc_p4[17:2]) * $signed({1'b0, gL});
                         aR = $signed(proc_p4[17:2]) * $signed({1'b0, gR});
-                        mix_l <= mix_l + (aL >>> 11);
-                        mix_r <= mix_r + (aR >>> 11);
+                        mix_l <= mix_l + 24'(aL >>> 11);
+                        mix_r <= mix_r + 24'(aR >>> 11);
 
                         eng_wr_accum <= 1'b1;
                         eng_accum_w  <= proc_accn;

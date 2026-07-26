@@ -9,6 +9,10 @@ On-chip RAM holds latency-sensitive work RAM, sprite/list RAM, and palette RAM.
 The two additional CPU RAM windows are placed in unused SDRAM above the 17 MiB
 ROM image so the design stays within Cyclone V block-RAM capacity.
 
+**MiSTer SDRAM: one stick (32 MiB).** The controller addresses `[24:1]`
+(32 MiB byte space). Dyna Gear's image + CPU windows top out near `0x115FFFF`
+(~18 MiB). `MISTER_DUAL_SDRAM` is not defined.
+
 | SDRAM byte range | Content |
 |---|---|
 | `0000000-00fffff` | V60 program |

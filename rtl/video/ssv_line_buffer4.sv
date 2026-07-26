@@ -25,15 +25,15 @@ localparam logic [8:0] ACTIVE_WIDTH = 9'd336;
 localparam logic [6:0] LAST_WORD = 7'd83;
 
 // Consecutive four-pixel batches contain at most one write for each x[1:0]
-// bank. Each physical line therefore maps to four independent M10Ks.
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b0 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b1 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b2 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b3 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b0 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b1 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b2 [0:83];
-(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b3 [0:83];
+// bank. Tiny 84x15 banks waste a full M10K each, so keep them in MLABs.
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b0 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b1 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b2 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b3 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b0 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b1 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b2 [0:83];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b3 [0:83];
 
 logic front_select;
 logic clear_select;
@@ -185,6 +185,25 @@ always_ff @(posedge clk) begin
         end
 
         if (line_start) begin
+            // Plots are registered one cycle late. Commit any in-flight RMW
+            // into the just-finished back buffer before the buffer flip, or
+            // the last batch of the line is dropped.
+            if (plot_pending[0]) begin
+                if (plot_select_q) line1_b0[bank_addr_q[0]] <= write_value[0];
+                else               line0_b0[bank_addr_q[0]] <= write_value[0];
+            end
+            if (plot_pending[1]) begin
+                if (plot_select_q) line1_b1[bank_addr_q[1]] <= write_value[1];
+                else               line0_b1[bank_addr_q[1]] <= write_value[1];
+            end
+            if (plot_pending[2]) begin
+                if (plot_select_q) line1_b2[bank_addr_q[2]] <= write_value[2];
+                else               line0_b2[bank_addr_q[2]] <= write_value[2];
+            end
+            if (plot_pending[3]) begin
+                if (plot_select_q) line1_b3[bank_addr_q[3]] <= write_value[3];
+                else               line0_b3[bank_addr_q[3]] <= write_value[3];
+            end
             front_select <= ~front_select;
             clear_select <= front_select;
             clear_word <= 7'd0;

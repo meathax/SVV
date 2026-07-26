@@ -4,6 +4,7 @@
 //   +MAINROM= +SPRROM= +FRAME_CRC=path +FRAMES=N +SOAK_FRAMES=N
 //   +SCENARIO=attract_idle|coin_start_p1
 //   +DUMP_FRAME_DIAG (IRQ/list/scroll/pal snapshots at vb-edge)
+//   +DUMP_PPM=path +DUMP_PPM_FRAME=N  (write one 336x240 raw PPM after VE)
 //   +USE_FRAC_CE (default on) uses ssv_tb_ce_cpu
 
 module tb_ssv_frame_crc;
@@ -57,8 +58,11 @@ integer stuck, last_pc_i;
 logic [31:0] last_pc;
 integer bg_overruns, obj_overruns;
 integer dump_x, dump_y, dump_count;
-logic dump_pixels, dump_frame_diag;
-string irq_schedule_path;
+logic dump_pixels, dump_frame_diag, dump_ppm_en, dump_ppm_open;
+logic ignore_overrun;
+string irq_schedule_path, ppm_path, ppm_prefix;
+integer ppm_fd, ppm_frame, ppm_pixels;
+integer ppm_start, ppm_count, ppm_step, ppm_shots_done;
 integer irq_schedule_fd, irq_scan_result;
 logic diff_irq_enabled, diff_vblank_pulse, diff_count_started;
 longint unsigned retire_count, next_irq_retire;
@@ -223,9 +227,15 @@ task automatic apply_inputs(input integer f);
     in_system = 16'hffff;
     if (scenario == "coin_start_p1") begin
         if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
-        if (f >= 60 && f < 64) in_p1 = 16'hff7f;     // START
-        if (f >= 90 && f < 100) in_p1 = 16'hfffe;    // UP
-        if (f >= 100 && f < 110) in_p1 = 16'hffef;   // B1
+        // Wait for "PUSH START" after coin, then enter select.
+        if (f >= 165 && f < 170) in_p1 = 16'hff7f;  // START
+        // Confirm Roger on SELECT PLAYER.
+        if (f >= 250 && f < 255) in_p1 = 16'hff7f;  // START confirm
+        if (f >= 255 && f < 262) in_p1 = 16'hffef;  // B1 confirm
+        // Stage movement / attack after gameplay begins.
+        if (f >= 300 && f < 330) in_p1 = 16'hfffd;  // RIGHT
+        if (f >= 330 && f < 360) in_p1 = 16'hffef;  // B1
+        if (f >= 360 && f < 390) in_p1 = 16'hfffe;  // UP
     end
 endtask
 
@@ -248,9 +258,31 @@ always_ff @(posedge clk_sys) begin
         last_pc <= 32'hffffffff;
         irq_entries_post_ve <= 0;
         vb_pulses_post_ve <= 0;
+        dump_ppm_open <= 1'b0;
+        ppm_pixels <= 0;
+        ppm_shots_done <= 0;
     end else begin
         if (debug_status[22])
             ve_seen <= 1'b1;
+
+        // Multi-shot PPM: frames ppm_start + k*ppm_step for k in [0, ppm_count).
+        // Single-shot: ppm_count==1 and ppm_path already set via +DUMP_PPM=.
+        if (dump_ppm_en && !dump_ppm_open && ve_seen &&
+            vb_d && !vb &&
+            (post_ve_frames >= ppm_start) &&
+            (ppm_shots_done < ppm_count) &&
+            (((post_ve_frames - ppm_start) % ppm_step) == 0)) begin
+            if (ppm_prefix.len() != 0)
+                $sformat(ppm_path, "%s_f%0d.ppm", ppm_prefix, post_ve_frames);
+            ppm_fd = $fopen(ppm_path, "wb");
+            if (ppm_fd == 0)
+                $fatal(1, "cannot open DUMP_PPM path %s", ppm_path);
+            $fwrite(ppm_fd, "P6\n336 240\n255\n");
+            dump_ppm_open <= 1'b1;
+            ppm_pixels <= 0;
+            $display("DUMP_PPM capturing frame %0d -> %s",
+                     post_ve_frames, ppm_path);
+        end
 
         if (ce_pixel && !hb && !vb && debug_status[22]) begin
             active_pixels <= active_pixels + 1;
@@ -276,11 +308,23 @@ always_ff @(posedge clk_sys) begin
                     $display("RTLPIX %0d %0d %06x", dut.hcnt, dut.vcnt, rgb);
                     dump_count <= dump_count + 1;
                 end
+                if (dump_ppm_open) begin
+                    $fwrite(ppm_fd, "%c%c%c", rgb[23:16], rgb[15:8], rgb[7:0]);
+                    ppm_pixels <= ppm_pixels + 1;
+                end
             end
         end
 
         // Emit + reset on entering vblank so the first active pixel is included.
         if (ve_seen && !vb_d && vb) begin
+            if (dump_ppm_open) begin
+                $fclose(ppm_fd);
+                dump_ppm_open <= 1'b0;
+                ppm_shots_done <= ppm_shots_done + 1;
+                $display("DUMP_PPM wrote %s frame=%0d pixels=%0d shot=%0d/%0d",
+                         ppm_path, post_ve_frames, ppm_pixels,
+                         ppm_shots_done + 1, ppm_count);
+            end
             if (crc_fd != 0 && post_ve_frames < max_frames && px_count != 0) begin
                 $fdisplay(crc_fd, "FRAME %0d %08x %08x",
                           post_ve_frames,
@@ -425,6 +469,35 @@ initial begin
         max_cycles = 200000000;
     dump_pixels = $test$plusargs("DUMP_PIXELS");
     dump_frame_diag = $test$plusargs("DUMP_FRAME_DIAG");
+    ignore_overrun = $test$plusargs("IGNORE_OVERRUN");
+    // Single-shot legacy: +DUMP_PPM=path +DUMP_PPM_FRAME=N
+    // Multi-shot: +DUMP_PPM_PREFIX=path/stem +DUMP_PPM_START=N +DUMP_PPM_COUNT=5
+    //              +DUMP_PPM_STEP=20
+    dump_ppm_en = 1'b0;
+    ppm_count = 1;
+    ppm_step = 1;
+    ppm_shots_done = 0;
+    if ($value$plusargs("DUMP_PPM_PREFIX=%s", ppm_prefix)) begin
+        dump_ppm_en = 1'b1;
+        if (!$value$plusargs("DUMP_PPM_START=%d", ppm_start))
+            ppm_start = 160;
+        if (!$value$plusargs("DUMP_PPM_COUNT=%d", ppm_count))
+            ppm_count = 5;
+        if (!$value$plusargs("DUMP_PPM_STEP=%d", ppm_step))
+            ppm_step = 20;
+        if (ppm_step < 1) ppm_step = 1;
+    end else if ($value$plusargs("DUMP_PPM=%s", ppm_path)) begin
+        dump_ppm_en = 1'b1;
+        ppm_prefix = "";
+        if (!$value$plusargs("DUMP_PPM_FRAME=%d", ppm_frame))
+            ppm_frame = 2;
+        ppm_start = ppm_frame;
+        ppm_count = 1;
+        ppm_step = 1;
+    end
+    dump_ppm_open = 1'b0;
+    ppm_pixels = 0;
+    ppm_fd = 0;
     dump_count = 0;
     last_vb_retire = 0;
     last_irq_entry_retire = 0;
@@ -483,15 +556,16 @@ initial begin
         $fatal(1, "video_enable never rose pc=%08x", debug_pc);
     if (post_ve_frames < soak_frames)
         $fatal(1, "soak frames=%0d need=%0d", post_ve_frames, soak_frames);
-    if (bg_overruns != 0 || obj_overruns != 0)
+    if (!ignore_overrun && (bg_overruns != 0 || obj_overruns != 0))
         $fatal(1, "renderer overrun bg=%0d obj=%0d", bg_overruns, obj_overruns);
     if (post_ve_nonblack < 1000)
         $fatal(1, "post-VE nonblack too low: %0d", post_ve_nonblack);
-    if (debug_status[16])
+    if (!ignore_overrun && debug_status[16])
         $fatal(1, "renderer_overrun sticky set");
 
-    $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s",
-             scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path);
+    $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d",
+             scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path,
+             bg_overruns, obj_overruns);
     $finish;
 end
 endmodule

@@ -297,7 +297,8 @@ ssv_cached_sprite_renderer sprite_renderer (
 always_ff @(posedge clk_sys) begin
     if (rst)
         renderer_overrun <= 1'b0;
-    else if (renderer_line_start && renderer_busy)
+    else if ((renderer_line_start && renderer_busy) || obj_cache_overflow)
+        // Line deadline miss, or descriptor/line-slot cache overflow.
         renderer_overrun <= 1'b1;
 end
 
