@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// Lock Arcade-SSV.sv player/system/DSW2 bit mapping vs MAME dynagear ports.
+// Lock Arcade-SSV.sv player/system/DSW1/DSW2 bit mapping vs MAME dynagear ports.
 
 module tb_ssv_input_matrix;
 
@@ -14,6 +14,31 @@ function automatic [15:0] system_port(
     input coin1, input coin2, input service, input test_btn
 );
     system_port = {8'hff, ~{3'b000, test_btn, 1'b0, service, coin2, coin1}};
+endfunction
+
+function automatic [3:0] coinage_nibble(input [3:0] osd);
+    case (osd)
+        4'd0:  coinage_nibble = 4'hF;
+        4'd1:  coinage_nibble = 4'h7;
+        4'd2:  coinage_nibble = 4'h8;
+        4'd3:  coinage_nibble = 4'h9;
+        4'd4:  coinage_nibble = 4'h6;
+        4'd5:  coinage_nibble = 4'hE;
+        4'd6:  coinage_nibble = 4'hD;
+        4'd7:  coinage_nibble = 4'hC;
+        4'd8:  coinage_nibble = 4'hB;
+        4'd9:  coinage_nibble = 4'hA;
+        4'd10: coinage_nibble = 4'h5;
+        4'd11: coinage_nibble = 4'h4;
+        4'd12: coinage_nibble = 4'h3;
+        4'd13: coinage_nibble = 4'h2;
+        4'd14: coinage_nibble = 4'h1;
+        default: coinage_nibble = 4'hF;
+    endcase
+endfunction
+
+function automatic [15:0] dsw1_port(input [3:0] coin_a_osd, input [3:0] coin_b_osd);
+    dsw1_port = {8'hff, coinage_nibble(coin_b_osd), coinage_nibble(coin_a_osd)};
 endfunction
 
 function automatic [15:0] dsw2_port(
@@ -78,6 +103,11 @@ initial begin
     expect16("SYS COIN2", system_port(0, 1, 0, 0), 16'hFFFD);
     expect16("SYS SERVICE", system_port(0, 0, 1, 0), 16'hFFFB);
     expect16("SYS TEST", system_port(0, 0, 0, 1), 16'hFFEF);
+
+    // DSW1 defaults (status coin OSD=0): Coin A/B 1C/1C → 0xFF
+    expect16("DSW1 default", dsw1_port(4'd0, 4'd0), 16'hFFFF);
+    expect16("DSW1 4C/1C A", dsw1_port(4'd1, 4'd0), 16'hFFF7);
+    expect16("DSW1 Multi E B", dsw1_port(4'd0, 4'd14), 16'hFF1F);
 
     // DSW2 defaults (status=0): Demo Sounds ON, Flip Off, Normal, 2 lives,
     // Free Play Off, 4 Hearts → low byte 0xFD

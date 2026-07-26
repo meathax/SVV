@@ -44,6 +44,9 @@ module ssv_core (
     output logic       vb,
     output logic signed [15:0] audio_l,
     output logic signed [15:0] audio_r,
+    // Sticky one-shot: no $210000 kick for 180 frames (~3s @ 60 Hz / FBNeo).
+    // Wrapper ORs into core reset (self-clears when rst returns).
+    output logic       wdog_rst,
     output logic [31:0] debug_pc,
     output logic [23:0] debug_status
 );
@@ -667,6 +670,33 @@ ssv_es5506_voice sound_voices (
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;
 
+// Watchdog: FBNeo / board ~3s @ 60 Hz = 180 frames without $210000 read.
+// Count only after video_enable so the long pre-lockout RAM clear cannot
+// self-reset the core before the game starts servicing the port.
+logic       ack_r_d;
+logic [8:0] wdog_frame_cnt;
+wire        wdog_kick = m_req && !m_we && sel_io && (a[4:1] == 4'h0) &&
+                        ack_r && !ack_r_d;
+
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        wdog_frame_cnt <= 9'd0;
+        wdog_rst       <= 1'b0;
+        ack_r_d        <= 1'b0;
+    end
+    else begin
+        ack_r_d <= ack_r;
+        if (wdog_kick)
+            wdog_frame_cnt <= 9'd0;
+        else if (vblank_pulse && video_enable) begin
+            if (wdog_frame_cnt >= 9'd180)
+                wdog_rst <= 1'b1;
+            else
+                wdog_frame_cnt <= wdog_frame_cnt + 9'd1;
+        end
+    end
+end
+
 always_ff @(posedge clk_sys) begin
     if (rst) begin
         ack_r     <= 1'b0;
@@ -711,8 +741,7 @@ always_ff @(posedge clk_sys) begin
                 sel_io: begin
                     unique case (a[4:1])
                         // MAME survarts/dynagear: watchdog_timer reset16_r.
-                        // Kick is a nop here (no board-level timeout reset);
-                        // value is unused by the game but must not stall.
+                        // Read kicks the 180-frame board timeout (wdog_rst).
                         4'h0: read_mux <= 16'h0000;
                         4'h1: read_mux <= in_dsw1;
                         4'h2: read_mux <= in_dsw2;

@@ -26,6 +26,16 @@ yet closed.
 | Pixel count | 80640 after vb-edge CRC fix (was 80639) |
 | G2 soak | PASS (no overrun, no stuck, nonblack) |
 
+### 2026-07-26 close-out re-prove
+
+- Re-ran `tb_ssv_frame_crc` attract_idle (30 frames / soak 15) after Wave B RTL.
+- Frame 0 still matches MAME (`d3b2fac2` / `7fdb4700`).
+- First mismatch remains **frame 1**: MAME IDX=`7aa4714d` vs RTL=`2419ab87`.
+- Residual kept open: IRQ period / CPI skew (~32086 RTL vs ~33230 MAME) — see
+  [`DYNAGEAR_NATURAL_IRQ_SKEW.md`](DYNAGEAR_NATURAL_IRQ_SKEW.md). No compositor
+  pen fix justified from frame-0 evidence.
+- **120-frame gate:** not met; gameplay continue-criteria = frame-0 match + soak.
+
 ## Last matching event
 
 Natural: post-VE frame 0 (full active field).

@@ -75,6 +75,9 @@ run_one tb_ssv_loader_core_boot \
 run_one tb_ssv_rom_write_ack \
   "${SSV_CORE_FILES[@]}" verif/tb_ssv_rom_write_ack.sv
 
+run_one tb_ssv_watchdog \
+  "${SSV_CORE_FILES[@]}" verif/tb_ssv_watchdog.sv
+
 # Natural-vblank boot must raise video_enable (long RAM clear ~35s wall).
 run_one tb_ssv_hang_watch \
   "${SSV_CORE_FILES[@]}" verif/ssv_tb_ce_cpu.sv verif/tb_ssv_hang_watch.sv

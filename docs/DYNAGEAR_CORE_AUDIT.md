@@ -1,64 +1,54 @@
 # Dyna Gear SSV MiSTer Core — Full Audit
 
-Audit date: 25 July 2026  
+Audit date: 26 July 2026  
 Repository: `D:\Arcade\AI\SVV`  
-Tree: `8b8312b` plus uncommitted bring-up fixes (ROM-write ack, dual video mux,
-DIP OSD, diag `use_core_video`, hang-watch / post-VE gates)  
+Branch tip: gameplay-gate + FAST_IFETCH icache + Wave B RTL (DSW1, watchdog,
+voice pipeline for timing).  
 Target: Sammy/Seta/Visco SSV — **Dyna Gear** only for this release path  
-Scope of this audit: RTL, verification, and sim evidence. **No Quartus/RBF
-claims.** Hardware RBF deploy is out of band for the companion gameplay plan.
+Scope: RTL + Verilator evidence. **Quartus/RBF / physical MiSTer deferred**
+(explicitly out of this pass).
 
 ## Executive verdict
 
-The core is a **credible Dyna Gear bring-up**, not a playable release.
+The core is a **credible sim-playable Dyna Gear bring-up**, not a HW release.
 
 | Question | Answer |
 |---|---|
-| Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` |
-| Does early machine state match MAME? | **Yes** — ordered writes through **8s attract** + hashes through 2.0M retirements (IRQ schedule) |
-| Has attract mode been proven? | **Partial+** — post-VE **frame 0** RGB/IDX CRC matches MAME; loop open |
+| Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` (~26M with FAST_IFETCH) |
+| Does early machine state match MAME? | **Yes** — ordered writes through **8s attract** + hashes (IRQ schedule) |
+| Has attract mode been proven? | **Partial+** — post-VE **frame 0** RGB/IDX CRC matches MAME; frame≥1 open |
 | Has coin → start → play been proven? | **Partial** — `coin_start_p1` schedule in sim; full play CRC open |
-| Is audio present? | **Yes (sim)** — voice PCM + REQUIRE_AUDIO peak gate; HW unproven |
-| Overall toward playable Dyna Gear | **~70%** (medium confidence) |
+| Is audio present? | **Yes (sim)** — voice PCM + REQUIRE_AUDIO peak gate; HW deferred |
+| Overall toward playable Dyna Gear (sim) | **~78%** (medium confidence) |
 
-Strongest verified results:
+### Board completeness (sim-proven unless noted)
 
-- ROM-region CPU writes no longer hang the bus (`tb_ssv_rom_write_ack`).
-- Natural-vblank boot raises lockout/`video_enable` at ~53.7M `clk_sys`
-  (`tb_ssv_hang_watch`: PC `0xF10983`, data `0x00C3`).
-- Focused bring-up suite and V60 unit suite both **ALL PASS**.
-- With MAME IRQ schedule: ordered writes match an **8-second** MAME capture
-  (`869693`/`869699` writes, lockout + `336625` post-lockout) and complete-state
-  hashes match all `2027025` short MAME records.
-- 60M-cycle real-ROM video: `p1=707008`, `nonblack=118457`, cache `1277`,
-  `OVERRUN bg=0 obj=0`, PC `0x00f10575`
-  (`sim_output/realrom_video_timing_pipeline_60m`).
-- Wrapper muxes **core** CE/HS/VS/DE/RGB when diag state 8 (`use_core_video`).
-- Dyna Gear DSW2 defaults map through OSD (`0xFFFD` at status=0: Demo Sounds ON).
-
-Strongest remaining gaps for **real gameplay**:
-
-- No attract-length palette-index / RGB frame CRC vs MAME.
-- No coin/start stimulus scenario or post-credit CPU/video differential.
-- Latent V60 UNHANDLED groups (`59` / `5B` / `5D` / some FP) unused in early
-  boot; may appear in play.
-- ES5506 voices/sample path absent; SDRAM audio ports tied off.
-- Watchdog is a read/kick stub (no board timeout reset).
-- FPGA RAM essentially exhausted (~552/553 blocks) — audio needs a deliberate
-  memory plan, not more BRAM.
-
-Estimated completion against a fully working Dyna Gear core:
-
-| Area | Estimated completion | Confidence |
+| Board component | Completeness | Notes |
 |---|---:|---|
-| V60 / early boot / SSV bus | 90% | High for traced path; medium for gameplay |
-| Video feature implementation | 75% | Medium |
-| Attract / gameplay video proof (sim) | 35% | Medium |
-| Controls and DIPs (wiring) | 70% | Medium (wired; not scenario-tested) |
-| Coin → play transition (sim) | 10% | High that it is unproven |
-| ES5506 audio | 15% | High |
-| Build / release / HW validation | 40% | High (out of this plan’s critical path) |
-| **Overall playable-core goal** | **~55%** | Medium |
+| MiSTer shell / PLL / clocks | ~85% | Sim path solid; HW timing deferred |
+| SDRAM controller + layout | ~85% | Program/GFX/samples/XRAM/Dyna mapped |
+| ROM loader / MRA interleave | ~90% | Stream + probe path |
+| NEC V60 CPU | ~90% | PFU + FAST_IFETCH on; latent 59/5B/5D/FP |
+| CPU bus / ROM-write ack | ~95% | Hang fixed + restart-while-`ack_r` guard |
+| Work / sprite / palette RAM | ~90% | On-chip; boot + video |
+| XRAM + Dyna RAM (SDRAM) | ~85% | Strong in sim |
+| Scroll / CRT regs + blanking | ~75% | MiSTer-ish sync widths |
+| IRQ controller | ~85% | Vblank L3; ES5506 IRQ N/A for DG (MAME) |
+| Video timing (336×240) | ~85% | VE/IRQ; natural CE boots |
+| BG / sprite / GFX / linebuf / palette | ~80–85% | Frame-0 CRC match; loop open |
+| Diag video mux | ~90% | Dual-raster tear fixed |
+| Inputs (P1/P2/SYSTEM) | ~90% | Matrix TB + fixed P1 order |
+| DIP switches | ~90% | DSW1+DSW2 OSD |
+| Watchdog | ~90% | 180-frame `wdog_rst` + TB |
+| ES5506 host / registers | ~90% | Protocol + pages tested |
+| ES5506 voice PCM / mix | ~70% | Bank-2 + peak gate; no full PCM match / HW |
+| Sample SDRAM port (p4) | ~75% | Wired; basic underrun |
+| Attract / gameplay (whole) | ~65% | VE + frame 0 + coin/start stim; loop CRC open |
+| Quartus fit / timing / RBF | — | **Deferred this pass** |
+| Physical MiSTer validation | — | **Deferred this pass** |
+
+Strongest remaining gaps (sim): attract-loop CRC frame≥1 (IRQ/CPI skew);
+full play CRC; latent V60 UNHANDLED; FPGA M10K headroom for future audio HW.
 
 ---
 
@@ -73,7 +63,7 @@ Estimated completion against a fully working Dyna Gear core:
 | `140000–15ffff` | Palette RAM | On-chip | Strong |
 | `160000–17ffff` | XRAM | SDRAM `@0x1100000` | Strong in sim |
 | `1c0000–1c007f` | Scroll / CRT (+ blanking peek) | Regs | Present |
-| `210000–210011` | Watchdog / DSW / P1 / P2 / SYSTEM | IO mux | Partial (WD stub) |
+| `210000–210011` | Watchdog / DSW / P1 / P2 / SYSTEM | IO mux | Strong (WD 180f) |
 | `230000` / `240000` / `260000` | IRQ vector / ack / enable | `ssv_irq` | Vblank only |
 | `300000–30007f` | ES5506 host | Reg file | Partial |
 | `400000–43ffff` | Dyna RAM | SDRAM `@0x1120000` | Strong in sim |
@@ -85,7 +75,8 @@ SDRAM layout: program `0–0xfffff`, GFX `0x100000–0xcfffff`, samples
 
 ### CPU (V60)
 
-- Production instance uses `FAST_IFETCH=0` (correctness over CPI).
+- Production instance uses `FAST_IFETCH=1` by default (`FAST_IFETCH_EN`) with a
+  32×8B ROM icache on SDRAM p0 in `ssv_core` (override `1'b0` to A/B-test).
 - Unit suite: 28/28 PASS (`verif/v60/run_v60_verilator.sh`).
 - Open opcode surface (reserved-inst / MAME-UNHANDLED style):
   - `0x59` decimal — partial
@@ -103,12 +94,17 @@ Gate: `verif/tb_ssv_rom_write_ack.sv`.
 
 ### IRQ / timing
 
-- `ssv_irq`: vblank sets `requested[3]`; vectors/enable/ack at documented ports.
+- `ssv_irq`: vblank sets `requested[3]` (level 3 only for Dyna Gear gameplay);
+  vectors/enable/ack at documented ports.
 - `ssv_video_timing`: 454×262, active 336×240, vblank IRQ line 240.
 - Sync widths are MiSTer-oriented, not PCB-measured — OK for bring-up; frame
   CRC work will expose any IRQ-line vs MAME mismatch.
-- ES5506 `sound_irq_n` is produced by the reg block but **not** fed into
-  `ssv_irq` (`irq_set` tied 0). Silent until voices exist; then may matter.
+- **ES5506 IRQ N/A for Dyna Gear (board-correct):** MAME `ssv.cpp` instantiates
+  `ES5506` for survarts/dynagear with **no** `irq_handler` / CPU IRQ bind.
+  Voices run without a voice IRQ into `ssv_irq`. RTL keeps `sound_irq_n` /
+  `eng_irq_set` internal to the ES5506 block and does **not** invent a level-5
+  (or other) wire. Completing IRQ completeness for DG = document this, not add
+  speculative wiring.
 
 ### Video pipeline
 
@@ -139,28 +135,29 @@ hps_io joysticks / status
 - Joystick bit map matches MAME `ssv_joystick` (START, buttons, directions).
 - SYSTEM: COIN1/2, SERVICE1, TILT=0, TEST.
 - DSW2 OSD → active-low bits; status=0 yields `0xFD` (MAME dynagear default).
-- DSW1 coinage hardwired `0xFFFF` (extended defaults / all Off).
+- DSW1 Coin A/B OSD → `SSV_COINAGE_EXTENDED` nibbles; default all Off = `0xFF`
+  (1C/1C). Gate: `tb_ssv_input_matrix`.
 - Pause (`status[7]`) freezes `ce_cpu` — can fake a hang on hardware if left on.
-- **No Verilator TB drives coin/start after VE.**
+- Coin/start schedule: `verif/scenarios/dynagear/coin_start_p1.json` +
+  `tb_ssv_frame_crc`.
 
 ### Audio (ES5506)
 
 | Layer | Status |
 |---|---|
 | 4-byte host protocol + 32-voice reg pages | Yes (`ssv_es5506_regs`) |
-| `commit` pulse | Exposed, no consumer |
-| Sample fetch / interpolate / filter / mix | Missing |
-| Core `audio_l` / `audio_r` | Hardwired `0` |
-| Wrapper SDRAM p2–p5 | Tied off |
-| Evidence | Focused reg TB; MAME 879 completed writes / 10s |
+| Sample fetch / interpolate / filter / mix | Yes (`ssv_es5506_voice`, pipelined) |
+| Core `audio_l` / `audio_r` | Driven from voice mixer |
+| Sample SDRAM | `sdr_p4` |
+| Evidence | `run_audio_sims.sh` ALL PASS (`audio_peak=32768`) |
 
-Critical for audible play; **not** on the critical path for silent attract /
-silent playable proof in simulation.
+Full attract PCM waveform match vs MAME and HW soak remain open; Quartus
+timing closure for the voice path is deferred with RBF work.
 
 ### Watchdog
 
-`$210000` returns `0` (MAME `reset16_r` value); kick is a nop. Board-level
-timeout reset is not implemented. Treat as medium until soak shows reliance.
+`$210000` read kicks a 180-frame (post-VE) counter; timeout asserts sticky
+`wdog_rst` (OR’d into wrapper reset). Gate: `verif/tb_ssv_watchdog.sv`.
 
 ---
 
@@ -169,16 +166,17 @@ timeout reset is not implemented. Treat as medium until soak shows reliance.
 | Gate | Result | Where |
 |---|---|---|
 | `verif/run_bringup_sims.sh` | ALL PASS | diag, loader, loader-core-boot, rom_write_ack, hang_watch |
-| Hang watch VE | `LOCKOUT/VE @ ~53738421` pc=`00f10983` | bring-up logs |
-| Post-VE write diff | ~554k ordered writes match; ~21k post-lockout | `run_post_ve_diff.sh` artifacts |
-| Post-VE hash diff | ~2.0M complete-state hashes match (IRQ schedule) | same |
-| Post-VE boot | `TRACE_CYCLES=120000000` ve=1 | post-ve boot log |
-| Real-ROM 60M video | PASS, nonblack pixels, 0 overruns | `sim_output/realrom_video_timing_pipeline_60m` |
+| Hang watch VE | LOCKOUT/VE ~26M (FAST_IFETCH); was ~53.7M | bring-up logs |
+| Attract frame 0 CRC | IDX=`d3b2fac2` RGB=`7fdb4700` | `tb_ssv_frame_crc` / Wave C |
+| Attract frame ≥1 CRC | DIVERGE (documented residual) | `DYNAGEAR_ATTRACT_FRAME_CRC.md` |
+| Coin/start scenario | Schedule + nonblack continue | `coin_start_p1` |
+| Audio suite | ALL PASS + peak gate | `run_audio_sims.sh` |
+| Watchdog | Trip @180f + kicked clear | `tb_ssv_watchdog` |
 | V60 units | 28 passed, 0 failed | `verif/v60/run_v60_verilator.sh` |
-| Full-core lint | Large warning set | `sim_output/audit/verilator-lint.log` (non-blocking) |
+| Post-VE write/hash | 8s attract match (IRQ schedule) | prior artifacts |
 
-**Not evidenced:** attract-loop frame CRC; coin/start → gameplay; audible PCM;
-current-RTL MiSTer attract (requires RBF — out of scope here).
+**Not evidenced this pass:** 120-frame attract CRC loop; Quartus ReadyToDeploy;
+physical MiSTer attract (RBF deferred).
 
 ### Subsystem status matrix
 
@@ -187,16 +185,15 @@ current-RTL MiSTer attract (requires RBF — out of scope here).
 | MRA / ROM interleave | Yes | Stream hashes | Strong |
 | HPS ROM loader | Yes | Focused + loader-core boot | Strong in sim |
 | SDRAM CPU / GFX path | Yes | Behavioral in core TBs | Strong early |
-| V60 CPU | Substantial | Unit + early MAME match | Strong early; latent gaps |
+| V60 + FAST_IFETCH icache | Yes | Unit + faster VE | Strong early; latent gaps |
 | ROM-write bus | Yes | rom_write_ack + hang_watch | Fixed |
-| IRQ / vblank | Yes | VE rise; IRQ-scheduled diff | Strong early |
-| BG / sprite / palette | Present | Focused + realrom pixels | Attract CRC missing |
-| Dual video mux | Yes | diag TB | Fixed in tree |
-| Inputs | Wired | Limited | Needs coin/start scenario |
-| DIPs | OSD → DSW2 | Defaults = MAME | Improved |
-| ES5506 regs | Yes | Focused | Partial |
-| ES5506 voices | No | None | Missing |
-| Attract / gameplay | Partial (VE) | Boot to VE only | **Next milestone** |
+| IRQ / vblank | Yes | VE rise; ES5506 IRQ N/A | Strong early |
+| BG / sprite / palette | Yes | Frame-0 CRC match | Loop CRC open |
+| Dual video mux | Yes | diag TB | Fixed |
+| Inputs + DSW1/2 | Yes | matrix + scenarios | Strong in sim |
+| Watchdog | Yes | focused TB | Strong in sim |
+| ES5506 regs + voices | Yes | audio suite | Sim peak green; HW deferred |
+| Attract / gameplay | Partial | frame 0 + coin stim | **Loop CRC next** |
 
 ---
 
@@ -204,38 +201,38 @@ current-RTL MiSTer attract (requires RBF — out of scope here).
 
 ### Critical (gameplay path)
 
-1. **Attract video not proven at pixel level** — CPU hashes ≠ palette/RGB proof
-   for one attract loop.
-2. **Coin → start → play not proven in sim** — no input schedule, no post-credit
-   differential.
-3. **ES5506 PCM absent** — blocks audible gameplay; defer until visual play works.
+1. **Attract-loop CRC open after frame 0** — frame≥1 IDX/RGB diverge (IRQ/CPI
+   skew); see `DYNAGEAR_ATTRACT_FRAME_CRC.md`.
+2. **Full play CRC open** — coin/start schedule exists; long play match does not.
 
 ### High
 
-4. **V60 latent UNHANDLED** — triage from a gameplay MAME opcode/trace before
+3. **V60 latent UNHANDLED** — triage from a gameplay MAME opcode/trace before
    implementing unused FP/bitstring surface.
-5. **No input-matrix regression** locking P1/P2/SYSTEM/DSW2 vs MAME.
-6. **FPGA RAM headroom** — audio architecture must be time-multiplexed / MLAB;
-   do not add large BRAM voice banks.
+4. **FPGA RAM / timing headroom** — M10K at ceiling; Quartus voice-path timing
+   not closed (RBF deferred this pass).
+5. **ES5506 full PCM match / HW** — sim peak only; waveform + board soak open.
 
 ### Medium
 
-7. Watchdog timeout not implemented.
-8. ES5506 IRQ not integrated into `ssv_irq`.
-9. DSW1 coinage not OSD-exposed.
+7. ~~Watchdog timeout not implemented.~~ **Fixed:** 180-frame post-VE timeout → `wdog_rst` (`tb_ssv_watchdog`).
+8. ~~ES5506 IRQ not integrated into `ssv_irq`.~~ **Waived for Dyna Gear:** MAME does not bind ES5506 IRQ; keep unwired.
+9. ~~DSW1 coinage not OSD-exposed.~~ **Fixed:** OSD Coin A/B → `SSV_COINAGE_EXTENDED` nibbles.
 10. Video sync widths approximate vs PCB.
 11. Legacy `ssv_sprite_renderer` TB still failing (dead path).
 
 ### Low
 
 12. Full-core Verilator lint debt.
-13. Dirty working tree / incomplete commit freeze relative to `8b8312b`.
 
 ### Fixed in tree (preserve)
 
 - ROM-write hang → nop ack + TB.
 - Dual CE/HS/VS after VE → `use_core_video` mux + TB.
-- Hardcoded DSW2 → OSD mapping with MAME defaults.
+- DSW1/DSW2 OSD mapping with MAME defaults.
+- 180-frame watchdog → `wdog_rst`.
+- FAST_IFETCH + 32×8B ROM icache.
+- ES5506 voice PCM + p4 (sim).
 - Stale top-level SDC names cleaned.
 
 ---

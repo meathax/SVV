@@ -62,8 +62,7 @@ ssv_rom_loader loader (
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
-    .sdr_p4_req(sdr_p4_req), .sdr_p4_addr(sdr_p4_addr),
-    .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack), .rom_loaded(rom_loaded),
+    .rom_loaded(rom_loaded),
     .download_max_addr(download_max_addr)
 );
 
@@ -76,6 +75,8 @@ ssv_core core (
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
     .sdr_wr_din(core_wr_din), .sdr_wr_be(core_wr_be),
     .sdr_wr_ack(core_wr_ack),
+    .sdr_p4_req(sdr_p4_req), .sdr_p4_addr(sdr_p4_addr),
+    .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack),
     .in_dsw1(16'hffff), .in_dsw2(16'hfffd),
     .in_p1(16'hffff), .in_p2(16'hffff),
     .in_system(16'hffff), .in_extra(16'hffff),
@@ -99,6 +100,7 @@ logic [15:0] wr_cur;
 always_ff @(posedge clk) begin
     sdr_wr_ack <= 1'b0;
     sdr_p4_ack <= 1'b0;
+    sdr_p4_dout <= 16'd0;
     if (sdr_wr_req && !sdr_wr_ack) begin
         wr_cur = mem_rd(sdr_wr_addr);
         if (sdr_wr_be[0]) wr_cur[7:0] = sdr_wr_din[7:0];
@@ -106,6 +108,8 @@ always_ff @(posedge clk) begin
         store[sdr_wr_addr] = wr_cur;
         sdr_wr_ack <= 1'b1;
     end
+    if (sdr_p4_req)
+        sdr_p4_ack <= 1'b1;
 end
 
 logic p0_pending;

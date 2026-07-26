@@ -76,8 +76,8 @@ localparam logic [15:0] CR_LPE  = 16'h0008;
 localparam logic [15:0] CR_LEI  = 16'h0004;
 localparam logic [15:0] CR_CMPD = 16'h2000;
 
-typedef enum logic [2:0] {
-    S_START, S_WAIT1, S_REQ2, S_WAIT2, S_PROC, S_NEXT
+typedef enum logic [3:0] {
+    S_START, S_WAIT1, S_REQ2, S_WAIT2, S_PROC, S_FILT, S_MIX, S_NEXT
 } st_t;
 
 st_t state;
@@ -95,6 +95,12 @@ logic [7:0]  lvramp, rvramp;
 logic [8:0]  ecount, k1ramp, k2ramp;
 logic [31:0] vstart, vend, accum;
 logic [17:0] o4n1, o3n1, o3n2, o2n1, o2n2, o1n1;
+// Pipeline break: filter/lerp in S_PROC, volume/mix/env in S_MIX (timing).
+logic        proc_active;
+logic        proc_do_irq;
+logic [31:0] proc_accn;
+logic [15:0] proc_crn;
+logic [17:0] proc_p1, proc_p2, proc_p3, proc_p4;
 
 wire stopped = !cr_valid || |(cr & CR_STOP) || |(cr & CR_CMPD);
 
@@ -194,6 +200,14 @@ always_ff @(posedge clk) begin
         eng_k2_w <= '0;
         eng_ecount_w <= '0;
         eng_irq_voice <= '0;
+        proc_active <= 1'b0;
+        proc_do_irq <= 1'b0;
+        proc_accn <= '0;
+        proc_crn <= '0;
+        proc_p1 <= '0;
+        proc_p2 <= '0;
+        proc_p3 <= '0;
+        proc_p4 <= '0;
         for (int i = 0; i < 32; i++) filtcount[i] <= '0;
     end else begin
         sample_tick <= 1'b0;
@@ -286,38 +300,28 @@ always_ff @(posedge clk) begin
                 end
 
                 S_PROC: begin
-                    // Defaults for writebacks
-                    eng_accum_w <= accum;
-                    eng_cr_w <= cr;
-                    eng_o1n1_w <= o1n1;
-                    eng_o2n1_w <= o2n1;
-                    eng_o2n2_w <= o2n2;
-                    eng_o3n1_w <= o3n1;
-                    eng_o3n2_w <= o3n2;
-                    eng_o4n1_w <= o4n1;
-                    eng_lvol_w <= lvol;
-                    eng_rvol_w <= rvol;
-                    eng_k1_w <= k1;
-                    eng_k2_w <= k2;
-                    eng_ecount_w <= ecount;
+                    // Stage 1: lerp + first two filter poles + loop/IRQ math.
+                    proc_active <= 1'b0;
+                    proc_do_irq <= 1'b0;
+                    proc_accn <= accum;
+                    proc_crn <= cr;
+                    proc_p1 <= o1n1;
+                    proc_p2 <= o2n1;
+                    proc_p3 <= o3n1;
+                    proc_p4 <= o4n1;
 
                     if (!stopped) begin
                         logic signed [15:0] ip;
-                        logic signed [17:0] p1, p2, p3, p4, xin;
+                        logic signed [17:0] p1, p2, xin;
                         logic [31:0] accn;
                         logic [15:0] crn;
-                        logic signed [31:0] aL, aR;
-                        logic [15:0] gL, gR;
                         logic do_irq;
-                        logic [1:0] lpm;
-                        logic [3:0] fcc;
 
                         ip  = lerp(s1, s2, accum);
                         accn = (cr & CR_DIR) ? (accum - {15'd0, fc})
                                              : (accum + {15'd0, fc});
                         crn = cr;
                         do_irq = 1'b0;
-                        lpm = cr[9:8];
 
                         if (!(cr & CR_DIR) && (accn > vend) && !(cr & CR_LEI)) begin
                             if (cr & CR_IRQE) begin crn = crn | CR_IRQ; do_irq = 1'b1; end
@@ -344,46 +348,87 @@ always_ff @(posedge clk) begin
                         xin = {{2{ip[15]}}, ip};
                         p1 = lp(xin, k1, o1n1);
                         p2 = lp(p1, k1, o2n1);
-                        unique case (lpm)
+
+                        proc_active <= 1'b1;
+                        proc_do_irq <= do_irq;
+                        proc_accn <= accn;
+                        proc_crn <= crn;
+                        proc_p1 <= p1;
+                        proc_p2 <= p2;
+                    end
+                    state <= S_FILT;
+                end
+
+                S_FILT: begin
+                    // Stage 2: remaining filter poles (mode-dependent).
+                    if (proc_active) begin
+                        logic signed [17:0] p3, p4;
+                        unique case (cr[9:8])
                             2'b00: begin
-                                p3 = hp(p2, k2, o3n1, o2n2);
+                                p3 = hp(proc_p2, k2, o3n1, o2n2);
                                 p4 = hp(p3, k2, o4n1, o3n2);
                             end
                             2'b01: begin
-                                p3 = lp(p2, k1, o3n1);
+                                p3 = lp(proc_p2, k1, o3n1);
                                 p4 = hp(p3, k2, o4n1, o3n2);
                             end
                             2'b10: begin
-                                p3 = lp(p2, k2, o3n1);
+                                p3 = lp(proc_p2, k2, o3n1);
                                 p4 = lp(p3, k2, o4n1);
                             end
                             default: begin
-                                p3 = lp(p2, k1, o3n1);
+                                p3 = lp(proc_p2, k1, o3n1);
                                 p4 = lp(p3, k2, o4n1);
                             end
                         endcase
+                        proc_p3 <= p3;
+                        proc_p4 <= p4;
+                    end
+                    state <= S_MIX;
+                end
+
+                S_MIX: begin
+                    // Stage 2: volume, mix accumulate, register writebacks.
+                    eng_accum_w <= accum;
+                    eng_cr_w <= cr;
+                    eng_o1n1_w <= o1n1;
+                    eng_o2n1_w <= o2n1;
+                    eng_o2n2_w <= o2n2;
+                    eng_o3n1_w <= o3n1;
+                    eng_o3n2_w <= o3n2;
+                    eng_o4n1_w <= o4n1;
+                    eng_lvol_w <= lvol;
+                    eng_rvol_w <= rvol;
+                    eng_k1_w <= k1;
+                    eng_k2_w <= k2;
+                    eng_ecount_w <= ecount;
+
+                    if (proc_active) begin
+                        logic signed [31:0] aL, aR;
+                        logic [15:0] gL, gR;
+                        logic [3:0] fcc;
 
                         gL = vol_gain(lvol);
                         gR = vol_gain(rvol);
-                        aL = $signed(p4[17:2]) * $signed({1'b0, gL});
-                        aR = $signed(p4[17:2]) * $signed({1'b0, gR});
+                        aL = $signed(proc_p4[17:2]) * $signed({1'b0, gL});
+                        aR = $signed(proc_p4[17:2]) * $signed({1'b0, gR});
                         mix_l <= mix_l + (aL >>> 11);
                         mix_r <= mix_r + (aR >>> 11);
 
                         eng_wr_accum <= 1'b1;
-                        eng_accum_w  <= accn;
+                        eng_accum_w  <= proc_accn;
                         eng_wr_filt  <= 1'b1;
-                        eng_o1n1_w   <= p1;
+                        eng_o1n1_w   <= proc_p1;
                         eng_o2n2_w   <= o2n1;
-                        eng_o2n1_w   <= p2;
+                        eng_o2n1_w   <= proc_p2;
                         eng_o3n2_w   <= o3n1;
-                        eng_o3n1_w   <= p3;
-                        eng_o4n1_w   <= p4;
-                        if (crn != cr) begin
+                        eng_o3n1_w   <= proc_p3;
+                        eng_o4n1_w   <= proc_p4;
+                        if (proc_crn != cr) begin
                             eng_wr_cr <= 1'b1;
-                            eng_cr_w  <= crn;
+                            eng_cr_w  <= proc_crn;
                         end
-                        if (do_irq) begin
+                        if (proc_do_irq) begin
                             eng_irq_set <= 1'b1;
                             eng_irq_voice <= voice_i;
                         end

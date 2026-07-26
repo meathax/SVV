@@ -17,3 +17,11 @@ set_multicycle_path -setup 3 \
     -from $v60_registers -to $v60_registers
 set_multicycle_path -hold 2 \
     -from $v60_registers -to $v60_registers
+
+# ES5506 voice engine shares the same ~16 MHz CE as the CPU. Filter/mix
+# stages are CE-gated register updates inside ssv_es5506_voice.
+set voice_registers [get_registers {*|ssv_es5506_voice:sound_voices|*}]
+set_multicycle_path -setup 3 \
+    -from $voice_registers -to $voice_registers
+set_multicycle_path -hold 2 \
+    -from $voice_registers -to $voice_registers

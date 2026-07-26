@@ -97,6 +97,10 @@ localparam CONF_STR = {
     "O[13:12],Lives,2,1,3,4;",
     "O[14],Free Play,Off,On;",
     "O[15],Health,4 Hearts,3 Hearts;",
+    // Dyna Gear DSW1: SSV_COINAGE_EXTENDED (Coin A low nibble, Coin B high).
+    // OSD index 0 = 1C/1C (DIP all Off = 0xF / 0xF).
+    "O[19:16],Coin A,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
+    "O[23:20],Coin B,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
     "-;",
     "R[0],Reset;",
     "J1,B1,B2,B3,Start,Coin,Test,Service;",
@@ -197,8 +201,9 @@ logic        rom_sig_ok;
 wire         probe_active = rom_loaded && sdram_ready_sys &&
                             !ioctl_download && !probe_done;
 
+wire wdog_rst;
 wire core_reset = video_reset | ioctl_download | ~rom_loaded |
-                  ~sdram_ready_sys | ~probe_done;
+                  ~sdram_ready_sys | ~probe_done | wdog_rst;
 assign LED_USER = ~rom_loaded;
 
 wire ld_wr_req, ld_wr_ack;
@@ -315,8 +320,31 @@ wire [15:0] system_port = {8'hff,
     ~{3'b000, test_button, 1'b0, service_button,
       coin2_button, coin1_button}};
 
-// Dyna Gear DSW1: coinage extended defaults (all Off = free/easy 0xFFFF).
-wire [15:0] dsw1_port = 16'hffff;
+// Map OSD index → MAME SSV_COINAGE_EXTENDED nibble (default 0 → 0xF = 1C/1C).
+function automatic [3:0] coinage_nibble(input [3:0] osd);
+    case (osd)
+        4'd0:  coinage_nibble = 4'hF; // 1C/1C
+        4'd1:  coinage_nibble = 4'h7; // 4C/1C
+        4'd2:  coinage_nibble = 4'h8; // 3C/1C
+        4'd3:  coinage_nibble = 4'h9; // 2C/1C
+        4'd4:  coinage_nibble = 4'h6; // 2C/3C
+        4'd5:  coinage_nibble = 4'hE; // 1C/2C
+        4'd6:  coinage_nibble = 4'hD; // 1C/3C
+        4'd7:  coinage_nibble = 4'hC; // 1C/4C
+        4'd8:  coinage_nibble = 4'hB; // 1C/5C
+        4'd9:  coinage_nibble = 4'hA; // 1C/6C
+        4'd10: coinage_nibble = 4'h5; // Multi A
+        4'd11: coinage_nibble = 4'h4; // Multi B
+        4'd12: coinage_nibble = 4'h3; // Multi C
+        4'd13: coinage_nibble = 4'h2; // Multi D
+        4'd14: coinage_nibble = 4'h1; // Multi E
+        default: coinage_nibble = 4'hF;
+    endcase
+endfunction
+wire [15:0] dsw1_port = {8'hff,
+    coinage_nibble(status[23:20]), // Coin B
+    coinage_nibble(status[19:16])  // Coin A
+};
 
 // Map OSD → active-low DSW2 bits (see MAME INPUT_PORTS_START(dynagear)).
 wire [1:0] dip_difficulty =
@@ -362,6 +390,7 @@ ssv_core core (
     .rgb(core_rgb), .ce_pixel(core_ce),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
+    .wdog_rst(wdog_rst),
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
 
