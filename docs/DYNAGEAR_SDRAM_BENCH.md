@@ -216,6 +216,18 @@ sparse-scene frames.
 (`frame,bg_overruns,obj_overruns,p1_lat_max,obj_max_line_cycles`) these came
 from.
 
+### `+SDRAM_REAL` is deterministic and can be baselined
+
+Two independent 950-frame real-SDRAM runs (different builds, hours apart)
+produced byte-identical CRC streams,
+SHA-256 `0a44010a0f797691a05886f977333551fa55bc213cb220afa1bdea24914744fb`, and
+identical latency/overrun statistics. So the real-SDRAM mode is a valid
+regression baseline in its own right, separate from the stub golden. Local
+copies (gitignored, `sim_output/` is not tracked):
+
+* `sim_output/diff/rtl_sdramreal_gameplay_frames.crc`
+* `sim_output/diff/rtl_sdramreal_perframe.csv`
+
 ### CRC divergence under `+SDRAM_REAL`
 
 Frame 0 is CRC-identical to the stub run (`idx=d3b2fac2 rgb=7fdb4700`); frame 1
