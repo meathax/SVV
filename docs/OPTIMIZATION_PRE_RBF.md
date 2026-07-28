@@ -57,8 +57,103 @@ from 11 to 21.
 | `ENABLE_DIAG_VIDEO=0` | Strip diag raster for release candidate |
 | ES5506 banks → `ssv_mlab32_sdp` (altsyncram MLAB) | Inference failed on array-in-always_ff; map rose to ~42.4k ALMs |
 
+## Pass of 28 Jul 2026 (evening) — M10K hunt before the next fit
+
+Starting point: **532 / 553 M10K (96%)** against **34,524 / 41,910 ALMs (82%)**. M10K is the
+binding resource by a wide margin, so anything that trades block RAM for logic is a good
+trade at this operating point even when it looks like a regression on paper.
+
+### Where the 532 blocks actually live
+
+| Owner | Blocks | Reclaimable? |
+|---|---:|---|
+| `sprite_ram` 256, `palette_ram` 128, `work_ram` 64 | **448** | **No.** Each is exactly its decode window — `$100000-$13ffff`, `$140000-$15ffff`, `$000000-$00ffff` — and each sits at the Cyclone V floor for a 16-bit dual-port memory |
+| `sys/` — `ascal` 30, two OSD buffers 8, `shadowmask` 1 | **39** | **No.** Upstream framework; editing it is a hard stop in `CLAUDE.md` |
+| Sprite renderer — `descriptor_cache` 22, `line_entries` 21, `line_page_starts` 2 | **45** | Partly — see below |
+
+The 448 deserve a word, because "76% of block memory bits but 96% of blocks" invites the
+theory that something is packed wastefully. It is not. A 16-bit memory can only use 8,192 of
+an M10K's 10,240 bits, because the useful geometries are 256×40 / 512×20 / 1024×10 — none of
+which divides 16 evenly. That 20% is a device property, not a design flaw, and the only way
+to capture it would be to pack five 16-bit words into four 20-bit locations. **448 is the
+floor for this memory map**, and the memory map is board-accurate.
+
+### Taken this pass
+
+| Change | Expected | Why it is safe |
+|---|---|---|
+| `line_page_starts` (240×77) `ramstyle` M10K → **MLAB** | **−2 M10K**, +~32 MLAB cells | Shares `line_count_addr`, its access shape *and* its read/write states with `line_counts` three lines above, which has been MLAB all along. The `no_rw_check` argument documented there covers it unchanged |
+| `descriptor_cache` split into **`_lo[52:0]` + `_hi[127:53]`** | up to **−4 M10K** | Lever 4 below. Same bits, same addresses, same cycle — a packing hint, not a capacity change |
+
+The split point is **53, not the natural 64**. Bits 106..127 are dead, so a 64/64 split
+leaves all the slack bunched in the upper half and saves nearly nothing; splitting the *live*
+106 bits evenly is what lets each half land on 3 slices of 512×20 across 3 depth rows.
+
+**Verified behaviour-neutral.** Same 1,250-frame `coin_start_p1_long` soak before and after,
+CRC streams compared as whole files rather than eyeballed:
+
+```
+$ md5sum baseline_rename.crc long_frames.crc
+a8abacd020b8662609a4cb7defdaa26f  baseline_rename.crc
+a8abacd020b8662609a4cb7defdaa26f  long_frames.crc
+```
+
+Every derived counter matched too — `CACHE_BUILD max=44020 (frame 527)`, `P1_LATENCY=0`,
+`bg_ack_while_obj_owns=0`, `nonblack=59948119`, `pc=00f1057b`, `max_line_entries=86`,
+`overruns bg=0 obj=0`.
+
+Both figures are still **predictions until the next fit**. The changes are behaviourally
+proven; the M10K savings are not, because only the Fitter RAM Summary can confirm which
+packing mode Quartus actually chose. Check `line_page_starts` has moved to the MLAB column,
+and that `descriptor_cache_lo` + `descriptor_cache_hi` together come to fewer than 22 blocks.
+If either is unchanged, the change is inert rather than harmful — but say so rather than
+carrying a claimed −6 that never happened.
+
+### Ruled out this pass, with the reason
+
+- **`ascal o_dpram` → MLAB (−4).** Lever 3's stated precondition is now met — the 148.5 MHz
+  domain came back clean at +0.392 ns. But `ascal.vhd` lives in `sys/`, and `CLAUDE.md` makes
+  that a hard stop rather than a judgement call. Left alone deliberately; it is available if
+  the framework rule is ever revisited.
+- **`descriptor_cache` 1536 → 1024 entries (−11).** Already a recorded dead end on attract
+  (~1,277 descriptors). The testbench now prints `CACHE_PEAK` every run, and gameplay is far
+  worse than attract:
+
+  ```
+  CACHE_PEAK=1519 of 1536 entries (frame 527)
+  ```
+
+  **Seventeen spare slots — 1.1% headroom.** This is not merely "1024 is too small"; it says
+  1,536 is itself close to marginal, and it was chosen when attract's ~1,277 was the only
+  number anyone had. Nothing overflowed across 1,250 frames (`overruns obj=0`), so there is
+  no defect to fix and no justification for spending 22 more M10K on a bigger cache when only
+  21 blocks are free. But **growing** this cache is now a known future cost, and any change
+  that raises descriptor counts should re-read `CACHE_PEAK` before being believed. Worth a
+  wider scenario sweep at some point purely to find the real ceiling.
+- **The `scroll` file (~1k flops).** Carried `ramstyle = "MLAB"`, which was never achievable
+  and was being silently ignored — the fit report lists `scroll[63][1]`, `scroll[62][0]` and
+  friends as discrete registers. All 64 words are read combinationally in parallel by
+  `sprite_offsets`, `tilemap_scrolls` and the individual control words, and the array takes a
+  reset; both rule out memory inference. The attribute is removed and replaced with a comment
+  explaining why flops are correct here. **No resource change** — this is documentation
+  honesty, not an optimisation.
+
+### ALMs: one honest answer
+
+`s32_v60` is **20,015 ALMs — 58% of the entire design**. Nothing else is close
+(`sprite_renderer` 2,032, `ascal` 2,147, `sound_registers` 936). There is no meaningful ALM
+reduction available anywhere else, and the V60 route is opcode gating, which the audit that
+produced the hit list explicitly recommended shipping *enabled*. So: no ALM change this pass,
+by choice rather than by omission. At 82% that is the right call — ALMs are not what is
+scarce.
+
 ## Remaining levers, ranked
 
+0. **Check the two M10K predictions from the 28 Jul evening pass** in the next
+   Fitter RAM Summary: `line_page_starts` should leave the M10K column for
+   MLAB (−2), and `descriptor_cache_lo` + `descriptor_cache_hi` should total
+   under 22 blocks (−4 if they land on 512×20). Expected total: 532 − 6 = **526**.
+   Both are behaviourally verified already; only the packing is unproven.
 1. **Re-fit and re-STA.** Everything above is uncompiled. Nothing here counts
    until `report-quartus.ps1 -RequireReady` is true. Two specific things to
    check in that report rather than assume:
@@ -74,14 +169,17 @@ from 11 to 21.
    bit-field (`0x5D`) and FP (`0x5C`/`0x5F`) groups are all partial
    implementations. Produce a MAME opcode hit list over a full Dyna Gear
    playthrough, then parameter-gate whatever never executes. Do **not** guess.
-3. **`ascal o_dpram` → MLAB (−4 M10K).** `i_dpram` is already done. `o_dpram`
-   is the same 32×128 shape, but its read port is on the 148.5 MHz `o_clk` —
-   the only domain currently missing setup. Do this *after* the next STA shows
-   that domain clean, not before.
-4. **Descriptor-cache geometry (up to −4 M10K, cheap).** Quartus packed the
-   1536×106 cache as 2 slices of 1024×10 = 22 blocks; 3 slices of 512×20 would
-   have been 18. Splitting the array into two ~53-bit halves usually steers
-   this. Test it against the fit report — do not assume the mode.
+3. **`ascal o_dpram` → MLAB (−4 M10K).** *Precondition met, but blocked.* The
+   148.5 MHz domain came back clean at +0.392 ns, so the "wait for the STA"
+   condition is satisfied. `ascal.vhd` is in `sys/`, however, and `CLAUDE.md`
+   treats that as a hard stop rather than a cost/benefit call — so this is
+   deliberately **not** taken. It remains the cheapest −4 available if the
+   framework rule is ever revisited for this core.
+4. ~~**Descriptor-cache geometry (up to −4 M10K, cheap).**~~ **Taken 28 Jul
+   2026** — split into `descriptor_cache_lo[52:0]` + `descriptor_cache_hi[127:53]`.
+   Split at 53 rather than 64 because bits 106..127 are dead. Confirm the
+   realised packing in the next Fitter RAM Summary; the change is behaviourally
+   neutral by construction, so a null result costs nothing but is worth knowing.
 5. **Precompute sprite descriptor coordinates (~−8 M10K, ~−400 ALMs).**
    Storing resolved `sx`/`sy`/`code`/`color` instead of raw local+global words
    gets the descriptor under ~60 bits and deletes the duplicated render-side

@@ -114,8 +114,18 @@ logic [127:0] cache_decode_q;
 logic cache_pending;
 // After storing the last cache slot, finish its line buckets then stop.
 logic cache_stop_after_bucket;
+// Split in two to steer M10K packing, not to change what is stored. As one
+// 1536 x 128 array Quartus packed the 106 live bits as 11 slices of 1024 x 10
+// = 22 blocks. Two halves of 53 live bits each should take 3 slices of
+// 512 x 20 over 3 depth rows = 9 blocks apiece, i.e. 18 for the pair. The
+// split point is 53, not the natural 64, because bits 106..127 are dead: a
+// 64/64 split would leave all the slack bunched in the upper half and save
+// almost nothing. Contents, addresses and timing are identical either way --
+// confirm the packing in the Fitter RAM Summary rather than assuming it.
 (* ramstyle = "M10K, no_rw_check" *)
-logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
+logic [52:0]  descriptor_cache_lo [0:CACHE_ENTRIES-1];
+(* ramstyle = "M10K, no_rw_check" *)
+logic [127:53] descriptor_cache_hi [0:CACHE_ENTRIES-1];
 
 (* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
@@ -123,7 +133,12 @@ logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
 (* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
-(* ramstyle = "M10K, no_rw_check" *)
+// MLAB, not M10K. At 240 x 77 this costs two M10K blocks but only about 32
+// MLAB cells, and M10K is the scarce resource in this design (532/553 used
+// against 82% ALM occupancy). It shares line_count_addr and its access shape
+// with line_counts above, so the no_rw_check argument documented there applies
+// unchanged.
+(* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_starts [0:239];
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 logic [7:0] clear_y;
@@ -633,10 +648,14 @@ always_ff @(posedge clk) begin
     if ((state == RENDER_READ) ||
         ((state == RENDER_PREP) &&
          (render_line_slot + 1'd1 < render_line_count)))
-        cache_q <= descriptor_cache[line_entry_descriptor];
-    if (cache_we)
-        descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
-            <= cache_write_data_q;
+        cache_q <= {descriptor_cache_hi[line_entry_descriptor],
+                    descriptor_cache_lo[line_entry_descriptor]};
+    if (cache_we) begin
+        descriptor_cache_lo[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
+            <= cache_write_data_q[52:0];
+        descriptor_cache_hi[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
+            <= cache_write_data_q[127:53];
+    end
 end
 
 ssv_gfx_row_fetch fetch (

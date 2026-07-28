@@ -145,6 +145,20 @@ logic obj_owned_d;
 int dump_tilemap_frame;
 logic [5:0] tm_state_d;
 
+// Does Dyna Gear ever read the $500008 "extra inputs" window? The SAM-5127
+// cartridge has filtered 3P/4P connectors and this is the only decoded input
+// window we cannot account for, so it is the candidate for where those players
+// read back. Counting the accesses settles whether the port is dead for this
+// title (expected) or live (which would be a surprise worth chasing).
+int extra_reads;
+logic extra_ack_d;
+
+// Peak descriptor-cache occupancy. CACHE_ENTRIES is 1536 and costs 22 M10K of
+// a 553-block device; 1024 entries would cost 11. Whether that reduction is
+// even arguable depends on how close real gameplay gets to the ceiling, so
+// measure it rather than guess.
+int cache_peak, cache_peak_frame;
+
 // Sticky multi-cycle ack (covers CE gaps from fractional enable).
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
@@ -162,6 +176,10 @@ always_ff @(posedge clk_sys) begin
         bg_fetch_state_d <= 2'd0;
         obj_owned_d <= 1'b0;
         tm_state_d <= 6'd0;
+        extra_reads <= 0;
+        extra_ack_d <= 1'b0;
+        cache_peak <= 0;
+        cache_peak_frame <= 0;
     end else begin
         // Ownership check, written against observable behaviour rather than
         // against the fix, so it is valid with or without it: the background
@@ -170,6 +188,16 @@ always_ff @(posedge clk_sys) begin
         // object renderer's tile data as its own background tile.
         bg_fetch_state_d <= dut.background_renderer.fetch.state;
         obj_owned_d      <= dut.obj_busy;
+
+        // Count completed CPU reads of the $500008 extra-input window.
+        extra_ack_d <= dut.ack_r;
+        if (dut.sel_extra && !dut.m_we && dut.ack_r && !extra_ack_d)
+            extra_reads <= extra_reads + 1;
+
+        if (dut.sprite_renderer.cache_count > cache_peak) begin
+            cache_peak <= dut.sprite_renderer.cache_count;
+            cache_peak_frame <= post_ve_frames;
+        end
 
         // Trace tilemap tile fetches on the requested frame. TILE_PREP is
         // where code+attr have both landed, so every field below is settled.
@@ -714,8 +742,10 @@ always_ff @(posedge clk_sys) begin
                         dut.sprite_renderer.bucket_y *
                         dut.sprite_renderer.LINE_SLOTS + overflow_i]
                 };
-                overflow_desc =
-                    dut.sprite_renderer.descriptor_cache[overflow_entry];
+                overflow_desc = {
+                    dut.sprite_renderer.descriptor_cache_hi[overflow_entry],
+                    dut.sprite_renderer.descriptor_cache_lo[overflow_entry]
+                };
                 if ((overflow_desc[63:48] <= 16'd7) &&
                     (overflow_desc[47:32] == 16'd0) &&
                     ((dut.scroll[59][14] ? overflow_desc[27:26] :
@@ -922,6 +952,9 @@ initial begin
              cache_build_max, cache_build_max_frame, cache_deadline_hits);
     $display("P1_LATENCY=%0d bg_ack_while_obj_owns=%0d",
              p1_latency, bg_ack_while_obj_owns);
+    $display("EXTRA_PORT $500008 reads=%0d", extra_reads);
+    $display("CACHE_PEAK=%0d of %0d entries (frame %0d)",
+             cache_peak, dut.sprite_renderer.CACHE_ENTRIES, cache_peak_frame);
     if (bg_ack_while_obj_owns != 0)
         $fatal(1, "background renderer latched %0d acks it did not own",
                bg_ack_while_obj_owns);
