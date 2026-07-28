@@ -1,6 +1,5 @@
 /* verilator lint_off WIDTHEXPAND */
 /* verilator lint_off MULTIDRIVEN */
-/* verilator lint_off PROCASSINIT */
 `timescale 1ns/1ps
 
 module tb_ssv_cached_sprite_renderer;
@@ -82,7 +81,10 @@ end
 always_ff @(posedge clk) begin
     if (batch_plot_count != 0) begin
         plots <= plots + batch_plot_count;
-        if (plots == 0)
+        // Key first-pixel capture directly from its sentinel.  Using the
+        // separately updated plot count makes this monitor scheduler-order
+        // dependent when a batch and the waiting test resume together.
+        if (first_x < 0)
             first_x <= plot_x[batch_first_lane * 9 +: 9];
     end
     for (monitor_lane = 0; monitor_lane < 4;
@@ -104,7 +106,7 @@ end
 integer cycles;
 always_ff @(posedge clk) begin
     cycles <= cycles + 1;
-    if (cycles > 2000)
+    if (cycles > 10000)
         $fatal(1,
             "timeout state=%0d cache_busy=%0b ready=%0b count=%0d index=%0d busy=%0b",
             dut.state, cache_busy, cache_ready, dut.cache_count,
@@ -255,6 +257,86 @@ initial begin
         $fatal(1,
                "tilemap rendered outside 65-line slice count=%0d",
                plots);
+
+    // Character-select uses 52 one-tile descriptors on several lines. The
+    // object pass starts after the background renderer and has 2,558 system
+    // clocks left before the next line flip in the full-core reproducer. This
+    // unit ROM model adds one handshake clock to each of 133 row fetches, so
+    // its equivalent deadline is 2,691 clocks.
+    for (i = 0; i < 131072; i = i + 1)
+        sprite_mem[i] = 16'd0;
+    // Four 21-tile map strips + 47 one-tile sprites + one two-tile
+    // sprite = 52 descriptors and 133 row fetches, matching frame 169.
+    sprite_mem[0] = 16'h631f; // 32 locals, y-size eight
+    sprite_mem[1] = 16'h0400;
+    sprite_mem[4] = 16'h6312; // 19 one-tile locals
+    sprite_mem[5] = 16'h0800;
+    sprite_mem[8] = 16'h6700; // one two-tile local
+    sprite_mem[9] = 16'h0c00;
+    sprite_mem[13] = 16'h8000; // end marker in fourth global entry
+
+    tilemap_scrolls = 512'd0;
+    tilemap_scrolls[4 * 16 +: 16] = 16'h0200;
+    tilemap_scrolls[7 * 16 +: 16] = 16'h2600;
+    tilemap_scrolls[8 * 16 +: 16] = 16'h0200;
+    tilemap_scrolls[11 * 16 +: 16] = 16'h2600;
+    tilemap_scrolls[12 * 16 +: 16] = 16'h0200;
+    tilemap_scrolls[15 * 16 +: 16] = 16'h2600;
+    tilemap_scrolls[16 * 16 +: 16] = 16'h0200;
+    tilemap_scrolls[19 * 16 +: 16] = 16'h2600;
+    for (i = 0; i < 21; i = i + 1) begin
+        sprite_mem[16'h0802 + i * 64] = 16'd0;
+        sprite_mem[16'h0803 + i * 64] = 16'd1;
+    end
+    for (i = 0; i < 4; i = i + 1) begin
+        sprite_mem[16'h1000 + i * 4] = 16'd1 + i;
+        sprite_mem[16'h1001 + i * 4] = 16'd0;
+        sprite_mem[16'h1002 + i * 4] = 16'd0;
+        sprite_mem[16'h1003 + i * 4] = 16'd20;
+    end
+    for (i = 4; i < 32; i = i + 1) begin
+        sprite_mem[16'h1000 + i * 4] = 16'd8 + i;
+        sprite_mem[16'h1001 + i * 4] = 16'h0001;
+        sprite_mem[16'h1002 + i * 4] = 16'd10;
+        sprite_mem[16'h1003 + i * 4] = 16'h03e3;
+    end
+    for (i = 0; i < 19; i = i + 1) begin
+        sprite_mem[16'h2000 + i * 4] = 16'd40 + i;
+        sprite_mem[16'h2001 + i * 4] = 16'h0001;
+        sprite_mem[16'h2002 + i * 4] = 16'd10;
+        sprite_mem[16'h2003 + i * 4] = 16'h03e3;
+    end
+    sprite_mem[16'h3000] = 16'd80;
+    sprite_mem[16'h3001] = 16'h0001;
+    sprite_mem[16'h3002] = 16'd10;
+    sprite_mem[16'h3003] = 16'h03e3;
+
+    plots = 0;
+    first_x = -1;
+    cycles = 0;
+    target_y = 9'd20;
+    @(negedge clk);
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+    wait (cache_ready);
+    if (cache_overflow || dut.cache_count != 52)
+        $fatal(1, "dense cache mismatch overflow=%0b count=%0d",
+               cache_overflow, dut.cache_count);
+
+    cycles = 0;
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    wait (done);
+    @(posedge clk);
+    if (plots != 133 || first_x != 0)
+        $fatal(1, "dense line coverage count=%0d first=%0d", plots, first_x);
+    $display("DENSE_LINE cycles=%0d limit=2691", cycles);
+    if (cycles > 2691)
+        $fatal(1, "dense line deadline cycles=%0d limit=2691", cycles);
     $display("PASS tb_ssv_cached_sprite_renderer");
     $finish;
 end

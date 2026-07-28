@@ -18,7 +18,8 @@ STEP = int(os.environ.get("DUMP_STEP", "25"))
 LAST = START + (COUNT - 1) * STEP + 10
 
 VFLAGS = [
-    "--binary", "--timing", "-j", "0", "-Wno-fatal",
+    "--binary", "--timing", "--assert", "--threads", "1",
+    "--verilate-jobs", "4", "--build-jobs", "4", "-Wno-fatal",
     "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "-Wno-UNOPTFLAT",
     "-Wno-CASEINCOMPLETE", "-Wno-BLKANDNBLK", "-Wno-MULTIDRIVEN",
     "-Wno-INITIALDLY", "-Wno-DECLFILENAME", "-Wno-PINMISSING",
@@ -104,9 +105,10 @@ def main() -> int:
         pass
 
     print("=== BUILD ===")
+    subprocess.run(["verilator-safe", "status"], cwd=ROOT, check=True)
     build = subprocess.run(
         [
-            "verilator",
+            "verilator-safe",
             *VFLAGS,
             "--top-module",
             "tb_ssv_frame_crc",
@@ -130,6 +132,8 @@ def main() -> int:
 
     bin_path = OUT / "tb_ssv_frame_crc"
     cmd = [
+        "verilator-sim-safe",
+        "--",
         str(bin_path),
         "+SCENARIO=coin_start_p1",
         f"+FRAMES={LAST}",
@@ -142,7 +146,8 @@ def main() -> int:
         f"+DUMP_PPM_COUNT={COUNT}",
         f"+DUMP_PPM_STEP={STEP}",
     ]
-    print("=== RUN", " ".join(cmd[1:]), "===")
+    print("=== RUN", " ".join(cmd[3:]), "===")
+    subprocess.run(["verilator-safe", "status"], cwd=ROOT, check=True)
     run = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     (OUT / "run.log").write_text(run.stdout + run.stderr)
     sys.stdout.write(run.stdout)

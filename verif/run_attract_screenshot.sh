@@ -8,7 +8,8 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 65536
 OUT="${TMPDIR:-/tmp}/ssv-attract-shot"
 mkdir -p "$OUT" sim_output/frames sim_output/diff
 
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -33,7 +34,8 @@ export PPM_PATH_ENV="$PPM_PATH"
 export PNG_PATH_ENV="$PNG_PATH"
 
 echo "=== BUILD tb_ssv_frame_crc ==="
-if ! verilator "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
+verilator-safe status
+if ! verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   --Mdir "$OUT" -o tb_ssv_frame_crc -Iverif "${CORE[@]}" verif/tb_ssv_frame_crc.sv \
   >"$OUT/build.log" 2>&1; then
   echo "BUILD FAIL"; tail -50 "$OUT/build.log"; exit 1
@@ -41,7 +43,8 @@ fi
 echo "BUILD OK"
 
 echo "=== RUN attract_idle DUMP_PPM_FRAME=$PPM_FRAME ==="
-"$OUT/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/tb_ssv_frame_crc" \
   +SCENARIO=attract_idle \
   +FRAMES=8 +SOAK_FRAMES=5 \
   +FRAME_CRC=sim_output/diff/rtl_attract_shot.crc \

@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 ROOT="$PWD"
 CPU="rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv"
-VFLAGS="--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP -Wno-TIMESCALEMOD +define+SIMULATION"
+VFLAGS="--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP -Wno-TIMESCALEMOD +define+SIMULATION"
 
 declare -A TB=(
   [tb_v60_smoke]="SMOKE PASS"
@@ -50,17 +50,19 @@ pass=0; fail=0; failed=""
 for tb in $ORDER; do
   src="verif/v60/${tb}.sv"
   [ -f "$src" ] || { echo "SKIP  $tb (no file)"; continue; }
-  bdir="$OUTDIR/$tb"; rm -rf "$bdir"; mkdir -p "$bdir"
+  bdir="$OUTDIR/$tb"; mkdir -p "$bdir"
   if is_icarus "$tb"; then
     if ! iverilog -g2012 -Wno-timescale -o "$bdir/$tb.vvp" -s "$tb" $CPU "$src" > "$bdir.log" 2>&1; then
       echo "BUILDFAIL $tb (icarus)  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
     fi
     out="$(cd "$bdir" && timeout 300 vvp "$tb.vvp" 2>&1)"
   else
-    if ! verilator $VFLAGS --top-module "$tb" --Mdir "$bdir" -o "$tb" $CPU "$src" > "$bdir.log" 2>&1; then
+    verilator-safe status
+    if ! verilator-safe $VFLAGS --top-module "$tb" --Mdir "$bdir" -o "$tb" $CPU "$src" > "$bdir.log" 2>&1; then
       echo "BUILDFAIL $tb  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
     fi
-    out="$("$bdir/$tb" 2>&1)"
+    verilator-safe status
+    out="$(verilator-sim-safe -- "$bdir/$tb" 2>&1)"
   fi
   if echo "$out" | grep -qF "${TB[$tb]}"; then
     extra="$(echo "$out" | grep -E 'FETCH PERF:|LANES|cycles=' | head -1)"
@@ -74,7 +76,8 @@ for tb in $ORDER; do
 done
 
 if [ -x "$OUTDIR/tb_v60_smc/tb_v60_smc" ]; then
-  if "$OUTDIR/tb_v60_smc/tb_v60_smc" +CEDIV=3 2>&1 | grep -qF "V60 SMC PASS"; then
+  verilator-safe status
+  if verilator-sim-safe -- "$OUTDIR/tb_v60_smc/tb_v60_smc" +CEDIV=3 2>&1 | grep -qF "V60 SMC PASS"; then
     echo "PASS  tb_v60_smc(ce=/3)"
     pass=$((pass+1))
   else

@@ -305,10 +305,10 @@ sdram sdram (
 );
 
 // MiSTer J1 order: B1,B2,B3,Start,Coin,Test,Service → joy[4]..joy[10]
-// MAME P1 ($210008) bits 7:0: START, B3, B2, B1, RIGHT, LEFT, DOWN, UP
+// MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START
 function automatic [15:0] player_port(input [31:0] joy);
-    player_port = {8'hff, ~{joy[7], joy[6], joy[5], joy[4],
-                              joy[0], joy[1], joy[2], joy[3]}};
+    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
+                              joy[4], joy[5], joy[6], joy[7]}};
 endfunction
 
 wire test_button = status[6] | joystick_0[9] | joystick_1[9];

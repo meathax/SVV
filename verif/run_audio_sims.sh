@@ -15,7 +15,8 @@ if [[ ! -f "$IRQ_SCHED" ]]; then
   IRQ_SCHED="sim_output/diff/mame_irq_schedule_long.txt"
 fi
 
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -36,25 +37,30 @@ CORE=(
 )
 
 echo "=== BUILD/RUN tb_ssv_es5506_regs ==="
-rm -rf "$OUT/regs"; mkdir -p "$OUT/regs"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_es5506_regs \
+mkdir -p "$OUT/regs"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_es5506_regs \
   --Mdir "$OUT/regs" -o tb_ssv_es5506_regs \
   rtl/ssv_pkg.sv rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv \
   verif/tb_ssv_es5506_regs.sv \
   >"$OUT/regs/build.log" 2>&1
-"$OUT/regs/tb_ssv_es5506_regs" | tee "$OUT/regs/run.log"
+verilator-safe status
+verilator-sim-safe -- "$OUT/regs/tb_ssv_es5506_regs" | tee "$OUT/regs/run.log"
 
 echo "=== BUILD/RUN tb_ssv_es5506_voice ==="
-rm -rf "$OUT/voice"; mkdir -p "$OUT/voice"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_es5506_voice \
+mkdir -p "$OUT/voice"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_es5506_voice \
   --Mdir "$OUT/voice" -o tb_ssv_es5506_voice \
   rtl/ssv_pkg.sv rtl/audio/ssv_es5506_voice.sv verif/tb_ssv_es5506_voice.sv \
   >"$OUT/voice/build.log" 2>&1
-"$OUT/voice/tb_ssv_es5506_voice" | tee "$OUT/voice/run.log"
+verilator-safe status
+verilator-sim-safe -- "$OUT/voice/tb_ssv_es5506_voice" | tee "$OUT/voice/run.log"
 
 echo "=== BUILD tb_ssv_realrom_boot (audio gate) ==="
-rm -rf "$OUT/boot"; mkdir -p "$OUT/boot"
-if ! verilator "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
+mkdir -p "$OUT/boot"
+verilator-safe status
+if ! verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
   --Mdir "$OUT/boot" -o tb_ssv_realrom_boot \
   "${CORE[@]}" verif/tb_ssv_realrom_boot.sv \
   >"$OUT/boot/build.log" 2>&1; then
@@ -62,7 +68,8 @@ if ! verilator "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
 fi
 
 echo "=== RUN TRACE_CYCLES=$CYCLES REQUIRE_VE REQUIRE_AUDIO + IRQ schedule ==="
-"$OUT/boot/tb_ssv_realrom_boot" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/boot/tb_ssv_realrom_boot" \
   "+TRACE_CYCLES=$CYCLES" \
   +REQUIRE_VE \
   +REQUIRE_AUDIO \

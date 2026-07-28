@@ -7,7 +7,8 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 65536
 
 OUT="${TMPDIR:-/tmp}/ssv-gameplay"
 mkdir -p "$OUT" sim_output/diff
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -29,11 +30,13 @@ echo "=== G6.1 bring-up suite ==="
 bash verif/run_bringup_sims.sh
 
 echo "=== G5 input matrix ==="
-rm -rf "$OUT/input"; mkdir -p "$OUT/input"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_input_matrix \
+mkdir -p "$OUT/input"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_input_matrix \
   --Mdir "$OUT/input" -o tb_ssv_input_matrix \
   verif/tb_ssv_input_matrix.sv >"$OUT/input/build.log" 2>&1
-"$OUT/input/tb_ssv_input_matrix" | tee "$OUT/input/run.log"
+verilator-safe status
+verilator-sim-safe -- "$OUT/input/tb_ssv_input_matrix" | tee "$OUT/input/run.log"
 
 if [[ -x verif/v60/run_v60_verilator.sh ]]; then
   echo "=== V60 unit suite ==="
@@ -43,21 +46,24 @@ if [[ -x verif/v60/run_v60_verilator.sh ]]; then
 fi
 
 echo "=== G1/G2/G3 attract + coin frame CRC soak ==="
-rm -rf "$OUT/frame"; mkdir -p "$OUT/frame"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
+mkdir -p "$OUT/frame"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   --Mdir "$OUT/frame" -o tb_ssv_frame_crc \
   -Iverif "${CORE[@]}" verif/tb_ssv_frame_crc.sv \
   >"$OUT/frame/build.log" 2>&1
 
 # Write CRC traces under /tmp first (WSL+/mnt/d fwrite can truncate to 0).
-"$OUT/frame/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/frame/tb_ssv_frame_crc" \
   +SCENARIO=attract_idle \
   +FRAMES=30 +SOAK_FRAMES=15 \
   +FRAME_CRC=/tmp/rtl_attract_idle_frames.crc \
   | tee "$OUT/frame/attract.log"
 cp /tmp/rtl_attract_idle_frames.crc sim_output/diff/rtl_attract_idle_frames.crc
 
-"$OUT/frame/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/frame/tb_ssv_frame_crc" \
   +SCENARIO=coin_start_p1 \
   +FRAMES=40 +SOAK_FRAMES=35 \
   +FRAME_CRC=/tmp/rtl_coin_start_p1_frames.crc \

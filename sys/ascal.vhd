@@ -462,7 +462,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_htotal,o_hsstart,o_hsend : uint12;
 	SIGNAL o_hmin,o_hmax,o_hdisp,o_v_hmin_adj : uint12;
 	SIGNAL o_hsize,o_vsize : uint12;
-	SIGNAL o_vtotal,o_vsstart,o_vsend : uint12;
+	SIGNAL o_vtotal,o_vlastcpt,o_vsstart,o_vsend : uint12;
 	SIGNAL o_vrr,o_isync,o_isync2 : std_logic;
 	SIGNAL o_vrr_sync,o_vrr_sync2 : boolean;
 	SIGNAL o_vrr_min,o_vrr_min2 : boolean;
@@ -481,7 +481,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_pshift : natural RANGE 0 TO 15;
 	SIGNAL o_readack,o_readack_sync,o_readack_sync2 : std_logic;
 	SIGNAL o_readdataack,o_readdataack_sync,o_readdataack_sync2 : std_logic;
-	SIGNAL o_copyv : unsigned(0 TO 14);
+	SIGNAL o_copyv : unsigned(0 TO 15);
 	SIGNAL o_adrs : unsigned(31 DOWNTO 0); -- Avalon address
 	SIGNAL o_adrs_pre : natural RANGE 0 TO 2**24-1;
 	SIGNAL o_stride : unsigned(13 DOWNTO 0);
@@ -521,6 +521,10 @@ ARCHITECTURE rtl OF ascal IS
 
 	SIGNAL o_hacc,o_hacc_ini,o_hacc_next,o_vacc,o_vacc_next,o_vacc_ini : natural RANGE 0 TO 4*OHRESH-1;
 	SIGNAL o_hsv,o_vsv,o_dev,o_pev,o_end : unsigned(0 TO 11);
+	-- These short delay lines are only 33 and 96 implemented bits.  Quartus
+	-- otherwise spends one M10K on each altshift_taps inference even though
+	-- both fit comfortably in logic.
+	ATTRIBUTE ramstyle OF o_dev : SIGNAL IS "logic";
 	SIGNAL o_hsp,o_vss : std_logic;
 	SIGNAL o_vcarrym,o_prim : boolean;
 	SIGNAL o_read,o_read_pre : std_logic;
@@ -537,7 +541,7 @@ ARCHITECTURE rtl OF ascal IS
 	TYPE arr_uint4 IS ARRAY (natural RANGE <>) OF natural RANGE 0 TO 15;
 	SIGNAL o_off : arr_uint4(0 TO 2);
 	SIGNAL o_bibu : std_logic :='0';
-	SIGNAL o_dcptv : arr_uint12(13 TO 14);
+	SIGNAL o_dcptv : arr_uint12(13 TO 15);
 	SIGNAL o_dcpt_clr, o_dcpt_inc : std_logic;
 	SIGNAL o_dcptv_clr, o_dcptv_inc : std_logic_vector(1 TO 12);
 	SIGNAL o_hpixs,o_hpix0,o_hpix1,o_hpix2,o_hpix3 : type_pix;
@@ -546,10 +550,11 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_vpixq, o_vpixq_pre : arr_pix(0 TO 3);
 	SIGNAL o_vpix_outer : arr_pix(0 TO 2);
 	SIGNAL o_vpix_inner : arr_pix(0 TO 6);
+	ATTRIBUTE ramstyle OF o_vpix_inner : SIGNAL IS "logic";
 
 	SIGNAL o_vpe : std_logic;
-	SIGNAL o_div : arr_div(0 TO 2); --uint12;
-	SIGNAL o_dir : arr_frac(0 TO 2);
+	SIGNAL o_div : arr_div(0 TO 3); --uint12;
+	SIGNAL o_dir : arr_frac(0 TO 3);
 	ATTRIBUTE ramstyle OF o_div, o_dir : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vdivi : unsigned(12 DOWNTO 0);
 	SIGNAL o_vdivr : unsigned(24 DOWNTO 0);
@@ -1017,6 +1022,9 @@ ARCHITECTURE rtl OF ascal IS
 	TYPE type_poly_t IS RECORD
 		r0,r1,b0,b1,g0,g1 : signed(26 DOWNTO 0);
 	END RECORD;
+	TYPE type_poly_sum_t IS RECORD
+		r,g,b : signed(18 DOWNTO 0);
+	END RECORD;
 
 	SIGNAL o_h_poly_mem : arr_uv40(0 TO 2**FRAC-1);
 	SIGNAL o_v_poly_mem : arr_uv40(0 TO 2**FRAC-1);
@@ -1034,6 +1042,10 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_poly_lum, o_poly_lum1 : unsigned(7 DOWNTO 0);
 	SIGNAL o_poly_lerp_ta, o_poly_lerp_tb : signed(9 DOWNTO 0);
 	SIGNAL o_h_poly_t,o_h_poly_t2,o_v_poly_t   : type_poly_t;
+	SIGNAL o_h_poly_sum : type_poly_sum_t;
+	SIGNAL o_h_bil_pix2,o_h_bic_pix2 : type_pix;
+	SIGNAL o_hmode2 : unsigned(4 DOWNTO 0);
+	SIGNAL o_altx2 : unsigned(3 DOWNTO 0);
 
 	SIGNAL o_v_poly_adaptive, o_h_poly_adaptive, o_v_poly_use_adaptive, o_h_poly_use_adaptive : std_logic;
 	SIGNAL poly_wr_mode : std_logic_vector(2 DOWNTO 0);
@@ -1077,6 +1089,24 @@ ARCHITECTURE rtl OF ascal IS
 		p.r:=bound(unsigned(t.r0(26 DOWNTO 8)+t.r1(26 DOWNTO 8)),15);
 		p.g:=bound(unsigned(t.g0(26 DOWNTO 8)+t.g1(26 DOWNTO 8)),15);
 		p.b:=bound(unsigned(t.b0(26 DOWNTO 8)+t.b1(26 DOWNTO 8)),15);
+		RETURN p;
+	END FUNCTION;
+
+	FUNCTION poly_sum(t : type_poly_t) RETURN type_poly_sum_t IS
+		VARIABLE s : type_poly_sum_t;
+	BEGIN
+		s.r:=t.r0(26 DOWNTO 8)+t.r1(26 DOWNTO 8);
+		s.g:=t.g0(26 DOWNTO 8)+t.g1(26 DOWNTO 8);
+		s.b:=t.b0(26 DOWNTO 8)+t.b1(26 DOWNTO 8);
+		RETURN s;
+	END FUNCTION;
+
+	FUNCTION poly_bound(s : type_poly_sum_t) RETURN type_pix IS
+		VARIABLE p : type_pix;
+	BEGIN
+		p.r:=bound(unsigned(s.r),15);
+		p.g:=bound(unsigned(s.g),15);
+		p.b:=bound(unsigned(s.b),15);
 		RETURN p;
 	END FUNCTION;
 
@@ -1894,6 +1924,15 @@ BEGIN
 			o_hmax   <=hmax; -- <ASYNC> ?
 
 			o_vtotal <=vtotal; -- <ASYNC> ?
+			-- Register the terminal count with vtotal.  Comparing the current
+			-- counter against this value is equivalent to
+			-- o_vcpt_pre3 + 1 >= o_vtotal, but keeps the increment carry chain
+			-- out of the 148.5 MHz counter-clear path.
+			IF vtotal=0 THEN
+				o_vlastcpt<=0;
+			ELSE
+				o_vlastcpt<=vtotal-1;
+			END IF;
 			o_vsstart<=vsstart; -- <ASYNC> ?
 			o_vsend  <=vsend; -- <ASYNC> ?
 			o_vdisp  <=vdisp; -- <ASYNC> ?
@@ -2375,7 +2414,7 @@ BEGIN
 		VARIABLE hfrac3_v, vfrac_v : unsigned(FRAC-1 DOWNTO 0);
 	BEGIN
 		IF rising_edge(o_clk) THEN
-			hfrac3_v:=o_hfrac(3)(11 DOWNTO 12-FRAC);
+			hfrac3_v:=o_hfrac(2)(11 DOWNTO 12-FRAC);
 			vfrac_v:=o_vfrac(11 DOWNTO 12-FRAC);
 
 			o_v_poly_use_adaptive <= to_std_logic((o_vmode(2 DOWNTO 0)/="000") AND (o_v_poly_adaptive = '1'));
@@ -2589,6 +2628,10 @@ BEGIN
 			o_div(2)<=div_v;
 			o_dir(2)<=dir_v;
 
+			-- Cycle 4. Split the final two non-restoring divider steps so the
+			-- 148.5 MHz scaler clock crosses only one 21-bit add/subtract per
+			-- cycle. The fraction taps below move back one shift position to
+			-- keep their original alignment with the pixel/control pipelines.
 			div_v:=o_div(2);
 			dir_v:=o_dir(2);
 			IF FRAC>6 THEN
@@ -2598,7 +2641,14 @@ BEGIN
 					div_v:=div_v+to_unsigned(o_hsize*4,21);
 				END IF;
 				dir_v(5):=NOT div_v(20);
+			END IF;
+			o_div(3)<=div_v;
+			o_dir(3)<=dir_v;
 
+			-- Cycle 5
+			div_v:=o_div(3);
+			dir_v:=o_dir(3);
+			IF FRAC>6 THEN
 				IF div_v(20)='0' THEN
 					div_v:=div_v-to_unsigned(o_hsize*2,21);
 				ELSE
@@ -2611,7 +2661,7 @@ BEGIN
 			o_hfrac(1)<=dir_v;
 			o_hfrac(2 TO 9) <= o_hfrac(1 TO 8);
 
-			o_copyv(1 TO 14)<=o_copyv(0 TO 13);
+			o_copyv(1 TO 15)<=o_copyv(0 TO 14);
 			o_dcptv_clr(1 TO 12)<=o_dcpt_clr & o_dcptv_clr(1 TO 11);
 			o_dcptv_inc(1 TO 12)<=o_dcpt_inc & o_dcptv_inc(1 TO 11);
 
@@ -2621,6 +2671,7 @@ BEGIN
 				o_dcptv(13) <= (o_dcptv(13) + 1) MOD OHRESH;
 			END IF;
 			o_dcptv(14)<=o_dcptv(13);
+			o_dcptv(15)<=o_dcptv(14);
 
 			IF o_dcptv(13)>=o_hsize THEN
 				o_copyv(14)<='0';
@@ -2632,17 +2683,17 @@ BEGIN
 
 			-- BILINEAR / SHARP BILINEAR ---------------
 			-- C7 : Pre-calc Sharp Bilinear
-			o_h_sbil_t<=sbil_frac1(o_hfrac(6));
+			o_h_sbil_t<=sbil_frac1(o_hfrac(5));
 
 			-- C8 : Select
 			o_h_bil_frac<=(OTHERS =>'0');
 			IF o_hmode(0)='1' THEN -- Bilinear
 				IF MASK(MASK_BILINEAR)='1' THEN
-					o_h_bil_frac<=bil_frac(o_hfrac(7));
+					o_h_bil_frac<=bil_frac(o_hfrac(6));
 				END IF;
 			ELSE -- Sharp Bilinear
 				IF MASK(MASK_SHARP_BILINEAR)='1' THEN
-					o_h_bil_frac<=sbil_frac2(o_hfrac(7),o_h_sbil_t);
+					o_h_bil_frac<=sbil_frac2(o_hfrac(6),o_h_sbil_t);
 				END IF;
 			END IF;
 
@@ -2657,20 +2708,20 @@ BEGIN
 			-- BICUBIC -------------------------------------------
 			-- C8 : Bicubic coefficients A,B,C,D
 			-- C8 : Bicubic calc T1 = X.D + C
-			o_h_bic_abcd1<=bic_calc0(o_hfrac(7),o_hpixq(6));
-			o_h_bic_tt1<=bic_calc1(o_hfrac(7),
-										 bic_calc0(o_hfrac(7),o_hpixq(6)));
+			o_h_bic_abcd1<=bic_calc0(o_hfrac(6),o_hpixq(6));
+			o_h_bic_tt1<=bic_calc1(o_hfrac(6),
+										 bic_calc0(o_hfrac(6),o_hpixq(6)));
 
 			-- C9 : Bicubic calc T2 = X.T1 + B
 			o_h_bic_abcd2<=o_h_bic_abcd1;
-			o_h_bic_tt2<=bic_calc2(o_hfrac(8),o_h_bic_tt1,o_h_bic_abcd1);
+			o_h_bic_tt2<=bic_calc2(o_hfrac(7),o_h_bic_tt1,o_h_bic_abcd1);
 
 			-- C10 : Bicubic final Y = X.T2 + A
-			o_h_bic_pix<=bic_calc3(o_hfrac(9),o_h_bic_tt2,o_h_bic_abcd2);
+			o_h_bic_pix<=bic_calc3(o_hfrac(8),o_h_bic_tt2,o_h_bic_abcd2);
 
 			-- POLYPHASE -----------------------------------------
 			-- C2
-			IF o_hfrac(2)(o_hfrac(2)'left)='0' THEN
+			IF o_hfrac(1)(o_hfrac(1)'left)='0' THEN
 				o_h_lum_pix<=o_hpix2;
 			ELSE
 				o_h_lum_pix<=o_hpix1;
@@ -2681,15 +2732,21 @@ BEGIN
 			-- C9 : Apply Polyphase
 			o_h_poly_t<=poly_calc(o_h_poly_phase,o_hpixq(8));
 
-			-- C10 : Sum and bound
-			o_h_poly_pix<=poly_final(o_h_poly_t);
+			-- C10/C11 : Sum, then bound.  Keeping the wide add out of the
+			-- saturation stage closes the 148.5 MHz polyphase path.
+			o_h_poly_sum<=poly_sum(o_h_poly_t);
+			o_h_poly_pix<=poly_bound(o_h_poly_sum);
+			o_h_bil_pix2<=o_h_bil_pix;
+			o_h_bic_pix2<=o_h_bic_pix;
+			o_hmode2<=o_hmode;
+			o_altx2<=o_altx;
 
-			-- C11 : Select interpoler ----------------------------
-			o_wadl<=o_dcptv(14);
-			o_wr<=o_altx AND (o_copyv(14) & o_copyv(14) & o_copyv(14) & o_copyv(14));
+			-- C12 : Select interpoler ----------------------------
+			o_wadl<=o_dcptv(15);
+			o_wr<=o_altx2 AND (o_copyv(15) & o_copyv(15) & o_copyv(15) & o_copyv(15));
 			o_ldw<=(x"00",x"00",x"00");
 
-			CASE o_hmode(2 DOWNTO 0) IS
+			CASE o_hmode2(2 DOWNTO 0) IS
 				WHEN "000"  => -- Nearest
 					IF MASK(MASK_NEAREST)='1' THEN
 						o_ldw<=o_h_poly_pix;
@@ -2697,11 +2754,11 @@ BEGIN
 				WHEN "001" | "010" => -- Bilinear | Sharp Bilinear
 					IF MASK(MASK_BILINEAR)='1' OR
 						 MASK(MASK_SHARP_BILINEAR)='1' THEN
-						o_ldw<=o_h_bil_pix;
+						o_ldw<=o_h_bil_pix2;
 				 END IF;
 				WHEN "011" => -- BiCubic
 					IF MASK(MASK_BICUBIC)='1' THEN
-						o_ldw<=o_h_bic_pix;
+						o_ldw<=o_h_bic_pix2;
 					END IF;
 				WHEN OTHERS => -- PolyPhase
 					IF MASK(MASK_POLY)='1' THEN
@@ -2775,7 +2832,7 @@ BEGIN
 						o_vcpt_sync <= o_vcpt_sync+1;
 					END IF;
 
-					IF o_vcpt_pre3+1>=o_vtotal THEN
+					IF o_vcpt_pre3>=o_vlastcpt THEN
 						o_vcpt_pre3<=0;
 					ELSIF o_vrr_sync2 THEN
 						o_vcpt_pre3<=o_vsstart;

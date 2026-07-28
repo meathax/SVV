@@ -56,8 +56,6 @@ set voice_ce_registers [add_to_collection $voice_ce_registers \
     [get_registers {*|ssv_es5506_voice:sound_voices|k2*}]]
 set voice_ce_registers [add_to_collection $voice_ce_registers \
     [get_registers {*|ssv_es5506_voice:sound_voices|ecount*}]]
-set voice_ce_registers [add_to_collection $voice_ce_registers \
-    [get_registers {*|ssv_es5506_voice:sound_voices|sample_tick*}]]
 set_multicycle_path -setup 3 \
     -from $voice_ce_registers -to $voice_ce_registers
 set_multicycle_path -hold 2 \

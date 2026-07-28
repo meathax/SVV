@@ -8,7 +8,8 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 65536
 OUT="${TMPDIR:-/tmp}/ssv-ingame-shot"
 mkdir -p "$OUT" sim_output/frames sim_output/diff
 
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -32,7 +33,8 @@ PNG_PATH="sim_output/frames/verilator_ingame_f${PPM_FRAME}.png"
 PNG4X="verilator_ingame_4x.png"
 
 echo "=== BUILD tb_ssv_frame_crc ==="
-if ! verilator "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
+verilator-safe status
+if ! verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   --Mdir "$OUT" -o tb_ssv_frame_crc -Iverif "${CORE[@]}" verif/tb_ssv_frame_crc.sv \
   >"$OUT/build.log" 2>&1; then
   echo "BUILD FAIL"; tail -50 "$OUT/build.log"; exit 1
@@ -40,7 +42,8 @@ fi
 echo "BUILD OK"
 
 echo "=== RUN coin_start_p1 DUMP_PPM_FRAME=$PPM_FRAME ==="
-"$OUT/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/tb_ssv_frame_crc" \
   +SCENARIO=coin_start_p1 \
   +FRAMES=130 +SOAK_FRAMES=120 \
   +FRAME_CRC=sim_output/diff/rtl_coin_ingame.crc \

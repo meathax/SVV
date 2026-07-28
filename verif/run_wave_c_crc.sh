@@ -7,7 +7,8 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 65536
 
 OUT="${TMPDIR:-/tmp}/ssv-frame"
 mkdir -p "$OUT" sim_output/diff
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -24,17 +25,18 @@ CORE=(
   verif/ssv_tb_ce_cpu.sv
 )
 
-rm -rf "$OUT"
 mkdir -p "$OUT"
 echo "=== BUILD tb_ssv_frame_crc ==="
-if ! verilator "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
+verilator-safe status
+if ! verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   --Mdir "$OUT" -o tb_ssv_frame_crc -Iverif "${CORE[@]}" verif/tb_ssv_frame_crc.sv \
   >"$OUT/build.log" 2>&1; then
   echo "BUILD FAIL"; tail -40 "$OUT/build.log"; exit 1
 fi
 
 echo "=== RUN attract_idle ==="
-"$OUT/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/tb_ssv_frame_crc" \
   +SCENARIO=attract_idle \
   +FRAMES=30 +SOAK_FRAMES=15 \
   +FRAME_CRC=/tmp/rtl_attract_idle_frames.crc \
@@ -54,7 +56,8 @@ python3 tools/compare-ssv-frame-crcs.py \
   --max-frames 30 || true
 
 echo "=== RUN coin_start_p1 ==="
-"$OUT/tb_ssv_frame_crc" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/tb_ssv_frame_crc" \
   +SCENARIO=coin_start_p1 \
   +FRAMES=40 +SOAK_FRAMES=35 \
   +FRAME_CRC=/tmp/rtl_coin_start_p1_frames.crc \

@@ -33,33 +33,53 @@
       "note": "COIN1 release"
     },
     {
-      "frame": 60,
-      "in_p1": "0xFF7F",
-      "note": "P1 START pressed (active-low bit7)"
+      "frame": 165,
+      "in_p1": "0xFFFE",
+      "note": "P1 START pressed (active-low bit0)"
     },
     {
-      "frame": 64,
+      "frame": 170,
       "in_p1": "0xFFFF",
       "note": "P1 START release"
     },
     {
-      "frame": 90,
+      "frame": 250,
       "in_p1": "0xFFFE",
+      "note": "P1 START confirm"
+    },
+    {
+      "frame": 255,
+      "in_p1": "0xFFF7",
+      "note": "P1 B1 confirm"
+    },
+    {
+      "frame": 262,
+      "in_p1": "0xFFFF",
+      "note": "neutral after select"
+    },
+    {
+      "frame": 300,
+      "in_p1": "0xFFEF",
+      "note": "P1 RIGHT"
+    },
+    {
+      "frame": 330,
+      "in_p1": "0xFFF7",
+      "note": "P1 B1 attack"
+    },
+    {
+      "frame": 360,
+      "in_p1": "0xFF7F",
       "note": "P1 UP"
     },
     {
-      "frame": 100,
-      "in_p1": "0xFFEF",
-      "note": "P1 B1 (attack)"
-    },
-    {
-      "frame": 110,
+      "frame": 390,
       "in_p1": "0xFFFF",
       "note": "neutral"
     }
   ],
   "stop": {
-    "after_video_enable_frames": 180
+    "after_video_enable_frames": 450
   },
   "outputs": {
     "frame_crc": "sim_output/diff/rtl_coin_start_p1_frames.crc",

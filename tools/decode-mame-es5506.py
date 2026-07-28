@@ -116,6 +116,31 @@ def main() -> int:
     for name, count in sorted(counts.items()):
         print(f"  {name:8s} {count}")
 
+    voice_transactions = [
+        tx for tx in transactions if tx.name != "PAGE" and tx.page < 0x40
+    ]
+    voices = sorted({tx.page & 0x1F for tx in voice_transactions})
+    low_control = Counter(
+        tx.value for tx in transactions if tx.page < 0x20 and tx.name == "CR"
+    )
+    high_control = Counter(
+        tx.value for tx in transactions if 0x20 <= tx.page < 0x40 and tx.name == "CR"
+    )
+    modes = Counter(tx.value for tx in transactions if tx.name == "MODE")
+    print(
+        "voices used: "
+        + (", ".join(str(voice) for voice in voices) if voices else "none")
+    )
+    print("low-page CR values:")
+    for value, count in sorted(low_control.items()):
+        print(f"  {value:08x} {count}")
+    print("high-page CR values:")
+    for value, count in sorted(high_control.items()):
+        print(f"  {value:08x} {count}")
+    print("MODE values:")
+    for value, count in sorted(modes.items()):
+        print(f"  {value:08x} {count}")
+
     if args.transactions:
         print("transactions:")
         for tx in transactions:

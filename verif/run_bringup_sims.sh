@@ -7,7 +7,8 @@ OUT="${TMPDIR:-/tmp}/ssv-bringup"
 mkdir -p "$OUT"
 pwd
 ls rtl/ssv_pkg.sv >/dev/null
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -54,13 +55,15 @@ SSV_CORE_FILES=(
 run_one() {
   local top="$1"; shift
   local bdir="$OUT/$top"
-  rm -rf "$bdir"; mkdir -p "$bdir"
+  mkdir -p "$bdir"
   echo "=== BUILD $top ==="
-  if ! verilator "${VFLAGS[@]}" --top-module "$top" --Mdir "$bdir" -o "$top" "$@" >"$bdir/build.log" 2>&1; then
+  verilator-safe status
+  if ! verilator-safe "${VFLAGS[@]}" --top-module "$top" --Mdir "$bdir" -o "$top" "$@" >"$bdir/build.log" 2>&1; then
     echo "BUILD FAIL $top"; tail -40 "$bdir/build.log"; exit 1
   fi
   echo "=== RUN $top ==="
-  "$bdir/$top" | tee "$bdir/run.log"
+  verilator-safe status
+  verilator-sim-safe -- "$bdir/$top" | tee "$bdir/run.log"
 }
 
 run_one tb_ssv_diag_video \

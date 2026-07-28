@@ -1,6 +1,6 @@
 # Dyna Gear SSV MiSTer Core — Full Audit
 
-Audit date: 26 July 2026  
+Audit date: 27 July 2026
 Repository: `D:\Arcade\AI\SVV`  
 Branch tip: gameplay-gate + FAST_IFETCH icache + Wave B RTL (DSW1, watchdog,
 voice pipeline for timing).  
@@ -16,10 +16,10 @@ The core is a **credible sim-playable Dyna Gear bring-up**, not a HW release.
 |---|---|
 | Does Verilator boot Dyna Gear? | **Yes** — natural vblank reaches lockout / `video_enable` (~26M with FAST_IFETCH) |
 | Does early machine state match MAME? | **Yes** — ordered writes through **8s attract** + hashes (IRQ schedule) |
-| Has attract mode been proven? | **Partial+** — post-VE **frame 0** RGB/IDX CRC matches MAME; frame≥1 open |
-| Has coin → start → play been proven? | **Partial** — `coin_start_p1` schedule in sim; full play CRC open |
+| Has attract mode been proven? | **Yes (stable early window)** — frames 2–3 RGB/IDX and all 80,640 pixels match MAME |
+| Has coin → start → play been proven? | **Yes (sim)** — assertion-clean 950-frame replay reaches controllable jungle gameplay |
 | Is audio present? | **Yes (sim)** — voice PCM + REQUIRE_AUDIO peak gate; HW deferred |
-| Overall toward playable Dyna Gear (sim) | **~78%** (medium confidence) |
+| Overall toward playable Dyna Gear (sim) | **~90%** (high confidence for the tested window) |
 
 ### Board completeness (sim-proven unless noted)
 
@@ -35,7 +35,7 @@ The core is a **credible sim-playable Dyna Gear bring-up**, not a HW release.
 | Scroll / CRT regs + blanking | ~75% | MiSTer-ish sync widths |
 | IRQ controller | ~85% | Vblank L3; ES5506 IRQ N/A for DG (MAME) |
 | Video timing (336×240) | ~85% | VE/IRQ; natural CE boots |
-| BG / sprite / GFX / linebuf / palette | ~80–85% | Frame-0 CRC match; loop open |
+| BG / sprite / GFX / linebuf / palette | ~90% | exact stable pixels; 950f zero-overrun gameplay |
 | Diag video mux | ~90% | Dual-raster tear fixed |
 | Inputs (P1/P2/SYSTEM) | ~90% | Matrix TB + fixed P1 order |
 | DIP switches | ~90% | DSW1+DSW2 OSD |
@@ -43,12 +43,13 @@ The core is a **credible sim-playable Dyna Gear bring-up**, not a HW release.
 | ES5506 host / registers | ~90% | Protocol + pages tested |
 | ES5506 voice PCM / mix | ~70% | Bank-2 + peak gate; no full PCM match / HW |
 | Sample SDRAM port (p4) | ~75% | Wired; basic underrun |
-| Attract / gameplay (whole) | ~65% | VE + frame 0 + coin/start stim; loop CRC open |
+| Attract / gameplay (tested window) | ~90% | coin/start/select/story/jungle play proven |
 | Quartus fit / timing / RBF | — | **Deferred this pass** |
 | Physical MiSTer validation | — | **Deferred this pass** |
 
-Strongest remaining gaps (sim): attract-loop CRC frame≥1 (IRQ/CPI skew);
-full play CRC; latent V60 UNHANDLED; FPGA M10K headroom for future audio HW.
+Strongest remaining gaps: post-coin MAME/RTL presentation phase skew; play
+beyond the first jungle window; latent V60 UNHANDLED; FPGA M10K/timing proof;
+sample-accurate ES5506 PCM and physical hardware validation.
 
 ---
 
@@ -168,8 +169,8 @@ timing closure for the voice path is deferred with RBF work.
 | `verif/run_bringup_sims.sh` | ALL PASS | diag, loader, loader-core-boot, rom_write_ack, hang_watch |
 | Hang watch VE | LOCKOUT/VE ~26M (FAST_IFETCH); was ~53.7M | bring-up logs |
 | Attract frame 0 CRC | IDX=`d3b2fac2` RGB=`7fdb4700` | `tb_ssv_frame_crc` / Wave C |
-| Attract frame ≥1 CRC | DIVERGE (documented residual) | `DYNAGEAR_ATTRACT_FRAME_CRC.md` |
-| Coin/start scenario | Schedule + nonblack continue | `coin_start_p1` |
+| Stable attract frames 2–3 | Exact IDX/RGB + 80,640 pixels | MAME/RTL probe |
+| Coin/start gameplay | 950f PASS; frame-850 gameplay gate | `coin_start_p1_gameplay` |
 | Audio suite | ALL PASS + peak gate | `run_audio_sims.sh` |
 | Watchdog | Trip @180f + kicked clear | `tb_ssv_watchdog` |
 | V60 units | 28 passed, 0 failed | `verif/v60/run_v60_verilator.sh` |
@@ -201,9 +202,10 @@ physical MiSTer attract (RBF deferred).
 
 ### Critical (gameplay path)
 
-1. **Attract-loop CRC open after frame 0** — frame≥1 IDX/RGB diverge (IRQ/CPI
-   skew); see `DYNAGEAR_ATTRACT_FRAME_CRC.md`.
-2. **Full play CRC open** — coin/start schedule exists; long play match does not.
+1. **Post-coin presentation phase** — first same-frame visual split is frame
+   36; comparable memory hashes remain matched through frame 49.
+2. **Full-game duration open** — 950 frames reach controllable play, not game
+   completion or every stage/boss path.
 
 ### High
 

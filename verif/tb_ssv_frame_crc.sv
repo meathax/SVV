@@ -1,9 +1,11 @@
 `timescale 1ns/1ps
 // Real-ROM frame CRC dump + attract/coin soak for Dyna Gear G1/G2/G3.
 // Plusargs:
-//   +MAINROM= +SPRROM= +FRAME_CRC=path +FRAMES=N +SOAK_FRAMES=N
-//   +SCENARIO=attract_idle|coin_start_p1
+//   +MAINROM= +SPRROM= +FRAME_CRC=path +STATE_CRC=path
+//   +FRAMES=N +SOAK_FRAMES=N
+//   +SCENARIO=attract_idle|coin_start_p1|coin_start_p1_gameplay
 //   +DUMP_FRAME_DIAG (IRQ/list/scroll/pal snapshots at vb-edge)
+//   +REQUIRE_GAMEPLAY (require a jungle-stage visual at frame 850)
 //   +DUMP_PPM=path +DUMP_PPM_FRAME=N  (write one 336x240 raw PPM after VE)
 //   +USE_FRAC_CE (default on) uses ssv_tb_ce_cpu
 
@@ -39,12 +41,15 @@ byte main_rom [0:1048575];
 byte sprite_rom [0:12582911];
 logic [15:0] external_ram [0:196607];
 
-string main_path, sprite_path, crc_path, scenario;
-integer main_fd, sprite_fd, crc_fd;
+string main_path, sprite_path, crc_path, state_path, scenario;
+integer main_fd, sprite_fd, crc_fd, state_fd;
 integer main_count, sprite_count, cycle_count, max_cycles, i;
 integer p1_transactions;
 integer frame_idx, post_ve_frames, max_frames, soak_frames;
 integer active_pixels, nonblack_pixels, post_ve_nonblack;
+integer select_header_pixels, frame_nonblack;
+integer gameplay_green_pixels;
+logic require_play, play_reached, require_gameplay, gameplay_reached;
 logic ve_seen, vb_d, frame_active;
 logic [31:0] idx_crc, rgb_crc;
 logic [14:0] idx15;
@@ -57,8 +62,18 @@ integer raw_q0_index, raw_q1_index;
 integer stuck, last_pc_i;
 logic [31:0] last_pc;
 integer bg_overruns, obj_overruns;
+integer obj_line_cycles, obj_rom_wait_cycles, obj_max_line_cycles;
+integer obj_line_descriptors, obj_line_fetches, obj_line_tilemap_fetches;
+integer obj_line_plot_cycles;
+integer obj_max_line_entries;
+logic obj_busy_d, dump_renderer_budget, stop_on_renderer_overrun;
+logic obj_cache_overflow_d;
 integer dump_x, dump_y, dump_count;
+integer overflow_i, overflow_entry, overflow_tile_desc, overflow_sprite_desc;
+integer overflow_tile_groups [0:7];
+logic [127:0] overflow_desc;
 logic dump_pixels, dump_frame_diag, dump_ppm_en, dump_ppm_open;
+logic ppm_open_event;
 logic ignore_overrun;
 string irq_schedule_path, ppm_path, ppm_prefix;
 integer ppm_fd, ppm_frame, ppm_pixels;
@@ -225,19 +240,39 @@ task automatic apply_inputs(input integer f);
     in_extra = 16'hffff;
     in_p1 = 16'hffff;
     in_system = 16'hffff;
-    if (scenario == "coin_start_p1") begin
+    if (scenario == "coin_start_p1" ||
+        scenario == "coin_start_p1_gameplay") begin
         if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
         // Wait for "PUSH START" after coin, then enter select.
-        if (f >= 165 && f < 170) in_p1 = 16'hff7f;  // START
+        if (f >= 165 && f < 170) in_p1[0] = 1'b0;   // START
         // Confirm Roger on SELECT PLAYER.
-        if (f >= 250 && f < 255) in_p1 = 16'hff7f;  // START confirm
-        if (f >= 255 && f < 262) in_p1 = 16'hffef;  // B1 confirm
+        if (f >= 250 && f < 255) in_p1[0] = 1'b0;   // START confirm
+        if (f >= 255 && f < 262) in_p1[3] = 1'b0;   // B1 confirm
         // Stage movement / attack after gameplay begins.
-        if (f >= 300 && f < 330) in_p1 = 16'hfffd;  // RIGHT
-        if (f >= 330 && f < 360) in_p1 = 16'hffef;  // B1
-        if (f >= 360 && f < 390) in_p1 = 16'hfffe;  // UP
+        if (f >= 300 && f < 330) in_p1[4] = 1'b0;   // RIGHT
+        if (f >= 330 && f < 360) in_p1[3] = 1'b0;   // B1
+        if (f >= 360 && f < 390) in_p1[7] = 1'b0;   // UP
+        if (scenario == "coin_start_p1_gameplay") begin
+            // Skip the two long story beats, then dismiss the map transition.
+            if (f >= 420 && f < 425) in_p1[3] = 1'b0; // B1
+            if (f >= 480 && f < 485) in_p1[0] = 1'b0; // START
+            if (f >= 540 && f < 545) in_p1[3] = 1'b0; // B1
+            // Exercise controllable play after the stage-intro GO prompt.
+            if (f >= 820 && f < 870) in_p1[4] = 1'b0; // RIGHT
+            if ((f >= 840 && f < 848) ||
+                (f >= 875 && f < 883)) in_p1[3] = 1'b0; // B1
+            if (f >= 890 && f < 920) in_p1[7] = 1'b0; // UP
+        end
     end
 endtask
+
+always_comb begin
+    ppm_open_event = dump_ppm_en && !dump_ppm_open && ve_seen &&
+                     vb_d && !vb &&
+                     (post_ve_frames >= ppm_start) &&
+                     (ppm_shots_done < ppm_count) &&
+                     (((post_ve_frames - ppm_start) % ppm_step) == 0);
+end
 
 always_ff @(posedge clk_sys) begin
     if (rst) begin
@@ -252,8 +287,23 @@ always_ff @(posedge clk_sys) begin
         active_pixels <= 0;
         nonblack_pixels <= 0;
         post_ve_nonblack <= 0;
+        select_header_pixels <= 0;
+        frame_nonblack <= 0;
+        gameplay_green_pixels <= 0;
+        play_reached <= 1'b0;
+        gameplay_reached <= 1'b0;
         bg_overruns <= 0;
         obj_overruns <= 0;
+        obj_line_cycles <= 0;
+        obj_rom_wait_cycles <= 0;
+        obj_max_line_cycles <= 0;
+        obj_line_descriptors <= 0;
+        obj_line_fetches <= 0;
+        obj_line_tilemap_fetches <= 0;
+        obj_line_plot_cycles <= 0;
+        obj_max_line_entries <= 0;
+        obj_busy_d <= 1'b0;
+        obj_cache_overflow_d <= 1'b0;
         stuck <= 0;
         last_pc <= 32'hffffffff;
         irq_entries_post_ve <= 0;
@@ -267,11 +317,7 @@ always_ff @(posedge clk_sys) begin
 
         // Multi-shot PPM: frames ppm_start + k*ppm_step for k in [0, ppm_count).
         // Single-shot: ppm_count==1 and ppm_path already set via +DUMP_PPM=.
-        if (dump_ppm_en && !dump_ppm_open && ve_seen &&
-            vb_d && !vb &&
-            (post_ve_frames >= ppm_start) &&
-            (ppm_shots_done < ppm_count) &&
-            (((post_ve_frames - ppm_start) % ppm_step) == 0)) begin
+        if (ppm_open_event) begin
             if (ppm_prefix.len() != 0)
                 $sformat(ppm_path, "%s_f%0d.ppm", ppm_prefix, post_ve_frames);
             ppm_fd = $fopen(ppm_path, "wb");
@@ -288,9 +334,21 @@ always_ff @(posedge clk_sys) begin
             active_pixels <= active_pixels + 1;
             if (rgb != 24'd0) begin
                 nonblack_pixels <= nonblack_pixels + 1;
+                frame_nonblack <= frame_nonblack + 1;
                 if (ve_seen)
                     post_ve_nonblack <= post_ve_nonblack + 1;
             end
+            // The color-cycling "SELECT PLAYER" header has a stable 836-pixel
+            // silhouette in this box. Gameplay frames measure well below 700.
+            if (px_count >= (5 * 336) && px_count < (55 * 336) &&
+                (px_count % 336) >= 40 && (px_count % 336) < 310 &&
+                rgb != 24'd0)
+                select_header_pixels <= select_header_pixels + 1;
+            // Jungle gameplay is dominated by bright green foliage. Count a
+            // conservative green-dominant population over the full frame.
+            if (rgb[15:8] > rgb[23:16] && rgb[15:8] > rgb[7:0] &&
+                rgb[15:8] >= 8'h40)
+                gameplay_green_pixels <= gameplay_green_pixels + 1;
             // Accumulate every active pixel after VE (no delayed frame_active).
             if (ve_seen) begin
                 idx15 = {rgb[23:19], rgb[15:11], rgb[7:3]};
@@ -308,15 +366,34 @@ always_ff @(posedge clk_sys) begin
                     $display("RTLPIX %0d %0d %06x", dut.hcnt, dut.vcnt, rgb);
                     dump_count <= dump_count + 1;
                 end
-                if (dump_ppm_open) begin
+                // The file opens on the first active-pixel edge.  Include that
+                // edge explicitly because dump_ppm_open updates after this
+                // procedural block; otherwise every PPM is one pixel short.
+                if (dump_ppm_open || ppm_open_event) begin
                     $fwrite(ppm_fd, "%c%c%c", rgb[23:16], rgb[15:8], rgb[7:0]);
-                    ppm_pixels <= ppm_pixels + 1;
+                    ppm_pixels <= ppm_open_event ? 1 : ppm_pixels + 1;
                 end
             end
         end
 
         // Emit + reset on entering vblank so the first active pixel is included.
         if (ve_seen && !vb_d && vb) begin
+            if (post_ve_frames == 440) begin
+                if (require_play)
+                    $display("PLAY_FRAME f=%0d header=%0d nonblack=%0d",
+                             post_ve_frames, select_header_pixels,
+                             frame_nonblack);
+                if (select_header_pixels < 700 && frame_nonblack > 1000)
+                    play_reached <= 1'b1;
+            end
+            if (post_ve_frames == 850) begin
+                if (require_gameplay)
+                    $display("GAMEPLAY_FRAME f=%0d green=%0d nonblack=%0d",
+                             post_ve_frames, gameplay_green_pixels,
+                             frame_nonblack);
+                if (gameplay_green_pixels > 5000 && frame_nonblack > 20000)
+                    gameplay_reached <= 1'b1;
+            end
             if (dump_ppm_open) begin
                 $fclose(ppm_fd);
                 dump_ppm_open <= 1'b0;
@@ -334,7 +411,8 @@ always_ff @(posedge clk_sys) begin
                 if (post_ve_frames == 0)
                     $display("FRAME0 px=%0d idx=%08x rgb=%08x",
                              px_count, ~idx_crc, ~rgb_crc);
-                if (dump_frame_diag && post_ve_frames < 4) begin
+                if ((dump_frame_diag && post_ve_frames < 4) ||
+                    state_fd != 0) begin
                     list_crc = 32'hffffffff;
                     spr8k_crc = 32'hffffffff;
                     for (diag_i = 0; diag_i < 8192; diag_i = diag_i + 1) begin
@@ -380,6 +458,13 @@ always_ff @(posedge clk_sys) begin
                              dut.scroll[53], dut.scroll[56], dut.scroll[58],
                              dut.scroll[59], dut.scroll[61],
                              dut.sprite_renderer.cache_count, debug_pc);
+                    if (state_fd != 0) begin
+                        $fdisplay(state_fd,
+                            "STATE %0d list512=%08x spr8k=%08x scroll64=%08x pal512=%08x",
+                            post_ve_frames, ~list_crc, ~spr8k_crc,
+                            ~scroll_crc, ~pal_crc);
+                        $fflush(state_fd);
+                    end
                     last_vb_retire = retire_count;
                 end
                 apply_inputs(post_ve_frames);
@@ -389,6 +474,9 @@ always_ff @(posedge clk_sys) begin
             idx_crc <= 32'hffffffff;
             rgb_crc <= 32'hffffffff;
             px_count <= 0;
+            select_header_pixels <= 0;
+            frame_nonblack <= 0;
+            gameplay_green_pixels <= 0;
         end
         vb_d <= vb;
 
@@ -438,10 +526,118 @@ always_ff @(posedge clk_sys) begin
             end
         end
 
-        if (dut.renderer_line_start && dut.bg_busy)
+        if (dut.line_buffer_start && dut.bg_busy)
             bg_overruns <= bg_overruns + 1;
-        if (dut.renderer_line_start && dut.obj_busy)
+        if (dut.line_buffer_start && dut.obj_busy) begin
             obj_overruns <= obj_overruns + 1;
+            if (dump_renderer_budget && obj_overruns < 16)
+                $display("OBJ_LATE f=%0d y=%0d state=%0d slots=%0d/%0d entry=%0d tilemap=%0b tile=%0d/%0d plot=%0d line_cycles=%0d desc=%0d fetch=%0d tilefetch=%0d plotcycles=%0d rom_wait=%0d req=%0b ack=%0b",
+                         post_ve_frames, dut.renderer_target_y,
+                         dut.sprite_renderer.state,
+                         dut.sprite_renderer.render_line_slot,
+                         dut.sprite_renderer.render_line_count,
+                         dut.sprite_renderer.cache_render_index,
+                         dut.sprite_renderer.render_tilemap,
+                         dut.sprite_renderer.sprite_tile_x,
+                         dut.sprite_renderer.sprite_xnum,
+                         dut.sprite_renderer.plot_i,
+                         obj_line_cycles, obj_line_descriptors,
+                         obj_line_fetches, obj_line_tilemap_fetches,
+                         obj_line_plot_cycles, obj_rom_wait_cycles,
+                         dut.obj_rom_req, sdr_p1_ack);
+            if (stop_on_renderer_overrun) begin
+                $display("FIRST_OBJ_LATE f=%0d y=%0d cycles=%0d desc=%0d fetch=%0d tilefetch=%0d",
+                         post_ve_frames, dut.renderer_target_y,
+                         obj_line_cycles, obj_line_descriptors,
+                         obj_line_fetches, obj_line_tilemap_fetches);
+                $fatal(1, "renderer overrun");
+            end
+        end
+
+        obj_cache_overflow_d <= dut.obj_cache_overflow;
+        if (dut.obj_cache_overflow && !obj_cache_overflow_d) begin
+            $display("FIRST_CACHE_OVERFLOW f=%0d state=%0d cache=%0d writes=%0d bucket_y=%0d line_count=%0d",
+                     post_ve_frames, dut.sprite_renderer.state,
+                     dut.sprite_renderer.cache_count,
+                     dut.sprite_renderer.cache_write_count,
+                     dut.sprite_renderer.bucket_y,
+                     dut.sprite_renderer.line_count_q);
+            overflow_tile_desc = 0;
+            overflow_sprite_desc = 0;
+            for (overflow_i = 0; overflow_i < 8; overflow_i = overflow_i + 1)
+                overflow_tile_groups[overflow_i] = 0;
+            for (overflow_i = 0;
+                 overflow_i < dut.sprite_renderer.LINE_SLOTS;
+                 overflow_i = overflow_i + 1) begin
+                overflow_entry = {
+                    dut.sprite_renderer.line_page_for_slot(
+                        dut.sprite_renderer.line_page_starts[
+                            dut.sprite_renderer.bucket_y],
+                        overflow_i),
+                    dut.sprite_renderer.line_entries[
+                        dut.sprite_renderer.bucket_y *
+                        dut.sprite_renderer.LINE_SLOTS + overflow_i]
+                };
+                overflow_desc =
+                    dut.sprite_renderer.descriptor_cache[overflow_entry];
+                if ((overflow_desc[63:48] <= 16'd7) &&
+                    (overflow_desc[47:32] == 16'd0) &&
+                    ((dut.scroll[59][14] ? overflow_desc[27:26] :
+                                           overflow_desc[107:106]) == 2'd0) &&
+                    ((dut.scroll[59][14] ? overflow_desc[11:10] :
+                                           overflow_desc[109:108]) == 2'd3)) begin
+                    overflow_tile_desc = overflow_tile_desc + 1;
+                    overflow_tile_groups[overflow_desc[50:48]] =
+                        overflow_tile_groups[overflow_desc[50:48]] + 1;
+                end
+                else begin
+                    overflow_sprite_desc = overflow_sprite_desc + 1;
+                end
+            end
+            $display("OVERFLOW_LINE_CONTENT tilemaps=%0d sprites=%0d groups=%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d",
+                     overflow_tile_desc, overflow_sprite_desc,
+                     overflow_tile_groups[0], overflow_tile_groups[1],
+                     overflow_tile_groups[2], overflow_tile_groups[3],
+                     overflow_tile_groups[4], overflow_tile_groups[5],
+                     overflow_tile_groups[6], overflow_tile_groups[7]);
+            if (stop_on_renderer_overrun)
+                $fatal(1, "sprite descriptor/line cache overflow");
+        end
+
+        obj_busy_d <= dut.obj_busy;
+        if (dut.sprite_renderer.render_line_count > obj_max_line_entries)
+            obj_max_line_entries <= dut.sprite_renderer.render_line_count;
+        if (dut.obj_busy && !obj_busy_d) begin
+            obj_line_cycles <= 1;
+            obj_rom_wait_cycles <= 0;
+            obj_line_descriptors <= 0;
+            obj_line_fetches <= 0;
+            obj_line_tilemap_fetches <= 0;
+            obj_line_plot_cycles <= 0;
+        end
+        else if (dut.obj_busy) begin
+            obj_line_cycles <= obj_line_cycles + 1;
+            if (dut.sprite_renderer.state == 6'd33)
+                obj_rom_wait_cycles <= obj_rom_wait_cycles + 1;
+            if (dut.sprite_renderer.state == 6'd22)
+                obj_line_descriptors <= obj_line_descriptors + 1;
+            if (dut.sprite_renderer.state == 6'd32) begin
+                obj_line_fetches <= obj_line_fetches + 1;
+                if (dut.sprite_renderer.render_tilemap)
+                    obj_line_tilemap_fetches <= obj_line_tilemap_fetches + 1;
+            end
+            if (dut.sprite_renderer.state == 6'd34)
+                obj_line_plot_cycles <= obj_line_plot_cycles + 1;
+        end
+        else if (obj_busy_d && obj_line_cycles > obj_max_line_cycles) begin
+            obj_max_line_cycles <= obj_line_cycles;
+            if (dump_renderer_budget)
+                $display("OBJ_MAX f=%0d y=%0d cycles=%0d desc=%0d fetch=%0d tilefetch=%0d plotcycles=%0d rom_wait=%0d",
+                         post_ve_frames, dut.renderer_target_y,
+                         obj_line_cycles, obj_line_descriptors,
+                         obj_line_fetches, obj_line_tilemap_fetches,
+                         obj_line_plot_cycles, obj_rom_wait_cycles);
+        end
 
         if (ce_cpu && debug_pc == last_pc)
             stuck <= stuck + 1;
@@ -459,6 +655,12 @@ initial begin
         sprite_path = "sim_output/rom/sprites.bin";
     if (!$value$plusargs("FRAME_CRC=%s", crc_path))
         crc_path = "sim_output/diff/rtl_attract_idle_frames.crc";
+    state_fd = 0;
+    if ($value$plusargs("STATE_CRC=%s", state_path)) begin
+        state_fd = $fopen(state_path, "w");
+        if (state_fd == 0)
+            $fatal(1, "cannot open STATE_CRC path %s", state_path);
+    end
     if (!$value$plusargs("SCENARIO=%s", scenario))
         scenario = "attract_idle";
     if (!$value$plusargs("FRAMES=%d", max_frames))
@@ -469,7 +671,12 @@ initial begin
         max_cycles = 200000000;
     dump_pixels = $test$plusargs("DUMP_PIXELS");
     dump_frame_diag = $test$plusargs("DUMP_FRAME_DIAG");
+    dump_renderer_budget = $test$plusargs("DUMP_RENDERER_BUDGET");
+    stop_on_renderer_overrun =
+        $test$plusargs("STOP_ON_RENDERER_OVERRUN");
     ignore_overrun = $test$plusargs("IGNORE_OVERRUN");
+    require_play = $test$plusargs("REQUIRE_PLAY");
+    require_gameplay = $test$plusargs("REQUIRE_GAMEPLAY");
     // Single-shot legacy: +DUMP_PPM=path +DUMP_PPM_FRAME=N
     // Multi-shot: +DUMP_PPM_PREFIX=path/stem +DUMP_PPM_START=N +DUMP_PPM_COUNT=5
     //              +DUMP_PPM_STEP=20
@@ -551,6 +758,8 @@ initial begin
 
     if (crc_fd != 0)
         $fclose(crc_fd);
+    if (state_fd != 0)
+        $fclose(state_fd);
 
     if (!ve_seen)
         $fatal(1, "video_enable never rose pc=%08x", debug_pc);
@@ -562,10 +771,16 @@ initial begin
         $fatal(1, "post-VE nonblack too low: %0d", post_ve_nonblack);
     if (!ignore_overrun && debug_status[16])
         $fatal(1, "renderer_overrun sticky set");
+    if (require_play && !play_reached)
+        $fatal(1, "character select did not reach game intro by frame %0d",
+               post_ve_frames);
+    if (require_gameplay && !gameplay_reached)
+        $fatal(1, "controllable jungle gameplay not reached by frame %0d",
+               post_ve_frames);
 
-    $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d",
+    $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d max_line_entries=%0d",
              scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path,
-             bg_overruns, obj_overruns);
+             bg_overruns, obj_overruns, obj_max_line_entries);
     $finish;
 end
 endmodule

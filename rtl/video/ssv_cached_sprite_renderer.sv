@@ -50,15 +50,28 @@ localparam integer CACHE_ADDR_WIDTH = $clog2(CACHE_ENTRIES);
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_COUNT_VALUE = CACHE_ENTRIES;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
     CACHE_ENTRIES - 1;
-// 56 slots/line: frees M10K vs 64 while covering typical Dyna Gear density.
+// Dense Dyna Gear story/gameplay scanlines exceed 64 real sprite descriptors.
+// Keep headroom so valid sprites are not silently dropped.
 // Index as y*LINE_SLOTS+slot (not a shifted concat) so non-power-of-two depths
 // do not overrun the packed table.
-localparam integer LINE_SLOTS = 56;
+localparam integer LINE_SLOTS = 96;
 localparam integer LINE_SLOT_WIDTH = $clog2(LINE_SLOTS);
-localparam integer LINE_COUNT_WIDTH = LINE_SLOT_WIDTH + 1;
+localparam integer LINE_COUNT_WIDTH = $clog2(LINE_SLOTS + 1);
 localparam integer LINE_TABLE_WORDS = 240 * LINE_SLOTS;
 localparam integer LINE_ADDR_WIDTH = $clog2(LINE_TABLE_WORDS);
 localparam logic [LINE_COUNT_WIDTH-1:0] LINE_SLOTS_VALUE = LINE_SLOTS;
+// Cache descriptors are appended in monotonically increasing address order.
+// Keep only seven low bits in the large per-line table and record the first
+// slot belonging to each 128-entry cache page.  Eleven 7-bit boundaries cover
+// pages 1..11; page 0 is implicit.  This preserves all 96 entries while
+// avoiding the third M10K depth slice on four descriptor-address bits.
+localparam integer LINE_ENTRY_LOW_WIDTH = 7;
+localparam integer LINE_ENTRY_PAGE_SIZE = 1 << LINE_ENTRY_LOW_WIDTH;
+localparam integer LINE_PAGE_WIDTH = CACHE_ADDR_WIDTH - LINE_ENTRY_LOW_WIDTH;
+localparam integer LINE_PAGE_BOUNDARIES =
+    (CACHE_ENTRIES + LINE_ENTRY_PAGE_SIZE - 1) / LINE_ENTRY_PAGE_SIZE - 1;
+localparam integer LINE_PAGE_META_WIDTH =
+    LINE_PAGE_BOUNDARIES * LINE_COUNT_WIDTH;
 
 typedef enum logic [5:0] {
     IDLE,
@@ -71,6 +84,7 @@ typedef enum logic [5:0] {
     BUILD_BUCKET_READ, BUILD_BUCKET_WRITE, BUILD_ADVANCE,
     RENDER_COUNT_READ, RENDER_COUNT_WAIT,
     RENDER_LINE_READ, RENDER_READ, RENDER_DECODE, RENDER_PREP,
+    RENDER_EVAL,
     RENDER_SPRITE_PREP, RENDER_ADVANCE,
     TILE_ROW_ADDR, TILE_ROW_WAIT,
     TILE_CODE_ADDR, TILE_CODE_WAIT,
@@ -104,14 +118,19 @@ logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
 logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
 (* ramstyle = "M10K, no_rw_check" *)
-logic [CACHE_ADDR_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
+logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
+(* ramstyle = "M10K, no_rw_check" *)
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_starts [0:239];
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 logic [7:0] clear_y;
 logic [7:0] bucket_y, bucket_last_y;
 logic [CACHE_ADDR_WIDTH-1:0] bucket_descriptor;
 logic [LINE_ADDR_WIDTH-1:0] line_entry_addr;
-logic [CACHE_ADDR_WIDTH-1:0] line_entry_q;
+logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entry_q;
+logic [LINE_PAGE_WIDTH-1:0] line_entry_page_q;
 logic [LINE_COUNT_WIDTH-1:0] render_line_count;
 logic [LINE_COUNT_WIDTH-1:0] render_line_slot;
+logic [LINE_PAGE_META_WIDTH-1:0] render_line_pages;
 logic [7:0] build_first_y, build_last_y;
 logic build_screen_visible_q;
 logic [7:0] build_first_y_q, build_last_y_q;
@@ -167,8 +186,6 @@ logic  [3:0] calc_xnum, calc_ynum;
 logic  [3:0] calc_depth;
 logic [19:0] calc_code;
 logic        calc_flip_x, calc_flip_y;
-logic signed [16:0] calc_sx, calc_sy;
-logic signed [17:0] calc_line_rel;
 logic  [6:0] calc_height;
 logic        calc_tilemap;
 logic        calc_tilemap_active;
@@ -177,8 +194,68 @@ logic signed [17:0] calc_tilemap_sy_work;
 logic signed [17:0] calc_tile_scroll_x_work;
 logic [16:0] calc_tile_map_y;
 logic signed [17:0] calc_tilemap_bottom;
-logic  [3:0] calc_tile_y;
-logic  [2:0] calc_row;
+
+// Registered descriptor-decode results.  Coordinate calculation contains
+// several dependent add/subtract stages; separating it from the render-state
+// updates keeps that arithmetic out of the 48 MHz state/register paths.
+logic        prep_tilemap;
+logic        prep_tilemap_active;
+logic signed [16:0] prep_tilemap_sy;
+logic signed [17:0] prep_tilemap_bottom;
+logic [15:0] prep_tile_mode;
+logic [15:0] prep_tile_unknown;
+logic  [2:0] prep_tile_group;
+logic [16:0] prep_tile_map_y;
+logic signed [17:0] prep_tile_scroll_x_work;
+logic  [6:0] prep_height;
+logic [19:0] prep_code;
+logic  [3:0] prep_xnum, prep_ynum;
+logic  [3:0] prep_depth;
+logic        prep_flip_x, prep_flip_y;
+logic  [8:0] prep_color;
+logic signed [16:0] prep_sx_work, prep_sy_work;
+logic signed [16:0] prep_sprites_offsx, prep_sprites_offsy;
+logic [15:0] prep_coordinate_control, prep_flip_control;
+
+logic signed [16:0] eval_sx, eval_sy;
+logic signed [17:0] eval_line_rel;
+
+// Finish coordinate transforms from the registered first-level sums.  This
+// is the second half of the decode pipeline; the sprite-offset mux and the
+// three-input local/global/offset sums are no longer in this path.
+always_comb begin
+    logic signed [16:0] sx_work;
+    logic signed [16:0] sy_work;
+
+    sx_work = prep_sx_work;
+    sy_work = prep_sy_work;
+
+    if (prep_flip_control[14]) begin
+        sy_work = -sy_work;
+        if (!prep_flip_control[15])
+            sy_work = sy_work - 17'sd16;
+    end
+    if (prep_flip_control[12])
+        sx_work = -sx_work + 17'sd256;
+
+    if (prep_coordinate_control == 16'h7140) begin
+        eval_sx = prep_sprites_offsx + sx_work;
+        eval_sy = prep_sprites_offsy - sy_work;
+    end
+    else if (prep_coordinate_control[11]) begin
+        eval_sx = prep_sprites_offsx + sx_work -
+                  $signed({9'd0, prep_xnum, 3'd0});
+        eval_sy = prep_sprites_offsy - sy_work -
+                  $signed({10'd0, prep_ynum, 2'd0});
+    end
+    else begin
+        eval_sx = prep_sprites_offsx + sx_work;
+        eval_sy = prep_sprites_offsy - sy_work -
+                  $signed({9'd0, prep_ynum, 3'd0});
+    end
+
+    eval_line_rel = $signed({1'b0, target_y_latched}) - eval_sy;
+end
 
 function automatic logic signed [10:0] signed10(input logic [15:0] value);
     signed10 = $signed({value[9], value[9:0]});
@@ -312,11 +389,6 @@ logic signed [16:0] build_tilemap_sy;
 logic signed [17:0] build_tilemap_bottom;
 
 always_comb begin
-    logic signed [16:0] sx_work;
-    logic signed [16:0] sy_work;
-    logic signed [16:0] sprites_offsx;
-    logic signed [16:0] sprites_offsy;
-
     calc_xbits = local_control[14] ? cached_l2[11:10]
                                    : cached_g0[11:10];
     calc_ybits = local_control[14] ? cached_l3[11:10]
@@ -362,41 +434,7 @@ always_comb begin
     calc_flip_y = cached_l1[14] ^
                   (flip_control[14] && !flip_control[13]);
 
-    sx_work = signed10(cached_l2 + cached_g2 + selected_offset_x);
-    sy_work = signed10(cached_l3 + cached_g3 + selected_offset_y);
-    sprites_offsx = signed8(flip_control);
-    sprites_offsy = -(signed10(global_y_base) +
-                      $signed({1'b0, global_y_adjust}) + 17'sd1);
-
-    if (flip_control[14]) begin
-        sy_work = -sy_work;
-        if (!flip_control[15])
-            sy_work = sy_work - 17'sd16;
-    end
-    if (flip_control[12])
-        sx_work = -sx_work + 17'sd256;
-
-    if (coordinate_control == 16'h7140) begin
-        calc_sx = sprites_offsx + sx_work;
-        calc_sy = sprites_offsy - sy_work;
-    end
-    else if (coordinate_control[11]) begin
-        calc_sx = sprites_offsx + sx_work -
-                  $signed({9'd0, calc_xnum, 3'd0});
-        calc_sy = sprites_offsy - sy_work -
-                  $signed({10'd0, calc_ynum, 2'd0});
-    end
-    else begin
-        calc_sx = sprites_offsx + sx_work;
-        calc_sy = sprites_offsy - sy_work -
-                  $signed({9'd0, calc_ynum, 3'd0});
-    end
-
-    calc_line_rel = $signed({1'b0, target_y_latched}) - calc_sy;
     calc_height = {calc_ynum, 3'd0};
-    calc_tile_y = calc_line_rel[6:3];
-    calc_row = calc_flip_y ? ~calc_line_rel[2:0]
-                           : calc_line_rel[2:0];
 end
 
 always_comb begin
@@ -490,18 +528,80 @@ wire [127:0] cache_write_data = {
     local_w0, local_w1, local_w2, local_w3
 };
 
+function automatic logic [LINE_PAGE_WIDTH-1:0] line_page_for_slot(
+    input logic [LINE_PAGE_META_WIDTH-1:0] starts,
+    input logic [LINE_COUNT_WIDTH-1:0] slot
+);
+    integer page_i;
+    begin
+        line_page_for_slot = '0;
+        for (page_i = 1; page_i <= LINE_PAGE_BOUNDARIES; page_i = page_i + 1) begin
+            if (starts[(page_i - 1) * LINE_COUNT_WIDTH +:
+                       LINE_COUNT_WIDTH] <= slot)
+                line_page_for_slot = LINE_PAGE_WIDTH'(page_i);
+        end
+    end
+endfunction
+
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_write_data;
+logic line_page_write;
+integer line_page_write_index;
+always_comb begin
+    line_page_write_data = line_page_q;
+    line_page_write = 1'b0;
+    line_page_write_index = 0;
+    if (bucket_descriptor[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] != 0) begin
+        line_page_write_index =
+            bucket_descriptor[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] - 1'b1;
+        if (line_page_q[line_page_write_index * LINE_COUNT_WIDTH +:
+                        LINE_COUNT_WIDTH] == LINE_SLOTS_VALUE) begin
+            line_page_write_data[line_page_write_index * LINE_COUNT_WIDTH +:
+                                 LINE_COUNT_WIDTH] = line_count_q;
+            line_page_write = 1'b1;
+        end
+    end
+end
+
+wire [LINE_COUNT_WIDTH-1:0] line_entry_read_slot =
+    (state == RENDER_PREP) ? render_line_slot + 2'd2 :
+    (state == RENDER_DECODE) ? render_line_slot + 1'd1 :
+    render_line_slot;
+wire [LINE_PAGE_WIDTH-1:0] line_entry_read_page =
+    line_page_for_slot(render_line_pages, line_entry_read_slot);
+wire [CACHE_ADDR_WIDTH-1:0] line_entry_descriptor = {
+    line_entry_page_q, line_entry_q
+};
+
 always_ff @(posedge clk) begin
     line_count_q <= line_counts[line_count_addr];
-    if (state == BUILD_CLEAR_LINES)
+    line_page_q <= line_page_starts[line_count_addr];
+    if (state == BUILD_CLEAR_LINES) begin
         line_counts[line_count_addr] <= '0;
+        line_page_starts[line_count_addr] <=
+            {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+    end
     else if ((state == BUILD_BUCKET_WRITE) &&
-             (line_count_q < LINE_SLOTS_VALUE))
+             (line_count_q < LINE_SLOTS_VALUE)) begin
         line_counts[line_count_addr] <= line_count_q + 1'd1;
+        if (line_page_write)
+            line_page_starts[line_count_addr] <= line_page_write_data;
+    end
 
-    if (state == RENDER_LINE_READ)
+    // Fetch the first entry explicitly.  During PREP, use the registered next
+    // line entry to prefetch the following descriptor and simultaneously read
+    // the entry after it.  ADVANCE can then transfer cache_q directly into the
+    // decode register without an otherwise-idle decode state.
+    if ((state == RENDER_LINE_READ) ||
+        (state == RENDER_DECODE) ||
+        ((state == RENDER_PREP) &&
+         (render_line_slot + 2'd2 < render_line_count))) begin
         line_entry_q <= line_entries[line_entry_addr];
-    if (state == RENDER_READ)
-        cache_q <= descriptor_cache[line_entry_q];
+        line_entry_page_q <= line_entry_read_page;
+    end
+    if ((state == RENDER_READ) ||
+        ((state == RENDER_PREP) &&
+         (render_line_slot + 1'd1 < render_line_count)))
+        cache_q <= descriptor_cache[line_entry_descriptor];
     if (cache_we)
         descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
             <= cache_write_data_q;
@@ -609,6 +709,7 @@ always_ff @(posedge clk) begin
         line_entry_addr <= '0;
         render_line_count <= '0;
         render_line_slot <= '0;
+        render_line_pages <= {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
         target_y_latched <= 9'd0;
         sprite_code <= 20'd0;
         sprite_xnum <= 4'd0;
@@ -776,7 +877,7 @@ always_ff @(posedge clk) begin
                     line_entries[
                         (bucket_y * LINE_SLOTS) +
                         line_count_q[LINE_SLOT_WIDTH-1:0]
-                    ] <= bucket_descriptor;
+                    ] <= bucket_descriptor[LINE_ENTRY_LOW_WIDTH-1:0];
                 end
                 else begin
                     cache_overflow <= 1'b1;
@@ -827,6 +928,7 @@ always_ff @(posedge clk) begin
                 if (line_count_q != 0) begin
                     render_line_count <= line_count_q;
                     render_line_slot <= '0;
+                    render_line_pages <= line_page_q;
                     line_entry_addr <= LINE_ADDR_WIDTH'(
                         target_y_latched[7:0] * LINE_SLOTS
                     );
@@ -842,51 +944,90 @@ always_ff @(posedge clk) begin
             RENDER_LINE_READ: state <= RENDER_READ;
 
             RENDER_READ: begin
-                cache_read_index <= line_entry_q;
-                cache_render_index <= line_entry_q;
+                cache_read_index <= line_entry_descriptor;
+                cache_render_index <= line_entry_descriptor;
+                if (render_line_slot + 1'd1 < render_line_count)
+                    line_entry_addr <= line_entry_addr + 1'd1;
                 state <= RENDER_DECODE;
             end
             // Keep the M10K output separate from coordinate/decode arithmetic.
             // This extra register removes the cache-to-position critical path.
             RENDER_DECODE: begin
                 cache_decode_q <= cache_q;
+                if (render_line_slot + 2'd2 < render_line_count)
+                    line_entry_addr <= line_entry_addr + 1'd1;
                 state <= RENDER_PREP;
             end
             RENDER_PREP: begin
-                if (calc_tilemap) begin
-                    if (calc_tilemap_active &&
+                if (render_line_slot + 2'd3 < render_line_count)
+                    line_entry_addr <= line_entry_addr + 1'd1;
+                prep_tilemap <= calc_tilemap;
+                prep_tilemap_active <= calc_tilemap_active;
+                prep_tilemap_sy <= calc_tilemap_sy;
+                prep_tilemap_bottom <= calc_tilemap_bottom;
+                prep_tile_mode <= cached_tile_mode;
+                prep_tile_unknown <= cached_tile_unknown;
+                prep_tile_group <= cached_l0[2:0];
+                prep_tile_map_y <= calc_tile_map_y;
+                prep_tile_scroll_x_work <= calc_tile_scroll_x_work;
+                prep_height <= calc_height;
+                prep_code <= calc_code;
+                prep_xnum <= calc_xnum;
+                prep_ynum <= calc_ynum;
+                prep_depth <= calc_depth;
+                prep_flip_x <= calc_flip_x;
+                prep_flip_y <= calc_flip_y;
+                prep_color <= cached_l1[8:0];
+                prep_sx_work <= signed10(
+                    cached_l2 + cached_g2 + selected_offset_x
+                );
+                prep_sy_work <= signed10(
+                    cached_l3 + cached_g3 + selected_offset_y
+                );
+                prep_sprites_offsx <= signed8(flip_control);
+                prep_sprites_offsy <= -(
+                    signed10(global_y_base) +
+                    $signed({1'b0, global_y_adjust}) + 17'sd1
+                );
+                prep_coordinate_control <= coordinate_control;
+                prep_flip_control <= flip_control;
+                state <= RENDER_EVAL;
+            end
+            RENDER_EVAL: begin
+                if (prep_tilemap) begin
+                    if (prep_tilemap_active &&
                         ($signed({1'b0, target_y_latched}) >=
-                         calc_tilemap_sy) &&
+                         prep_tilemap_sy) &&
                         ($signed({1'b0, target_y_latched}) <
-                         calc_tilemap_bottom) &&
-                        ((cached_tile_mode & 16'he000) != 0)) begin
+                         prep_tilemap_bottom) &&
+                        ((prep_tile_mode & 16'he000) != 0)) begin
                         // Adjacent 64-pixel tilemap slices overlap by one
                         // inclusive line in MAME. If the same scroll group
                         // is repeated with no intervening draw, its second
                         // rendering is pixel-for-pixel identical.
                         if (last_was_tilemap &&
-                            (last_tilemap_group == cached_l0[2:0])) begin
+                            (last_tilemap_group == prep_tile_group)) begin
                             state <= RENDER_ADVANCE;
                         end
                         else begin
                             last_was_tilemap <= 1'b1;
-                            last_tilemap_group <= cached_l0[2:0];
+                            last_tilemap_group <= prep_tile_group;
                             render_tilemap <= 1'b1;
-                            tile_mode <= cached_tile_mode;
-                            tile_unknown <= cached_tile_unknown;
-                            tile_map_y <= calc_tile_map_y;
-                            tile_scroll_x <= calc_tile_scroll_x_work[16:0];
-                            if (cached_tile_mode[12]) begin
+                            tile_mode <= prep_tile_mode;
+                            tile_unknown <= prep_tile_unknown;
+                            tile_map_y <= prep_tile_map_y;
+                            tile_scroll_x <= prep_tile_scroll_x_work[16:0];
+                            if (prep_tile_mode[12]) begin
                                 state <= TILE_ROW_ADDR;
                             end
                             else begin
-                                tile_map_x <= calc_tile_scroll_x_work[16:0];
+                                tile_map_x <= prep_tile_scroll_x_work[16:0];
                                 tile_screen_x <=
                                     -$signed({7'd0,
-                                              calc_tile_scroll_x_work[3:0]});
+                                              prep_tile_scroll_x_work[3:0]});
                                 tile_word_addr <= tile_address(
-                                    calc_tile_scroll_x_work[16:0],
-                                    calc_tile_map_y, cached_tile_mode
+                                    prep_tile_scroll_x_work[16:0],
+                                    prep_tile_map_y, prep_tile_mode
                                 );
                                 state <= TILE_CODE_ADDR;
                             end
@@ -896,23 +1037,24 @@ always_ff @(posedge clk) begin
                         state <= RENDER_ADVANCE;
                     end
                 end
-                else if ((calc_line_rel >= 0) &&
-                         (calc_line_rel <
-                          $signed({1'b0, calc_height}))) begin
+                else if ((eval_line_rel >= 0) &&
+                         (eval_line_rel <
+                          $signed({1'b0, prep_height}))) begin
                     render_tilemap <= 1'b0;
                     last_was_tilemap <= 1'b0;
-                    sprite_code <= calc_code;
-                    sprite_xnum <= calc_xnum;
-                    sprite_ynum <= calc_ynum;
+                    sprite_code <= prep_code;
+                    sprite_xnum <= prep_xnum;
+                    sprite_ynum <= prep_ynum;
                     sprite_tile_x <= 4'd0;
-                    sprite_tile_y <= calc_tile_y;
-                    sprite_sx <= calc_sx;
-                    sprite_row <= calc_row;
-                    gfx_mode <= calc_depth[2:0];
-                    flip_x <= calc_flip_x;
-                    flip_y <= calc_flip_y;
-                    shadow <= calc_depth[3];
-                    color <= cached_l1[8:0];
+                    sprite_tile_y <= eval_line_rel[6:3];
+                    sprite_sx <= eval_sx;
+                    sprite_row <= prep_flip_y ? ~eval_line_rel[2:0]
+                                              : eval_line_rel[2:0];
+                    gfx_mode <= prep_depth[2:0];
+                    flip_x <= prep_flip_x;
+                    flip_y <= prep_flip_y;
+                    shadow <= prep_depth[3];
+                    color <= prep_color;
                     state <= RENDER_SPRITE_PREP;
                 end
                 else begin
@@ -935,8 +1077,8 @@ always_ff @(posedge clk) begin
             RENDER_ADVANCE: begin
                 if (render_line_slot + 1'd1 < render_line_count) begin
                     render_line_slot <= render_line_slot + 1'd1;
-                    line_entry_addr <= line_entry_addr + 1'd1;
-                    state <= RENDER_LINE_READ;
+                    cache_decode_q <= cache_q;
+                    state <= RENDER_PREP;
                 end
                 else begin
                     busy <= 1'b0;
@@ -990,8 +1132,43 @@ always_ff @(posedge clk) begin
             FETCH_START: state <= FETCH_WAIT;
             FETCH_WAIT: begin
                 if (fetch_done) begin
-                    plot_i <= 5'd0;
-                    state <= PLOT;
+                    if (pens == 128'd0) begin
+                        // A fully transparent decoded row cannot affect the
+                        // line buffer.  Skip its four four-pixel plot batches.
+                        if (render_tilemap) begin
+                            if (tile_screen_x + 11'sd16 >
+                                $signed({2'd0, LAST_PIXEL})) begin
+                                state <= RENDER_ADVANCE;
+                            end
+                            else begin
+                                tile_screen_x <= tile_screen_x + 11'sd16;
+                                tile_map_x <= tile_map_x + 17'd16;
+                                tile_word_addr <= tile_address(
+                                    tile_map_x + 17'd16,
+                                    tile_map_y, tile_mode
+                                );
+                                state <= TILE_CODE_ADDR;
+                            end
+                        end
+                        else if (sprite_tile_x + 1'd1 < sprite_xnum) begin
+                            sprite_tile_x <= sprite_tile_x + 1'd1;
+                            sprite_sx <= sprite_sx + 17'sd16;
+                            fetch_code <= code_for_tile(
+                                sprite_code, sprite_tile_x + 1'd1,
+                                sprite_tile_y, sprite_xnum, sprite_ynum,
+                                flip_x, flip_y
+                            );
+                            fetch_row <= sprite_row;
+                            state <= FETCH_START;
+                        end
+                        else begin
+                            state <= RENDER_ADVANCE;
+                        end
+                    end
+                    else begin
+                        plot_i <= 5'd0;
+                        state <= PLOT;
+                    end
                 end
             end
 

@@ -22,7 +22,8 @@ fi
 RTL_WRITES="${RTL_WRITES:-sim_output/diff/rtl_ssv_writes_postve.trace}"
 RTL_HASH="${RTL_HASH:-sim_output/diff/rtl_v60_hash_postve.trace}"
 
-VFLAGS=(--binary --timing -j 0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
+VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
@@ -41,15 +42,16 @@ CORE=(
 )
 
 echo "=== BUILD tb_ssv_realrom_boot ==="
-rm -rf "$OUT/boot"
 mkdir -p "$OUT/boot"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
   --Mdir "$OUT/boot" -o tb_ssv_realrom_boot \
   "${CORE[@]}" verif/tb_ssv_realrom_boot.sv \
   >"$OUT/boot/build.log" 2>&1
 
 echo "=== RUN TRACE_CYCLES=$CYCLES REQUIRE_VE + MAME IRQ ==="
-"$OUT/boot/tb_ssv_realrom_boot" \
+verilator-safe status
+verilator-sim-safe -- "$OUT/boot/tb_ssv_realrom_boot" \
   "+TRACE_CYCLES=$CYCLES" \
   +REQUIRE_VE \
   "+DIFF_IRQ_SCHEDULE=$IRQ_SCHED" \
@@ -67,12 +69,13 @@ python3 tools/compare-v60-hash-traces.py "$MAME_HASH" "$RTL_HASH" \
   | tee "$OUT/hash_compare.log"
 
 echo "=== BUILD/RUN tb_ssv_hang_watch (natural vblank VE gate) ==="
-rm -rf "$OUT/hang"
 mkdir -p "$OUT/hang"
-verilator "${VFLAGS[@]}" --top-module tb_ssv_hang_watch \
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_hang_watch \
   --Mdir "$OUT/hang" -o tb_ssv_hang_watch \
   "${CORE[@]}" verif/tb_ssv_hang_watch.sv \
   >"$OUT/hang/build.log" 2>&1
-"$OUT/hang/tb_ssv_hang_watch" | tee "$OUT/hang/run.log"
+verilator-safe status
+verilator-sim-safe -- "$OUT/hang/tb_ssv_hang_watch" | tee "$OUT/hang/run.log"
 
 echo "ALL POST-VE DIFF GATES PASS"

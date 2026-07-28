@@ -5,9 +5,9 @@ module tb_ssv_input_matrix;
 
 // Mirror of Arcade-SSV.sv mapping (keep in sync).
 function automatic [15:0] player_port(input [31:0] joy);
-    // MAME bits 7:0 = START,B3,B2,B1,RIGHT,LEFT,DOWN,UP
-    player_port = {8'hff, ~{joy[7], joy[6], joy[5], joy[4],
-                              joy[0], joy[1], joy[2], joy[3]}};
+    // MAME bits 7:0 = UP,DOWN,LEFT,RIGHT,B1,B2,B3,START
+    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
+                              joy[4], joy[5], joy[6], joy[7]}};
 endfunction
 
 function automatic [15:0] system_port(
@@ -86,16 +86,16 @@ initial begin
     expect16("P1 idle", player_port(32'd0), 16'hFFFF);
     expect16("P2 idle", player_port(32'd0), 16'hFFFF);
 
-    // MAME P1 low byte: START,B3,B2,B1,RIGHT,LEFT,DOWN,UP
+    // MAME P1 low byte: UP,DOWN,LEFT,RIGHT,B1,B2,B3,START
     // joy bits: 0=R 1=L 2=D 3=U 4=B1 5=B2 6=B3 7=Start
-    expect16("P1 UP", player_port(32'h8), 16'hFFFE);
-    expect16("P1 DOWN", player_port(32'h4), 16'hFFFD);
-    expect16("P1 LEFT", player_port(32'h2), 16'hFFFB);
-    expect16("P1 RIGHT", player_port(32'h1), 16'hFFF7);
-    expect16("P1 B1", player_port(32'h10), 16'hFFEF);
-    expect16("P1 B2", player_port(32'h20), 16'hFFDF);
-    expect16("P1 B3", player_port(32'h40), 16'hFFBF);
-    expect16("P1 START", player_port(32'h80), 16'hFF7F);
+    expect16("P1 UP", player_port(32'h8), 16'hFF7F);
+    expect16("P1 DOWN", player_port(32'h4), 16'hFFBF);
+    expect16("P1 LEFT", player_port(32'h2), 16'hFFDF);
+    expect16("P1 RIGHT", player_port(32'h1), 16'hFFEF);
+    expect16("P1 B1", player_port(32'h10), 16'hFFF7);
+    expect16("P1 B2", player_port(32'h20), 16'hFFFB);
+    expect16("P1 B3", player_port(32'h40), 16'hFFFD);
+    expect16("P1 START", player_port(32'h80), 16'hFFFE);
 
     // SYSTEM: COIN1,COIN2,SERVICE1,TILT=0,TEST
     expect16("SYS idle", system_port(0, 0, 0, 0), 16'hFFFF);

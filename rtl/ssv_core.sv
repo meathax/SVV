@@ -202,15 +202,21 @@ always_comb begin
         renderer_target_y = vcnt + 2'd2;
 end
 
-// Swap line buffers as active display enters horizontal blank. Lines 0 and 1
-// are prepared at the tail of vblank; descriptors are cached earlier in it.
-wire renderer_line_start = video_enable && ce_pixel &&
-                           (hcnt == SSV_HBSTART - 1'd1) &&
-                           (renderer_target_y < SSV_VBSTART) &&
-                           !obj_cache_busy;
+// Swap completed lines as active display enters horizontal blank. The extra
+// target_y==240 swap exposes the already-rendered final visible line; it must
+// not launch another renderer. Lines 0 and 1 are prepared at vblank's tail.
+wire line_buffer_start = video_enable && ce_pixel &&
+                         (hcnt == SSV_HBSTART - 1'd1) &&
+                         (renderer_target_y <= SSV_VBSTART) &&
+                         !obj_cache_busy;
+wire renderer_line_start = line_buffer_start &&
+                           (renderer_target_y < SSV_VBSTART);
 
+// Look ahead one address to cover the line-buffer/palette read pipeline.  The
+// output observed at coordinate x is the value requested on the preceding
+// pixel clock; x=0 is preloaded throughout horizontal blank.
 wire [8:0] scan_x_ahead = (hcnt < SSV_HBSTART - 1'd1)
-                         ? hcnt + 1'd1 : 9'd0;
+                          ? hcnt + 1'd1 : 9'd0;
 wire line_clear_busy, line_clear_done;
 wire [3:0] renderer_plot_we;
 wire renderer_plot_shadow, renderer_shadow_4bit;
@@ -247,7 +253,7 @@ assign renderer_busy = bg_busy | obj_busy;
 assign renderer_done = obj_done;
 
 ssv_line_buffer4 line_buffer (
-    .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
+    .clk(clk_sys), .rst(rst), .line_start(line_buffer_start),
     .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
     .plot_color(renderer_plot_color), .plot_shadow(renderer_plot_shadow),
     .plot_pen(renderer_plot_pen), .shadow_4bit(renderer_shadow_4bit),
@@ -297,7 +303,7 @@ ssv_cached_sprite_renderer sprite_renderer (
 always_ff @(posedge clk_sys) begin
     if (rst)
         renderer_overrun <= 1'b0;
-    else if ((renderer_line_start && renderer_busy) || obj_cache_overflow)
+    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
         // Line deadline miss, or descriptor/line-slot cache overflow.
         renderer_overrun <= 1'b1;
 end

@@ -18,7 +18,12 @@
 
 # Simulation output.
 /obj_dir/
+/verif/obj_*/
 /sim_output/
+/.simcache/
+/snap/
+/play_shot_*_4x.png
+/verilator_*.png
 *.vcd
 *.fst
 *.lxt

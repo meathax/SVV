@@ -34,6 +34,7 @@ function Match-Value([string]$Text, [string]$Pattern) {
 $mapSummaryPath = Join-Path $outputDir "$Revision.map.summary"
 $fitSummaryPath = Join-Path $outputDir "$Revision.fit.summary"
 $staSummaryPath = Join-Path $outputDir "$Revision.sta.summary"
+$staReportPath = Join-Path $outputDir "$Revision.sta.rpt"
 $mapReportPath = Join-Path $outputDir "$Revision.map.rpt"
 $fitReportPath = Join-Path $outputDir "$Revision.fit.rpt"
 $rbfPath = Join-Path $outputDir "$Revision.rbf"
@@ -42,6 +43,7 @@ $qsfPath = Join-Path $ProjectRoot "$Revision.qsf"
 $mapSummary = Read-OptionalFile $mapSummaryPath
 $fitSummary = Read-OptionalFile $fitSummaryPath
 $staSummary = Read-OptionalFile $staSummaryPath
+$staReport = Read-OptionalFile $staReportPath
 $mapReport = Read-OptionalFile $mapReportPath
 $fitReport = Read-OptionalFile $fitReportPath
 $qsf = Read-OptionalFile $qsfPath
@@ -93,7 +95,7 @@ $timingRows = @()
 if ($staIsCurrent -and $staSummary) {
     $timingMatches = [regex]::Matches(
         $staSummary,
-        "(?ms)^Type\s+:\s+(.+?)\r?\nSlack\s+:\s+(-?\d+(?:\.\d+)?)"
+        "(?ms)^Type\s+:\s+(.+?)\r?\nSlack\s+:\s+(-?\d+(?:\.\d+)?)\r?\nTNS\s+:\s+(-?\d+(?:\.\d+)?)"
     )
     foreach ($match in $timingMatches) {
         $timingRows += [pscustomobject]@{
@@ -102,12 +104,20 @@ if ($staIsCurrent -and $staSummary) {
                 $match.Groups[2].Value,
                 [Globalization.CultureInfo]::InvariantCulture
             )
+            TNS = [double]::Parse(
+                $match.Groups[3].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            )
         }
     }
 }
 
 $worstTiming = $timingRows | Sort-Object Slack | Select-Object -First 1
-$timingMet = $staIsCurrent -and $timingRows.Count -gt 0 -and $worstTiming.Slack -ge 0
+$timingMet = $staIsCurrent -and $timingRows.Count -gt 0 -and
+    $worstTiming.Slack -ge 0 -and
+    -not ($timingRows | Where-Object { $_.TNS -lt 0 })
+$unconstrainedClocks = Match-Value $staReport '; Unconstrained Clocks\s*;\s*(\d+)\s*;'
+$constraintsMet = $staIsCurrent -and $unconstrainedClocks -eq '0'
 
 $rbf = Get-Item -LiteralPath $rbfPath -ErrorAction SilentlyContinue
 $rbfIsCurrent = $fitIsCurrent -and [bool]$rbf -and [bool]$fitSummaryFile -and
@@ -126,7 +136,8 @@ $routeRegion = if ($routeRegionMatch.Success) {
 }
 $congestionFailure = $fitReport -match 'routing phase terminated due to routing congestion'
 
-$ready = $mapIsCurrent -and $fitIsCurrent -and $staIsCurrent -and $timingMet -and $rbfIsCurrent
+$ready = $mapIsCurrent -and $fitIsCurrent -and $staIsCurrent -and
+    $timingMet -and $constraintsMet -and $rbfIsCurrent
 $result = [ordered]@{
     ProjectRoot = $ProjectRoot
     Revision = $Revision
@@ -150,8 +161,11 @@ $result = [ordered]@{
     CongestionFailure = $congestionFailure
     WorstTimingType = if ($worstTiming) { $worstTiming.Type } else { $null }
     WorstSlackNs = if ($worstTiming) { $worstTiming.Slack } else { $null }
+    WorstPathTNSNs = if ($worstTiming) { $worstTiming.TNS } else { $null }
     TimingMet = $timingMet
     TimingCurrent = $staIsCurrent
+    UnconstrainedClocks = $unconstrainedClocks
+    ConstraintsMet = $constraintsMet
     LatestBuildInput = if ($newestBuildInput) { $newestBuildInput.FullName } else { $null }
     RbfPath = if ($rbf) { $rbf.FullName } else { $null }
     RbfCurrent = $rbfIsCurrent
@@ -175,7 +189,8 @@ else {
         Write-Host "  Routing:    average $routeAverage; peak $routePeak; $routeRegion"
     }
     if ($staIsCurrent) {
-        Write-Host "  Timing:     worst $($result.WorstSlackNs) ns; met=$timingMet; current=True"
+        Write-Host "  Timing:     worst $($result.WorstSlackNs) ns; TNS $($result.WorstPathTNSNs) ns; met=$timingMet; current=True"
+        Write-Host "  Constraints: unconstrained clocks $unconstrainedClocks; met=$constraintsMet"
     }
     else {
         Write-Host "  Timing:     pending or stale; current=False"
