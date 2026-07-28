@@ -136,6 +136,15 @@ int bg_ack_while_obj_owns;
 logic [1:0] bg_fetch_state_d;
 logic obj_owned_d;
 
+// +DUMP_TILEMAP=<frame> traces every tilemap tile fetch on that post-VE frame.
+// The scroll-triggered background corruption shows font glyphs where scenery
+// belongs, which means a wrong tile *index* -- i.e. tile_word_addr is landing
+// in the wrong tilemap. Dumping the address inputs alongside the result
+// localises that to either the address maths or the scroll/mode registers
+// feeding it.
+int dump_tilemap_frame;
+logic [5:0] tm_state_d;
+
 // Sticky multi-cycle ack (covers CE gaps from fractional enable).
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
@@ -152,6 +161,7 @@ always_ff @(posedge clk_sys) begin
         bg_ack_while_obj_owns <= 0;
         bg_fetch_state_d <= 2'd0;
         obj_owned_d <= 1'b0;
+        tm_state_d <= 6'd0;
     end else begin
         // Ownership check, written against observable behaviour rather than
         // against the fix, so it is valid with or without it: the background
@@ -160,6 +170,26 @@ always_ff @(posedge clk_sys) begin
         // object renderer's tile data as its own background tile.
         bg_fetch_state_d <= dut.background_renderer.fetch.state;
         obj_owned_d      <= dut.obj_busy;
+
+        // Trace tilemap tile fetches on the requested frame. TILE_PREP is
+        // where code+attr have both landed, so every field below is settled.
+        tm_state_d <= dut.sprite_renderer.state;
+        if (dump_tilemap_frame >= 0 && post_ve_frames == dump_tilemap_frame &&
+            tm_state_d != dut.sprite_renderer.state &&
+            dut.sprite_renderer.state == 6'd32) begin   // TILE_PREP
+            $display("TM f=%0d y=%0d grp=%0d mode=%04x sz=%0d sx=%05x mapx=%05x mapy=%05x addr=%05x code=%04x attr=%04x scrx=%0d",
+                     post_ve_frames, dut.sprite_renderer.target_y_latched,
+                     dut.sprite_renderer.prep_tile_group,
+                     dut.sprite_renderer.tile_mode,
+                     dut.sprite_renderer.tile_mode[15:13],
+                     dut.sprite_renderer.tile_scroll_x,
+                     dut.sprite_renderer.tile_map_x,
+                     dut.sprite_renderer.tile_map_y,
+                     dut.sprite_renderer.tile_word_addr,
+                     dut.sprite_renderer.tile_code_low,
+                     dut.sprite_renderer.tile_attr,
+                     dut.sprite_renderer.tile_screen_x);
+        end
         if (bg_fetch_state_d == 2'd1 &&
             dut.background_renderer.fetch.state != 2'd1 &&
             obj_owned_d)
@@ -771,6 +801,8 @@ initial begin
         scenario = "attract_idle";
     if (!$value$plusargs("P1_LATENCY=%d", p1_latency))
         p1_latency = 0;
+    if (!$value$plusargs("DUMP_TILEMAP=%d", dump_tilemap_frame))
+        dump_tilemap_frame = -1;
     if (!$value$plusargs("FRAMES=%d", max_frames))
         max_frames = 120;
     if (!$value$plusargs("SOAK_FRAMES=%d", soak_frames))
