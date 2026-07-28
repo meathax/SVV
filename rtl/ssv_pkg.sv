@@ -18,6 +18,21 @@ package ssv_pkg;
     localparam logic [26:0] STREAM_SAMPLES   = 27'h0D00000;
     localparam logic [26:0] STREAM_END       = 27'h1100000;
 
+    // Video timing.
+    //
+    // CONFIRMED from a photograph of a real STA-0001B motherboard (28 Jul 2026):
+    // the board carries two crystals, **42.9545 MHz** and **48.000 MHz**, both
+    // legible on the silkscreen next to the can. See
+    // docs/hardware/SSV_BOARD_HARDWARE.md.
+    //
+    //   42.9545 MHz / 6 = 7.159083 MHz pixel clock
+    //   7.159083 MHz / (454 x 262) = 60.19 Hz
+    //
+    // so the divide-by-6 and the totals below are consistent with real board
+    // hardware, not just with the emulator they were originally taken from.
+    //
+    // NOT yet confirmed: the active/blank split (336/240) and the sync pulse
+    // positions in ssv_video_timing.sv. Those still need a scope on a board.
     localparam logic [8:0] SSV_HTOTAL  = 9'h1C6; // 454
     localparam logic [8:0] SSV_HBSTART = 9'h150; // 336
     localparam logic [8:0] SSV_VTOTAL  = 9'h106; // 262

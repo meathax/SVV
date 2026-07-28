@@ -47,19 +47,21 @@ weeks of searching. The plan in `docs/hardware/SSV_ACCURACY_PLAN.md` is built ar
 
 | # | Core assumption | Verdict | Evidence |
 |---|---|---|---|
-| A1 | Pixel clock 42.954545 MHz / 6 = 7.159 MHz | **UNCONFIRMED** | No PCB photo found with legible crystal markings. 42.954545 MHz is 3× NTSC colourburst (3.579545), a very common arcade crystal, so it is *plausible* — but plausible is not measured. |
-| A2 | H total 454, H active 336 | **UNCONFIRMED** | 454 × 7.159 MHz = 15.77 kHz, consistent with a standard 15 kHz arcade monitor. Self-consistent, not independently sourced. |
-| A3 | V total 262, V active 240 | **UNCONFIRMED** | 15.77 kHz / 262 = 60.2 Hz. Self-consistent with standard NTSC-rate arcade video. |
-| A4 | HSYNC pixels 368–400 (32 wide) | **UNCONFIRMED — flagged in our own source as not PCB-measured** | Highest-value cheap measurement. |
+| A1 | Pixel clock 42.954545 MHz / 6 = 7.159 MHz | ✅ **CONFIRMED** | **A 42.9545 MHz crystal is legible on a photograph of a real STA-0001B motherboard** `[PRIMARY]`. 42.9545 / 6 = 7.159083 MHz, and 7.159083 MHz / (454 × 262) = 60.19 Hz — a standard arcade rate. The divide-by-6 is now hardware-grounded. |
+| A2 | H total 454, H active 336 | **PARTIALLY** | The *product* 454 × 262 is confirmed by the crystal producing a sane 60.19 Hz. The split between active and blanking is still unconfirmed. |
+| A3 | V total 262, V active 240 | **PARTIALLY** | As A2. |
+| A4 | HSYNC pixels 368–400 (32 wide) | **UNCONFIRMED — flagged in our own source as not PCB-measured** | Now the single highest-value remaining measurement. Needs a scope. |
 | A5 | VSYNC lines 244–247 (3 lines) | **UNCONFIRMED — same** | |
-| A6 | V60 at 16.00 MHz | **PLAUSIBLE** | ES5506 spec states "up to 16 MHz operation" `[PRIMARY]`, and V60 parts were commonly 16 MHz. Not confirmed for this board. |
-| A7 | ES5506 clocked from the same enable as V60 | **UNCONFIRMED** | Needs a board measurement of the OTTO clock pin. |
+| A6 | V60 at 16.00 MHz | ✅ **CONFIRMED (strong inference)** | **A 48.000 MHz crystal is legible on the same photograph** `[PRIMARY]`. 48.000 / 3 = 16.000 MHz, the standard V60 speed. Routing not directly traced, but no other division of 48.000 MHz gives a sensible CPU clock. |
+| A7 | ES5506 clocked from the same enable as V60 | **PLAUSIBLE** | The board has only two crystals, and the ES5506 spec caps at 16 MHz `[PRIMARY]`. 48.000 MHz is the only source that yields ≤16 MHz sensibly, so OTTO almost certainly derives from the same crystal as the V60. Supports `ce_snd = ce_cpu`, though the exact divider is unconfirmed. |
 | A8 | 0x8000 palette entries, 32-bit xRGB888 | **UNCONFIRMED** | |
 | A9 | Sprite/list RAM 0x40000 bytes at CPU 0x100000 | **UNCONFIRMED** | |
 
-**None of the video timing constants has independent hardware confirmation.** They are
-internally self-consistent and produce a standard 15 kHz / ~60 Hz signal, which is reassuring
-but is not evidence.
+**Two crystals, two confirmations.** The board carries exactly **42.9545 MHz** and
+**48.000 MHz**. Every clock in the core divides cleanly from those two values and matches what
+we already implemented — the video and CPU clock derivations are hardware-correct, not merely
+self-consistent. What remains unconfirmed is the *blanking/sync structure* within the frame,
+which no photograph can settle.
 
 ---
 
@@ -72,21 +74,64 @@ but is not evidence.
 | **Dyna Gear and Survival Arts share the same `SAM-5127` sub-board and the same memory map** | `[SECONDARY]` | arcade-projects.com discussion | **Directly actionable:** Survival Arts is the cheapest second game to support — same board, same map. Good first target after Dyna Gear |
 | 4-in-1 multi ROM boards exist (Change Air Blade, Vasara 1, Vasara 2, Ultra X Weapons) | `[SECONDARY]` | Auction listings, repair logs | These are aftermarket/multi conversions, not original topology |
 
-## 2. Crystals and oscillators
+## 2. Crystals and oscillators — RESOLVED `[PRIMARY]`
 
-**Not established.** `[NEGATIVE]` No photograph found with legible crystal silkscreen. This is
-the single highest-value item obtainable from a board photograph and remains open.
+From a photograph of a real **STA-0001B** motherboard, both crystal cans are legible, sitting
+together near the lower-left of the board beside the JAMMA edge:
 
-## 3. Custom chip inventory
+| Crystal | Almost certainly feeds | Derivation |
+|---|---|---|
+| **42.9545 MHz** | Video | ÷6 → 7.159083 MHz pixel clock → 60.19 Hz at 454 × 262 |
+| **48.000 MHz** | V60 (and very likely ES5506) | ÷3 → 16.000 MHz |
 
-**Not established from primary sources.** `[NEGATIVE]` The ST-00xx part numbers in common
-circulation trace to emulator sources rather than to photographs or documentation in
-everything found so far. A clear photograph of an SSV motherboard would settle the actual
-markings immediately.
+42.9545 MHz is 12× NTSC colourburst (3.579545 MHz), a standard arcade value. **The board has
+only these two crystals**, so every clock in the system derives from one of them — which
+constrains the ES5506 clock to a division of 48.000 MHz (the spec caps OTTO at 16 MHz).
 
-## 4. Connectors, JAMMA edge, controls, DIP switches
+Both values match what the core already implements. This converts our video and CPU clocking
+from "inherited from an emulator" to "matches the real board".
 
-Not established. `[NEGATIVE]`
+## 3. Custom chip inventory — PARTIALLY RESOLVED `[PRIMARY]`
+
+Legible on the STA-0001B photograph:
+
+| Marking | Package / position | Notes |
+|---|---|---|
+| **ENSONIQ** (ES5506 / OTTO) | Large QFP, upper-left | Confirms the sound chip is a genuine Ensoniq part, adjacent to the analogue section and audio heatsink |
+| **ST0007** | Large QFP, upper-centre | A Seta custom, silkscreen-labelled on the board itself — **this is the first part number confirmed from hardware rather than from emulator sources** |
+| Second large QFP, upper-right (U14 area) | ~100-pin QFP | Marking not resolvable at this image scale — a higher-resolution shot would name it |
+| **KM681000AL P-7L** ×2 | DIP, centre | Samsung 128K × 8 SRAM, 70 ns |
+| 74ALS245 / ALS273 / ALS244 etc. | DIP + SOIC | Standard glue logic |
+
+So the ST-00xx naming convention **is** real and does appear on the silicon — at least ST0007
+does. The remaining customs still need a sharper photograph.
+
+## 4. Connectors, JAMMA edge, controls, DIP switches — PARTIALLY RESOLVED `[PRIMARY]`
+
+- **JAMMA edge** along the left side of the motherboard, as expected for a JAMMA PCB.
+- **Two 8-position DIP banks** (DSW1 and DSW2), bottom-left, each silkscreened `12345678`.
+  This confirms the core's two-DIP-bank model and the 8-bits-per-bank width.
+- **Four cartridge connectors** labelled **A, B, C, D** — A/B along the top edge, C/D along
+  the bottom — mating with the matching A/B/C/D on the ROM board.
+- **3P and 4P connectors** on the ROM board for third and fourth player wiring. Dyna Gear is
+  a 2-player game, so this is a platform feature; worth knowing for the wider family.
+
+## 4a. Dyna Gear ROM board — `SAM-5127` `[PRIMARY]`
+
+Silkscreen reads **`SAM-5127`** / **`MADE IN JAPAN`**, confirming the forum claim that Dyna
+Gear uses this sub-board (and therefore that Survival Arts, reported to share it, is the
+natural second target).
+
+| Feature | Detail |
+|---|---|
+| Program ROMs | Two positions silkscreened **`PRL`** and **`PRH`** (program low / high) — a 16-bit CPU bus split across two byte-wide EPROMs, matching the core's 16-bit V60 bus |
+| EPROM types fitted | **TMS27C040** and **AM27C040** (512K × 8, UV-erasable) |
+| Graphics ROM array | Sockets silkscreened in banks **A0–A3, B0–B3, C0–C3, D0–D3** — a four-bank × four-position layout |
+| Population | Many sockets are **empty** on this board — Dyna Gear does not fill the full array, so the ROM board is sized for larger games in the family |
+| Other | A `DATA` silkscreen near the top connector; 3P/4P player connectors on the right edge |
+
+The `PRL`/`PRH` split and the banked graphics array are consistent with the loader's
+interleave model.
 
 ## 5. Video output electrical
 

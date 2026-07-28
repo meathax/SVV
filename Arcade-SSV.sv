@@ -157,6 +157,18 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
 
+// V60 clock enable.
+//
+// CONFIRMED from a real STA-0001B photograph: the board's second crystal is
+// **48.000 MHz**, and 48.000 / 3 = 16.000 MHz is the V60 clock. The accumulator
+// below targets that from clk_sys.
+//
+// Accuracy note, deliberately NOT changed: at clk_sys = 48.3185 MHz the
+// constant 21702 yields 15.99887 MHz, i.e. 71 ppm slow. 21704 would give
+// 16.00035 MHz (22 ppm). The improvement is real but ~0.007%, and changing the
+// CPU-to-raster phase would invalidate the 950-frame golden CRC that was just
+// re-baselined against MAME. Not worth trading a verified reference for 49 ppm.
+// Revisit only if the golden is being re-cut for another reason.
 logic ce_cpu;
 logic [15:0] cpu_acc;
 always_ff @(posedge clk_sys) begin
