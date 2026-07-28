@@ -1,0 +1,79 @@
+{
+  "id": "coin_start_p1_long",
+  "set": "dynagear",
+  "mame": "0.285",
+  "mra": "Dyna Gear.mra",
+  "mra_sha256": "73958e5a9f6dee5f29f0559d3f05ea71c0fb3cf8ff339daffe0ac05ec3195cf3",
+  "maincpu_sha256": "c29d3bf37b761aad1f13b01be7da9904c0a975826744b820fdc664c098c66289",
+  "dsw1": "0xFFFF",
+  "dsw2": "0xFFFD",
+  "geometry": {
+    "active_w": 336,
+    "active_h": 240
+  },
+  "defaults": {
+    "in_p1": "0xFFFF",
+    "in_p2": "0xFFFF",
+    "in_system": "0xFFFF",
+    "in_extra": "0xFFFF"
+  },
+  "note": [
+    "Extends coin_start_p1_gameplay past the 950-frame gate.",
+    "Post-VE frames 0..949 are byte-identical to coin_start_p1_gameplay, so",
+    "the existing gate result is preserved.  From frame 950 the schedule is a",
+    "pure function of the frame index instead of an explicit event list, which",
+    "is why the 'schedule' array below stops at 950 and 'cycle' describes the",
+    "rest.  The generator lives in verif/tb_ssv_frame_crc.sv, task",
+    "apply_inputs(), branch scenario == \"coin_start_p1_long\"."
+  ],
+  "schedule": [
+    { "frame": 30, "in_system": "0xFFFE", "note": "COIN1 press" },
+    { "frame": 34, "in_system": "0xFFFF", "note": "COIN1 release" },
+    { "frame": 165, "in_p1": "0xFFFE", "note": "P1 START press" },
+    { "frame": 170, "in_p1": "0xFFFF", "note": "P1 START release" },
+    { "frame": 250, "in_p1": "0xFFFE", "note": "Confirm Roger with START" },
+    { "frame": 255, "in_p1": "0xFFF7", "note": "Confirm Roger with B1" },
+    { "frame": 262, "in_p1": "0xFFFF", "note": "Neutral" },
+    { "frame": 300, "in_p1": "0xFFEF", "note": "RIGHT during transition" },
+    { "frame": 330, "in_p1": "0xFFF7", "note": "B1 during transition" },
+    { "frame": 360, "in_p1": "0xFF7F", "note": "UP during transition" },
+    { "frame": 390, "in_p1": "0xFFFF", "note": "Neutral" },
+    { "frame": 420, "in_p1": "0xFFF7", "note": "Skip story beat with B1" },
+    { "frame": 425, "in_p1": "0xFFFF", "note": "B1 release" },
+    { "frame": 480, "in_p1": "0xFFFE", "note": "Dismiss transition with START" },
+    { "frame": 485, "in_p1": "0xFFFF", "note": "START release" },
+    { "frame": 540, "in_p1": "0xFFF7", "note": "Skip second story beat with B1" },
+    { "frame": 545, "in_p1": "0xFFFF", "note": "B1 release" },
+    { "frame": 820, "in_p1": "0xFFEF", "note": "Move RIGHT in gameplay" },
+    { "frame": 840, "in_p1": "0xFFE7", "note": "RIGHT+B1 attack" },
+    { "frame": 848, "in_p1": "0xFFEF", "note": "Continue RIGHT" },
+    { "frame": 870, "in_p1": "0xFFFF", "note": "Neutral" },
+    { "frame": 875, "in_p1": "0xFFF7", "note": "Second B1 attack" },
+    { "frame": 883, "in_p1": "0xFFFF", "note": "B1 release" },
+    { "frame": 890, "in_p1": "0xFF7F", "note": "Move UP" },
+    { "frame": 920, "in_p1": "0xFFFF", "note": "Neutral" }
+  ],
+  "cycle": {
+    "start_frame": 950,
+    "period": 240,
+    "phase_var": "c = (frame - 950) % 240",
+    "held": [
+      { "when": "c < 140", "input": "P1 RIGHT", "in_p1_bit": 4 },
+      { "when": "200 <= c < 220", "input": "P1 LEFT", "in_p1_bit": 5 },
+      { "when": "150 <= c < 170", "input": "P1 UP", "in_p1_bit": 7 },
+      { "when": "176 <= c < 190", "input": "P1 DOWN", "in_p1_bit": 6 },
+      { "when": "(c % 12) < 6", "input": "P1 B1 attack", "in_p1_bit": 3 },
+      { "when": "60 <= c < 66 or 170 <= c < 176", "input": "P1 B2 jump", "in_p1_bit": 2 },
+      { "when": "232 <= c < 236", "input": "P1 B3", "in_p1_bit": 1 },
+      { "when": "(frame - 950) % 1800 < 5", "input": "P1 START", "in_p1_bit": 0 },
+      { "when": "(frame - 950) % 3600 < 4", "input": "COIN1", "in_system_bit": 0 }
+    ]
+  },
+  "stop": {
+    "after_video_enable_frames": 3000
+  },
+  "outputs": {
+    "rtl_frame_crc": "sim_output/diff/rtl_coin_start_p1_long_frames.crc",
+    "rtl_state_crc": "sim_output/diff/rtl_coin_start_p1_long_states.crc"
+  }
+}

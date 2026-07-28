@@ -43,7 +43,11 @@ logic [15:0] external_ram [0:196607];
 
 string main_path, sprite_path, crc_path, state_path, scenario;
 integer main_fd, sprite_fd, crc_fd, state_fd;
-integer main_count, sprite_count, cycle_count, max_cycles, i;
+integer main_count, sprite_count, i;
+// 32-bit `integer` caps +CYCLES at 2^31-1, which is only ~2640 post-VE frames
+// (~805k clk_sys per 60 Hz frame plus ~26M of boot).  The long gameplay
+// scenario needs more than that, so the cycle budget is 64-bit.
+longint cycle_count, max_cycles;
 integer p1_transactions;
 integer frame_idx, post_ve_frames, max_frames, soak_frames;
 integer active_pixels, nonblack_pixels, post_ve_nonblack;
@@ -287,7 +291,8 @@ task automatic apply_inputs(input integer f);
     in_p1 = 16'hffff;
     in_system = 16'hffff;
     if (scenario == "coin_start_p1" ||
-        scenario == "coin_start_p1_gameplay") begin
+        scenario == "coin_start_p1_gameplay" ||
+        scenario == "coin_start_p1_long") begin
         if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
         // Wait for "PUSH START" after coin, then enter select.
         if (f >= 165 && f < 170) in_p1[0] = 1'b0;   // START
@@ -298,7 +303,8 @@ task automatic apply_inputs(input integer f);
         if (f >= 300 && f < 330) in_p1[4] = 1'b0;   // RIGHT
         if (f >= 330 && f < 360) in_p1[3] = 1'b0;   // B1
         if (f >= 360 && f < 390) in_p1[7] = 1'b0;   // UP
-        if (scenario == "coin_start_p1_gameplay") begin
+        if (scenario == "coin_start_p1_gameplay" ||
+            scenario == "coin_start_p1_long") begin
             // Skip the two long story beats, then dismiss the map transition.
             if (f >= 420 && f < 425) in_p1[3] = 1'b0; // B1
             if (f >= 480 && f < 485) in_p1[0] = 1'b0; // START
@@ -308,6 +314,34 @@ task automatic apply_inputs(input integer f);
             if ((f >= 840 && f < 848) ||
                 (f >= 875 && f < 883)) in_p1[3] = 1'b0; // B1
             if (f >= 890 && f < 920) in_p1[7] = 1'b0; // UP
+        end
+        // -------------------------------------------------------------
+        // coin_start_p1_long: identical to coin_start_p1_gameplay up to
+        // post-VE frame 950 (so the existing 950-frame gate is unchanged),
+        // then a repeating 240-frame gameplay cycle that keeps the player
+        // moving, attacking and jumping indefinitely.  The pattern is a
+        // pure function of `f`, so the scenario stays deterministic and
+        // needs no external input file.
+        //
+        // P1 bit map (active low, per verif/tb_ssv_input_matrix.sv):
+        //   7 UP  6 DOWN  5 LEFT  4 RIGHT  3 B1  2 B2  1 B3  0 START
+        // -------------------------------------------------------------
+        if (scenario == "coin_start_p1_long" && f >= 950) begin : long_play
+            automatic integer c;
+            c = (f - 950) % 240;
+            if (c < 140)                in_p1[4] = 1'b0;  // RIGHT (advance)
+            if (c >= 200 && c < 220)    in_p1[5] = 1'b0;  // LEFT  (back up)
+            if (c >= 150 && c < 170)    in_p1[7] = 1'b0;  // UP    (climb/aim)
+            if (c >= 176 && c < 190)    in_p1[6] = 1'b0;  // DOWN  (duck)
+            if ((c % 12) < 6)           in_p1[3] = 1'b0;  // B1    (attack)
+            if ((c >= 60 && c < 66) ||
+                (c >= 170 && c < 176)) in_p1[2] = 1'b0;   // B2    (jump)
+            if (c >= 232 && c < 236)    in_p1[1] = 1'b0;  // B3
+            // START every 30 s: answers a respawn / continue prompt without
+            // hammering it during normal play.
+            if (((f - 950) % 1800) < 5) in_p1[0] = 1'b0;  // START
+            // Re-coin every 60 s so a continue is always affordable.
+            if (((f - 950) % 3600) < 4) in_system[0] = 1'b0; // COIN1
         end
     end
 endtask
