@@ -316,3 +316,176 @@ count) and on overrun counts, not on CRC equality.
    being restarted mid-transaction at that rate; whether the resulting output
    is what the hardware should show is a separate question this bench can now
    at least measure.
+
+---
+
+# Follow-up: where the bus time and the scanline budget actually go
+
+Measured with `+SDRAM_REAL`, `coin_start_p1_gameplay`, 950 frames
+(949-frame whole-frame occupancy window, 1,523,751,175 `clk_ram` cycles).
+Every `clk_ram` cycle of the controller is attributed to exactly one bucket, so
+the shares below sum to 100%.
+
+## 1. Bus occupancy split — the bus is NOT saturated
+
+| bucket | clk_ram cycles | share | txn/frame | clk_ram per txn |
+|---|---:|---:|---:|---:|
+| **p1 GFX fetch** | 673,126,416 | **44.18%** | 59,108 | 12.00 |
+| **p4 ES5506 samples** | 90,959,985 | **5.97%** | 10,650 | 9.00 |
+| **p0 V60** | 80,856,756 | **5.31%** | 9,467 | 9.00 |
+| refresh | 19,563,138 | 1.28% | 2,388 | — |
+| arbitration turnaround (`ST_IDLE` with work pending) | 77,358,299 | 5.08% | — | — |
+| **truly idle (nothing pending)** | 581,886,581 | **38.19%** | — | — |
+| core writes | 0 in window | 0% | 0 | — |
+
+Total busy **61.81%**; data ports alone **55.45%**.
+
+Two things follow immediately:
+
+* **Bandwidth is not the binding constraint.** The chip is doing nothing at all
+  38% of the time while 84% of scanlines miss their deadline.
+* **All 131,328 core SDRAM writes happen during boot.** There is no write
+  traffic at all in the post-video-enable window, so the write port is not a
+  factor.
+
+## 2. Arbitration is already almost free — do NOT raise p1 priority
+
+A p1 4-word burst occupies the bus for exactly **12 `clk_ram` = 6.00 `clk_sys`**
+(measured, `cycles_per_txn`). Measured p1 *service latency* is
+**6.76 `clk_sys` = 13.5 `clk_ram`** mean.
+
+> Queueing adds **1.5 `clk_ram` (0.76 `clk_sys`) on average**. p1 is already
+> within 13% of the hardware floor.
+
+Perfect arbitration — p1 always granted instantly — could recover at most
+`0.76 x 250.9 = 191 clk_sys` per scanline out of a **1,315-cycle** overrun.
+It cannot fix the renderer, and it would push p0 (already the slowest port at
+8.30 mean) further out. **Recommendation: drop this option.**
+
+## 3. Per-line-period anatomy — where the 3,063 cycles go
+
+The scanline budget is **3,063.2 `clk_sys`** between `line_buffer_start`
+pulses (measured, min 3,064). `ssv_core` chains the renderers — bg gets
+`renderer_line_start`, and the sprite renderer's `start` input is `bg_done` —
+so the two passes are serial within a line.
+
+| per line period | on-time (35,376) | **late (192,624 = 84.4%)** |
+|---|---:|---:|
+| period length | 3,063.2 | 3,063.2 |
+| bg busy | 560.1 | 1,839.9 |
+| obj busy | 2,167.8 | 2,538.1 |
+| **renderer busy (bg+obj)** | 2,728.0 | **4,378.0** |
+| p1 round-trip stall | 1,661.5 | 1,952.9 |
+| p1 transactions | 219.0 | 250.9 |
+| stall share of busy time | 60.9% | **44.6%** |
+
+(bg and obj busy can overlap when a period runs long, so their sum is renderer
+work, not wall time.)
+
+**A late line needs 4,378 renderer cycles and has 3,063 — it is 43% over
+budget, and 1,953 of those cycles are pure SDRAM round trip.**
+
+Both fetchers are single-outstanding (they sit in `WAIT_ACK`), so the renderer
+spends ~45% of its busy time stalled while the bus is 38% idle. That is the
+whole story: **the constraint is transaction count x round-trip latency, not
+bandwidth and not contention.**
+
+`OBJ_LINE_COMPLETION reached_done=200,561 ended_without_done=0` — every object
+pass does finish, it just finishes after the deadline. Nothing is being
+truncated.
+
+## 4. Distribution shape — most lines, not a few pathological ones
+
+`LINE_PERIOD_BUSY_HIST`, renderer-busy cycles per line period:
+
+| renderer busy | on-time | late |
+|---|---:|---:|
+| 2,560–2,943 (under budget) | 28,977 | 0 |
+| 2,944–3,071 (marginal) | 5,317 | 26,246 |
+| 3,072–4,095 | 143 | 55,309 |
+| 4,096–5,119 | 90 | 52,286 |
+| 5,120–6,143 | 134 | 58,783 |
+
+Only **13.6%** of late lines are marginal (the 2,944–3,071 bucket). The other
+86% are spread broadly from 3,072 to 6,143 — up to **2x the budget**.
+
+Late lines carry only **15% more p1 transactions** than on-time ones
+(250.9 vs 219.0), and the per-line maximum (281) is barely above the mean.
+p1 transactions per frame are **59,057 mean, 64,874 max**, and the dense jungle
+window (frames 820–919) is actually *lighter* than attract at 56,991.
+
+> This is not a dense-scene outlier problem. The load is nearly uniform and
+> structurally above budget. Anything that removes outliers (per-line caps,
+> descriptor limits) will barely move it; only a proportional cut to
+> transactions or to round trips will.
+
+## 5. Verdict on the two candidate fixes
+
+### icache fill to p5: worth doing, but for the CPU, not the renderer
+
+p0 is **5.31%** of bus time, 9,467 transactions/frame at 9 `clk_ram` each.
+Folding each 4-read icache line fill into one 4-word p5 burst:
+
+* bus time: 9,467 x 9 = 85,203 -> ~2,367 x 14 = 33,138 `clk_ram`/frame.
+  Bus share **5.31% -> ~2.1%**. Real, but the bus already has 38% idle.
+* CPU: an icache line fill goes from **4 serial round trips
+  (4 x 8.30 = 33.2 `clk_sys`)** to **one (~9 `clk_sys`)** — a **~3.7x cut in
+  icache miss cost** — and it removes ~7,100 arbitration entries per frame,
+  which slightly lowers everyone's queueing.
+
+**Cheap, low-risk, clearly positive — but it will not fix the scanline
+overruns.** Budget it as a CPU-throughput fix.
+
+### GFX fetch to p2: the only one of the two that moves the renderer
+
+p1 is **44.18%** of bus and **250.9 transactions per line period**. An 8-word
+p2 burst costs 16 `clk_ram` (12 + 4 extra READ cycles) = 8.0 `clk_sys`, plus
+the same ~1.5 `clk_ram` queueing, so ~8.75 `clk_sys` served.
+
+* transactions per line: 250.9 -> ~125.5
+* round-trip stall per line: 250.9 x 6.76 = 1,696 -> 125.5 x 8.75 = 1,098,
+  saving **~600 `clk_sys` per line**
+* p1/p2 bus share: 44.18% -> **~29%**
+* late-line renderer busy: 4,378 -> **~3,778** against a 3,063 budget
+
+**It closes roughly 46% of the 1,315-cycle overrun. It does not close all of
+it.** It is the right call only if you accept that a second change is still
+needed afterwards.
+
+### A third option the data points at (observation, not a recommendation)
+
+The renderer stalls 45% of its busy time while the bus idles 38%, purely
+because each fetcher keeps **one** transaction outstanding. Letting the GFX
+fetcher issue the next address while it consumes the current word — two
+outstanding requests — would hide most of a 6.76-cycle round trip with **no ROM
+layout change and no arbitration change**, and it composes with the p2 change
+rather than competing with it. Rough ceiling: it could recover most of the
+1,953-cycle stall on a late line, which is more than the entire 1,315-cycle
+overrun.
+
+Caveat, and it is the same trap as before: a second outstanding request makes
+the bg/obj ack steering harder, not easier — two in flight across an ownership
+change is exactly the shape of `c80d8f8`. The `bg_ack_while_obj_owns`
+assertion becomes more load-bearing, not less, if you go this way.
+
+## 6. Also worth knowing
+
+* **p4 (ES5506) is a bigger bus consumer than the CPU** — 5.97% vs 5.31%,
+  10,650 single-word sample reads per frame. Not on the critical path while the
+  bus has 38% idle, but it is the second-largest client and it is all
+  single-word traffic.
+* **Refresh is negligible** at 1.28%.
+* **Arbitration turnaround** (`ST_IDLE` cycles with a request already pending)
+  is 5.08% — one wasted cycle per transaction hand-off, by construction of the
+  registered `ST_IDLE -> ST_ACT` arbitration. Removing it would recover ~1
+  `clk_ram` in 13.5 of p1 latency: same order as the priority change, same
+  verdict.
+
+## 7. New plusarg output
+
+`report_bus_occupancy()` and `report_line_periods()` run at the end of every
+`+SDRAM_REAL` run. Lines emitted: `BUS_WINDOW`, `BUS_PORT`, `BUS_IDLE`,
+`BUS_UTILISATION`, `LINE_BUDGET`, `OBJ_LINE_*`, `BG_LINE`, `RENDER_CHAIN`,
+`P1_TXN_TOTAL`, `LINE_PERIOD`, `LINE_PERIOD_STALL_SHARE`,
+`LINE_PERIOD_BUSY_HIST`. The `+SDRAM_STATS=path` CSV gained a `p1_txn` column
+(p1 transactions in that frame).

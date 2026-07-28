@@ -474,10 +474,13 @@ integer frames_with_over, frames_counted;
 always_ff @(posedge clk_sys) begin
     if (rst) begin
         vb_d2 <= 1'b1;
+        occ_armed <= 1'b0;
+        occ_frames = 0;
         bg_over_prev = 0; obj_over_prev = 0;
         frame_bg_over = 0; frame_obj_over = 0;
         max_frame_bg_over = 0; max_frame_obj_over = 0;
         frames_with_over = 0; frames_counted = 0;
+        frame_p1_txn_prev = 0;
     end
     else begin
         vb_d2 <= vb;
@@ -487,6 +490,8 @@ always_ff @(posedge clk_sys) begin
             bg_over_prev   = bg_overruns;
             obj_over_prev  = obj_overruns;
             frames_counted = frames_counted + 1;
+            occ_armed <= 1'b1;          // whole-frame occupancy window
+            occ_frames = frames_counted - 1;
             if (frame_bg_over > max_frame_bg_over)
                 max_frame_bg_over = frame_bg_over;
             if (frame_obj_over > max_frame_obj_over)
@@ -494,9 +499,11 @@ always_ff @(posedge clk_sys) begin
             if (frame_bg_over != 0 || frame_obj_over != 0)
                 frames_with_over = frames_with_over + 1;
             if (sdram_stats_fd != 0) begin
-                $fdisplay(sdram_stats_fd, "%0d,%0d,%0d,%0d,%0d",
+                $fdisplay(sdram_stats_fd, "%0d,%0d,%0d,%0d,%0d,%0d",
                           post_ve_frames, frame_bg_over, frame_obj_over,
-                          p1_lat_max, obj_max_line_cycles);
+                          p1_lat_max, obj_max_line_cycles,
+                          total_p1_txn - frame_p1_txn_prev);
+                frame_p1_txn_prev = total_p1_txn;
                 $fflush(sdram_stats_fd);
             end
         end
@@ -550,6 +557,436 @@ task automatic report_sdram_stats();
              max_frame_bg_over, max_frame_obj_over);
 endtask
 
+
+
+// ---------------------------------------------------------------------------
+// SDRAM bus occupancy (clk_ram) and per-line renderer transaction load.
+//
+// Occupancy attributes every clk_ram cycle of the controller to exactly one
+// bucket, so the shares sum to 100%:
+//   * ST_IDLE with nothing pending           -> genuinely idle bus
+//   * ST_IDLE with a request or refresh due  -> arbitration turnaround
+//   * ST_PRE_REF / ST_REF / ST_REFW          -> refresh
+//   * anything else                          -> the granted port
+// A transaction is counted on each ST_IDLE -> ST_ACT hand-off, so
+// occ_port[i]/txn_port[i] is the true bus cost of one transaction on port i.
+//
+// Counting is armed at the first completed post-VE frame boundary so the
+// window is a whole number of frames.
+// ---------------------------------------------------------------------------
+localparam int SDR_ST_IDLE    = 0;
+localparam int SDR_ST_PRE_REF = 8;
+localparam int SDR_ST_REF     = 9;
+localparam int SDR_ST_REFW    = 10;
+
+logic occ_armed;
+integer occ_frames;
+longint unsigned occ_cycles, occ_idle_empty, occ_idle_pend, occ_ref;
+longint unsigned occ_port [0:7];
+longint unsigned txn_port [0:7];
+logic occ_prev_idle;
+integer occ_k;
+
+always_ff @(posedge clk_ram) begin
+    int st;
+    if (rst) begin
+        occ_cycles <= 0; occ_idle_empty <= 0; occ_idle_pend <= 0; occ_ref <= 0;
+        occ_prev_idle <= 1'b1;
+        for (occ_k = 0; occ_k < 8; occ_k = occ_k + 1) begin
+            occ_port[occ_k] <= 0;
+            txn_port[occ_k] <= 0;
+        end
+    end
+    else if (sdram_real && occ_armed) begin
+        st = int'(u_sdram.state);
+        occ_cycles <= occ_cycles + 1;
+        if (st == SDR_ST_IDLE) begin
+            if (u_sdram.ref_pend || u_sdram.wr_pend || u_sdram.read_valid)
+                occ_idle_pend <= occ_idle_pend + 1;
+            else
+                occ_idle_empty <= occ_idle_empty + 1;
+        end
+        else if (st == SDR_ST_PRE_REF || st == SDR_ST_REF || st == SDR_ST_REFW)
+            occ_ref <= occ_ref + 1;
+        else
+            occ_port[u_sdram.grant] <= occ_port[u_sdram.grant] + 1;
+
+        if (occ_prev_idle && st != SDR_ST_IDLE && st != SDR_ST_PRE_REF)
+            txn_port[u_sdram.grant] <= txn_port[u_sdram.grant] + 1;
+        occ_prev_idle <= (st == SDR_ST_IDLE);
+    end
+end
+
+// ---------------------------------------------------------------------------
+// Per-scanline object-renderer load.  One "episode" = one obj_busy pulse =
+// one scanline's worth of object rendering.  Episodes are split by whether a
+// line_buffer_start arrived while they were still running, i.e. whether that
+// line missed its deadline, so the two distributions answer directly whether
+// overruns are a few pathological lines or the whole population being over.
+// ---------------------------------------------------------------------------
+logic   obj_ep_busy_d, obj_ep_late;
+integer obj_ep_p1, obj_ep_dur;
+integer obj_p1_hist_on   [0:63];   // 8-transaction buckets
+integer obj_p1_hist_late [0:63];
+integer obj_dur_hist_on   [0:63];  // 64-cycle buckets
+integer obj_dur_hist_late [0:63];
+integer obj_ep_n_on, obj_ep_n_late;
+integer obj_ep_max_on, obj_ep_max_late;
+integer obj_dur_max_on, obj_dur_max_late;
+longint unsigned obj_ep_sum_on, obj_ep_sum_late;
+longint unsigned obj_dur_sum_on, obj_dur_sum_late;
+
+// Scanline budget, measured rather than assumed: clk_sys cycles between
+// consecutive line_buffer_start pulses.
+longint unsigned sys_cyc;
+longint unsigned last_line_start;
+integer line_gap_min, line_gap_max, line_gap_n;
+longint unsigned line_gap_sum;
+
+
+// --- Renderer pipeline anatomy -------------------------------------------
+// ssv_core chains the two renderers: bg gets renderer_line_start, and the
+// sprite renderer's `start` is bg_done.  So a scanline's budget is
+// clear + bg + obj in series, and an object episode that is still running when
+// the next line_buffer_start arrives gets restarted, not just delayed.  These
+// counters separate "the line's work does not fit" from "the line starts too
+// late" and record whether the object pass ever reached obj_done.
+logic   obj_ep_done_seen;
+integer obj_ep_done_n, obj_ep_trunc_n;
+integer obj_delay_n, obj_delay_max;
+longint unsigned obj_delay_sum;
+logic   bg_ep_busy_d;
+integer bg_ep_p1, bg_ep_dur, bg_ep_n, bg_max_p1, bg_max_dur;
+longint unsigned bg_sum_p1, bg_sum_dur;
+longint unsigned last_rls;
+logic   chain_active;
+integer chain_n, chain_max;
+longint unsigned chain_sum;
+integer frame_p1_txn, frame_p1_txn_prev;
+integer total_p1_txn;
+
+always_ff @(posedge clk_sys) begin
+    int bkt;
+    int gap;
+    if (rst) begin
+        obj_ep_busy_d <= 1'b0; obj_ep_late <= 1'b0;
+        obj_ep_p1 <= 0; obj_ep_dur <= 0;
+        obj_ep_done_seen <= 1'b0;
+        obj_ep_done_n = 0; obj_ep_trunc_n = 0;
+        obj_delay_n = 0; obj_delay_max = 0; obj_delay_sum = 0;
+        bg_ep_busy_d <= 1'b0; bg_ep_p1 <= 0; bg_ep_dur <= 0;
+        bg_ep_n = 0; bg_max_p1 = 0; bg_max_dur = 0;
+        bg_sum_p1 = 0; bg_sum_dur = 0;
+        last_rls <= 0; chain_active <= 1'b0;
+        chain_n = 0; chain_max = 0; chain_sum = 0;
+        total_p1_txn = 0;
+        obj_ep_n_on = 0; obj_ep_n_late = 0;
+        obj_ep_max_on = 0; obj_ep_max_late = 0;
+        obj_dur_max_on = 0; obj_dur_max_late = 0;
+        obj_ep_sum_on = 0; obj_ep_sum_late = 0;
+        obj_dur_sum_on = 0; obj_dur_sum_late = 0;
+        sys_cyc <= 0; last_line_start <= 0;
+        line_gap_min = 0; line_gap_max = 0; line_gap_n = 0; line_gap_sum = 0;
+        for (bkt = 0; bkt < 64; bkt = bkt + 1) begin
+            obj_p1_hist_on[bkt] = 0;   obj_p1_hist_late[bkt] = 0;
+            obj_dur_hist_on[bkt] = 0;  obj_dur_hist_late[bkt] = 0;
+        end
+    end
+    else begin
+        sys_cyc <= sys_cyc + 1;
+
+        if (dut.line_buffer_start) begin
+            if (ve_seen && last_line_start != 0) begin
+                gap = int'(sys_cyc - last_line_start);
+                if (line_gap_n == 0 || gap < line_gap_min) line_gap_min = gap;
+                if (gap > line_gap_max) line_gap_max = gap;
+                line_gap_n   = line_gap_n + 1;
+                line_gap_sum = line_gap_sum + gap;
+            end
+            last_line_start <= sys_cyc;
+        end
+
+        if (ve_seen && sdr_p1_req && !p1_req_d)
+            total_p1_txn = total_p1_txn + 1;
+
+        // Full render chain: renderer_line_start -> obj_done.
+        // Keep the ORIGINAL start when a period overruns, otherwise the
+        // elapsed time is measured from a later line and comes out short.
+        if (dut.renderer_line_start && !chain_active) begin
+            last_rls     <= sys_cyc;
+            chain_active <= 1'b1;
+        end
+        else if (chain_active && dut.obj_done && ve_seen) begin
+            gap = int'(sys_cyc - last_rls);
+            chain_n   = chain_n + 1;
+            chain_sum = chain_sum + gap;
+            if (gap > chain_max) chain_max = gap;
+            chain_active <= 1'b0;
+        end
+
+        // Background pass: its own duration and p1 load.
+        bg_ep_busy_d <= dut.bg_busy;
+        if (dut.bg_busy && !bg_ep_busy_d) begin
+            bg_ep_p1  <= (sdr_p1_req && !p1_req_d) ? 1 : 0;
+            bg_ep_dur <= 1;
+        end
+        else if (dut.bg_busy) begin
+            bg_ep_dur <= bg_ep_dur + 1;
+            if (sdr_p1_req && !p1_req_d) bg_ep_p1 <= bg_ep_p1 + 1;
+        end
+        else if (bg_ep_busy_d && ve_seen) begin
+            bg_ep_n    = bg_ep_n + 1;
+            bg_sum_p1  = bg_sum_p1 + bg_ep_p1;
+            bg_sum_dur = bg_sum_dur + bg_ep_dur;
+            if (bg_ep_p1  > bg_max_p1)  bg_max_p1  = bg_ep_p1;
+            if (bg_ep_dur > bg_max_dur) bg_max_dur = bg_ep_dur;
+        end
+
+        obj_ep_busy_d <= dut.obj_busy;
+        if (dut.obj_busy && !obj_ep_busy_d) begin
+            obj_ep_p1   <= (sdr_p1_req && !p1_req_d) ? 1 : 0;
+            obj_ep_dur  <= 1;
+            obj_ep_late <= dut.line_buffer_start;
+            obj_ep_done_seen <= dut.obj_done;
+            if (ve_seen) begin
+                gap = int'(sys_cyc - last_rls);
+                obj_delay_n   = obj_delay_n + 1;
+                obj_delay_sum = obj_delay_sum + gap;
+                if (gap > obj_delay_max) obj_delay_max = gap;
+            end
+        end
+        else if (dut.obj_busy) begin
+            obj_ep_dur <= obj_ep_dur + 1;
+            if (sdr_p1_req && !p1_req_d) obj_ep_p1 <= obj_ep_p1 + 1;
+            if (dut.line_buffer_start) obj_ep_late <= 1'b1;
+            if (dut.obj_done) obj_ep_done_seen <= 1'b1;
+        end
+        else if (obj_ep_busy_d && ve_seen) begin
+            if (obj_ep_done_seen || dut.obj_done)
+                obj_ep_done_n = obj_ep_done_n + 1;
+            else
+                obj_ep_trunc_n = obj_ep_trunc_n + 1;
+            bkt = obj_ep_p1 / 8;  if (bkt > 63) bkt = 63;
+            if (obj_ep_late) begin
+                obj_p1_hist_late[bkt] = obj_p1_hist_late[bkt] + 1;
+                obj_ep_n_late   = obj_ep_n_late + 1;
+                obj_ep_sum_late = obj_ep_sum_late + obj_ep_p1;
+                if (obj_ep_p1 > obj_ep_max_late) obj_ep_max_late = obj_ep_p1;
+            end
+            else begin
+                obj_p1_hist_on[bkt] = obj_p1_hist_on[bkt] + 1;
+                obj_ep_n_on   = obj_ep_n_on + 1;
+                obj_ep_sum_on = obj_ep_sum_on + obj_ep_p1;
+                if (obj_ep_p1 > obj_ep_max_on) obj_ep_max_on = obj_ep_p1;
+            end
+            bkt = obj_ep_dur / 64; if (bkt > 63) bkt = 63;
+            if (obj_ep_late) begin
+                obj_dur_hist_late[bkt] = obj_dur_hist_late[bkt] + 1;
+                obj_dur_sum_late = obj_dur_sum_late + obj_ep_dur;
+                if (obj_ep_dur > obj_dur_max_late) obj_dur_max_late = obj_ep_dur;
+            end
+            else begin
+                obj_dur_hist_on[bkt] = obj_dur_hist_on[bkt] + 1;
+                obj_dur_sum_on = obj_dur_sum_on + obj_ep_dur;
+                if (obj_ep_dur > obj_dur_max_on) obj_dur_max_on = obj_ep_dur;
+            end
+        end
+    end
+end
+
+
+// --- Per-line-period renderer accounting ---------------------------------
+// Unambiguous version of the chain measurement: everything is accumulated
+// between consecutive line_buffer_start pulses, so overlapping episodes cannot
+// confuse it.  For each line period that actually launched a render
+// (renderer_line_start), record how the period was spent:
+//   lp_bg   cycles with bg_busy
+//   lp_obj  cycles with obj_busy
+//   lp_wait cycles with a p1 request outstanding while a renderer is busy
+//           (pure SDRAM round-trip stall -- both fetchers are single
+//            outstanding, so this is time the renderer cannot use)
+//   lp_p1   p1 transactions issued in the period
+// A period is "late" if a renderer was still busy at the closing
+// line_buffer_start.  Comparing busy time against the period length says
+// whether the pipeline is saturated (work does not fit) or idle-gapped
+// (start latency / serialisation).
+logic   lp_valid, lp_late;
+integer lp_bg, lp_obj, lp_wait, lp_p1, lp_len;
+integer lp_n_on, lp_n_late;
+integer lp_max_busy_on, lp_max_busy_late, lp_max_p1_on, lp_max_p1_late;
+longint unsigned lp_bg_on, lp_obj_on, lp_wait_on, lp_p1_on, lp_len_on;
+longint unsigned lp_bg_lt, lp_obj_lt, lp_wait_lt, lp_p1_lt, lp_len_lt;
+integer lp_busy_hist_on [0:63];    // 128-cycle buckets
+integer lp_busy_hist_lt [0:63];
+
+always_ff @(posedge clk_sys) begin
+    int busy;
+    if (rst) begin
+        lp_valid <= 1'b0; lp_late <= 1'b0;
+        lp_bg = 0; lp_obj = 0; lp_wait = 0; lp_p1 = 0; lp_len = 0;
+        lp_n_on = 0; lp_n_late = 0;
+        lp_max_busy_on = 0; lp_max_busy_late = 0;
+        lp_max_p1_on = 0; lp_max_p1_late = 0;
+        lp_bg_on = 0; lp_obj_on = 0; lp_wait_on = 0; lp_p1_on = 0; lp_len_on = 0;
+        lp_bg_lt = 0; lp_obj_lt = 0; lp_wait_lt = 0; lp_p1_lt = 0; lp_len_lt = 0;
+        for (busy = 0; busy < 64; busy = busy + 1) begin
+            lp_busy_hist_on[busy] = 0;
+            lp_busy_hist_lt[busy] = 0;
+        end
+    end
+    else if (dut.line_buffer_start) begin
+        if (ve_seen && lp_valid) begin
+            busy = lp_bg + lp_obj;
+            if (dut.bg_busy || dut.obj_busy) begin
+                lp_n_late = lp_n_late + 1;
+                lp_bg_lt  = lp_bg_lt  + lp_bg;
+                lp_obj_lt = lp_obj_lt + lp_obj;
+                lp_wait_lt= lp_wait_lt+ lp_wait;
+                lp_p1_lt  = lp_p1_lt  + lp_p1;
+                lp_len_lt = lp_len_lt + lp_len;
+                if (busy > lp_max_busy_late) lp_max_busy_late = busy;
+                if (lp_p1 > lp_max_p1_late)  lp_max_p1_late  = lp_p1;
+                lp_busy_hist_lt[(busy / 128 > 63) ? 63 : busy / 128] =
+                    lp_busy_hist_lt[(busy / 128 > 63) ? 63 : busy / 128] + 1;
+            end
+            else begin
+                lp_n_on   = lp_n_on + 1;
+                lp_bg_on  = lp_bg_on  + lp_bg;
+                lp_obj_on = lp_obj_on + lp_obj;
+                lp_wait_on= lp_wait_on+ lp_wait;
+                lp_p1_on  = lp_p1_on  + lp_p1;
+                lp_len_on = lp_len_on + lp_len;
+                if (busy > lp_max_busy_on) lp_max_busy_on = busy;
+                if (lp_p1 > lp_max_p1_on)  lp_max_p1_on  = lp_p1;
+                lp_busy_hist_on[(busy / 128 > 63) ? 63 : busy / 128] =
+                    lp_busy_hist_on[(busy / 128 > 63) ? 63 : busy / 128] + 1;
+            end
+        end
+        lp_bg = 0; lp_obj = 0; lp_wait = 0; lp_p1 = 0; lp_len = 0;
+        lp_valid <= dut.renderer_line_start;
+    end
+    else begin
+        lp_len = lp_len + 1;
+        if (dut.bg_busy)  lp_bg  = lp_bg  + 1;
+        if (dut.obj_busy) lp_obj = lp_obj + 1;
+        if ((dut.bg_busy || dut.obj_busy) && sdr_p1_req)
+            lp_wait = lp_wait + 1;
+        if (sdr_p1_req && !p1_req_d) lp_p1 = lp_p1 + 1;
+    end
+end
+
+task automatic report_line_periods();
+    integer k;
+    real n_on, n_lt;
+    n_on = (lp_n_on   == 0) ? 1.0 : real'(lp_n_on);
+    n_lt = (lp_n_late == 0) ? 1.0 : real'(lp_n_late);
+    $display("LINE_PERIOD ontime n=%0d period=%0.1f bg=%0.1f obj=%0.1f busy=%0.1f p1wait=%0.1f p1txn=%0.1f max_busy=%0d max_p1=%0d",
+             lp_n_on, real'(lp_len_on) / n_on, real'(lp_bg_on) / n_on,
+             real'(lp_obj_on) / n_on,
+             real'(lp_bg_on + lp_obj_on) / n_on,
+             real'(lp_wait_on) / n_on, real'(lp_p1_on) / n_on,
+             lp_max_busy_on, lp_max_p1_on);
+    $display("LINE_PERIOD late   n=%0d period=%0.1f bg=%0.1f obj=%0.1f busy=%0.1f p1wait=%0.1f p1txn=%0.1f max_busy=%0d max_p1=%0d",
+             lp_n_late, real'(lp_len_lt) / n_lt, real'(lp_bg_lt) / n_lt,
+             real'(lp_obj_lt) / n_lt,
+             real'(lp_bg_lt + lp_obj_lt) / n_lt,
+             real'(lp_wait_lt) / n_lt, real'(lp_p1_lt) / n_lt,
+             lp_max_busy_late, lp_max_p1_late);
+    $display("LINE_PERIOD_STALL_SHARE ontime=%0.1f%% late=%0.1f%% of renderer-busy time is p1 round trip",
+             (lp_bg_on + lp_obj_on == 0) ? 0.0 :
+                100.0 * real'(lp_wait_on) / real'(lp_bg_on + lp_obj_on),
+             (lp_bg_lt + lp_obj_lt == 0) ? 0.0 :
+                100.0 * real'(lp_wait_lt) / real'(lp_bg_lt + lp_obj_lt));
+    for (k = 0; k < 64; k = k + 1)
+        if (lp_busy_hist_on[k] != 0 || lp_busy_hist_lt[k] != 0)
+            $display("LINE_PERIOD_BUSY_HIST %0d-%0d ontime=%0d late=%0d",
+                     k * 128, k * 128 + 127,
+                     lp_busy_hist_on[k], lp_busy_hist_lt[k]);
+endtask
+
+task automatic report_bus_occupancy();
+    real tot, fr;
+    integer k;
+    string nm;
+    tot = real'(occ_cycles);
+    fr  = (occ_frames <= 0) ? 1.0 : real'(occ_frames);
+    $display("BUS_WINDOW frames=%0d clk_ram_cycles=%0d", occ_frames, occ_cycles);
+    if (occ_cycles == 0) begin
+        $display("BUS_OCCUPANCY not sampled (stub mode or no post-VE frames)");
+    end
+    else begin
+        for (k = 0; k < 8; k = k + 1) begin
+            if (occ_port[k] == 0 && txn_port[k] == 0) continue;
+            case (k)
+                0: nm = "p0_v60";
+                1: nm = "p1_gfx";
+                2: nm = "p2_unused";
+                3: nm = "p3_unused";
+                4: nm = "p4_es5506";
+                5: nm = "p5_unused";
+                7: nm = "wr_core";
+                default: nm = "unknown";
+            endcase
+            $display("BUS_PORT %-10s cycles=%0d share=%0.2f%% txns=%0d txn_per_frame=%0.1f cycles_per_txn=%0.2f",
+                     nm, occ_port[k], 100.0 * real'(occ_port[k]) / tot,
+                     txn_port[k], real'(txn_port[k]) / fr,
+                     (txn_port[k] == 0) ? 0.0 :
+                        real'(occ_port[k]) / real'(txn_port[k]));
+        end
+        $display("BUS_PORT %-10s cycles=%0d share=%0.2f%% txns=%0d txn_per_frame=%0.1f",
+                 "refresh", occ_ref, 100.0 * real'(occ_ref) / tot,
+                 chip_ref, real'(chip_ref) / fr);
+        $display("BUS_IDLE arbitration_turnaround=%0d (%0.2f%%) truly_idle=%0d (%0.2f%%)",
+                 occ_idle_pend, 100.0 * real'(occ_idle_pend) / tot,
+                 occ_idle_empty, 100.0 * real'(occ_idle_empty) / tot);
+        $display("BUS_UTILISATION busy=%0.2f%% (ports+refresh+turnaround), data_ports_only=%0.2f%%",
+                 100.0 * real'(occ_cycles - occ_idle_empty) / tot,
+                 100.0 * real'(occ_cycles - occ_idle_empty - occ_idle_pend - occ_ref) / tot);
+    end
+    $display("LINE_BUDGET n=%0d mean=%0.1f min=%0d max=%0d clk_sys cycles between line_buffer_start",
+             line_gap_n,
+             (line_gap_n == 0) ? 0.0 : real'(line_gap_sum) / real'(line_gap_n),
+             line_gap_min, line_gap_max);
+    $display("OBJ_LINE_P1 ontime n=%0d mean=%0.1f max=%0d | late n=%0d mean=%0.1f max=%0d (p1 transactions per obj scanline)",
+             obj_ep_n_on,
+             (obj_ep_n_on == 0) ? 0.0 : real'(obj_ep_sum_on) / real'(obj_ep_n_on),
+             obj_ep_max_on,
+             obj_ep_n_late,
+             (obj_ep_n_late == 0) ? 0.0 :
+                real'(obj_ep_sum_late) / real'(obj_ep_n_late),
+             obj_ep_max_late);
+    $display("OBJ_LINE_DUR ontime mean=%0.1f max=%0d | late mean=%0.1f max=%0d (clk_sys cycles per obj scanline)",
+             (obj_ep_n_on == 0) ? 0.0 :
+                real'(obj_dur_sum_on) / real'(obj_ep_n_on),
+             obj_dur_max_on,
+             (obj_ep_n_late == 0) ? 0.0 :
+                real'(obj_dur_sum_late) / real'(obj_ep_n_late),
+             obj_dur_max_late);
+    $display("OBJ_LINE_COMPLETION reached_done=%0d ended_without_done=%0d",
+             obj_ep_done_n, obj_ep_trunc_n);
+    $display("OBJ_START_DELAY n=%0d mean=%0.1f max=%0d (clk_sys from renderer_line_start to obj_busy)",
+             obj_delay_n,
+             (obj_delay_n == 0) ? 0.0 : real'(obj_delay_sum) / real'(obj_delay_n),
+             obj_delay_max);
+    $display("BG_LINE n=%0d p1_mean=%0.1f p1_max=%0d dur_mean=%0.1f dur_max=%0d",
+             bg_ep_n,
+             (bg_ep_n == 0) ? 0.0 : real'(bg_sum_p1) / real'(bg_ep_n), bg_max_p1,
+             (bg_ep_n == 0) ? 0.0 : real'(bg_sum_dur) / real'(bg_ep_n), bg_max_dur);
+    $display("RENDER_CHAIN completed=%0d mean=%0.1f max=%0d (clk_sys renderer_line_start to obj_done)",
+             chain_n,
+             (chain_n == 0) ? 0.0 : real'(chain_sum) / real'(chain_n), chain_max);
+    $display("P1_TXN_TOTAL post_ve=%0d per_frame=%0.1f",
+             total_p1_txn,
+             (occ_frames <= 0) ? 0.0 : real'(total_p1_txn) / real'(occ_frames));
+    for (k = 0; k < 64; k = k + 1)
+        if (obj_p1_hist_on[k] != 0 || obj_p1_hist_late[k] != 0)
+            $display("OBJ_LINE_P1_HIST %0d-%0d ontime=%0d late=%0d",
+                     k * 8, k * 8 + 7, obj_p1_hist_on[k], obj_p1_hist_late[k]);
+    for (k = 0; k < 64; k = k + 1)
+        if (obj_dur_hist_on[k] != 0 || obj_dur_hist_late[k] != 0)
+            $display("OBJ_LINE_DUR_HIST %0d-%0d ontime=%0d late=%0d",
+                     k * 64, k * 64 + 63, obj_dur_hist_on[k], obj_dur_hist_late[k]);
+endtask
 
 // ---------------------------------------------------------------------------
 // Data-path equivalence check (+SDRAM_CHECK_DATA).
@@ -1231,7 +1668,7 @@ initial begin
         if (sdram_stats_fd == 0)
             $fatal(1, "cannot open SDRAM_STATS path %s", sdram_stats_path);
         $fdisplay(sdram_stats_fd,
-                  "frame,bg_overruns,obj_overruns,p1_lat_max,obj_max_line_cycles");
+                  "frame,bg_overruns,obj_overruns,p1_lat_max,obj_max_line_cycles,p1_txn");
     end
     if (!$value$plusargs("FRAME_CRC=%s", crc_path))
         crc_path = "sim_output/diff/rtl_attract_idle_frames.crc";
@@ -1394,6 +1831,8 @@ initial begin
         $fclose(sdram_stats_fd);
 
     report_sdram_stats();
+    report_bus_occupancy();
+    report_line_periods();
     if (chk_data) begin
         $display("SDRAM_DATA_CHECK p1 %0d/%0d bad, p0 %0d/%0d bad, p4 %0d/%0d bad",
                  chk_p1_bad, chk_p1_n, chk_p0_bad, chk_p0_n,
