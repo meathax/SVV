@@ -290,7 +290,46 @@ Frames that were already correct are untouched; every corrupted frame collapses
 to baseline. Frame 1100 now renders a complete jungle scene — full foliage
 across the width, both trunks, intact HUD. All 8 bring-up gates pass.
 
-### ⚠ The 950-frame golden CRC now differs, and must NOT simply be re-blessed
+### ✅ Golden CRC re-baselined 28 Jul 2026, with MAME evidence
+
+**Resolved.** The gate below was left red on purpose until MAME could settle it.
+It has, decisively — see `DYNAGEAR_TILEMAP_PAGE_FIX_MAME_VERIFICATION.md`.
+
+The old renderer was **omitting the entire `DYNA GEAR` logo background layer**
+from the character-select screen. Differing pixels against MAME (of 80,640):
+
+| RTL frame | old ≠ MAME | new ≠ MAME |
+|---:|---:|---:|
+| 176, 200, 250, 300, 310, 330, 350, 360 | 14,993–15,264 | **0** |
+| 380–420 | 2,411–2,521 | 1,291–1,305 |
+
+No sampled frame favours the old renderer, and every row is corroborated by two
+independent MAME runs. Three controls make it load-bearing rather than
+suggestive: a scratch pre-fix build reproduces the old golden **byte-for-byte
+over all 950 frames** (so it *is* the baseline and every delta is this fix
+alone); the changed frames are two contiguous runs, 176–369 and 380–421, with
+**422–949 untouched**; and frame alignment (MAME index = RTL frame − 1) was
+measured and then validated by pixel agreement at frames 172/174 *before* the
+first change and 430 *after* the last.
+
+New baseline: `sim_output/diff/rtl_final96_gameplay_frames.crc`,
+md5 `26442edf77729884887a28811171c7cc`, 950 frames.
+
+⚠ **That file is gitignored** (`.gitignore:22 /sim_output/`), so the "golden" is
+a local artefact on one machine, not a committed reference. Anyone re-cloning
+has no baseline at all. Worth fixing separately — a CRC stream is 26 KB and is
+exactly the kind of thing that should be version-controlled.
+
+Two pre-existing residuals were found and are **not** caused by this fix: a
+~2-frame character-select exit offset at frames 370–379, and ~1,300 faint
+background pixels missing in the 380–421 cutscene (all one-directional, MAME
+dark → RTL black) which this fix roughly halves. Separate follow-ups.
+
+Also: `DYNAGEAR_MAME_VERILATOR_GAMEPLAY.md` records the first post-coin MAME
+split at frame 36. Part of that was the frame off-by-one — real agreement
+extends much further and that doc should be revisited.
+
+### Historical note — why the gate was deliberately left red
 
 The fix changes 236 frames of `sim_output/diff/rtl_final96_gameplay_frames.crc`,
 first divergence at **frame 176** — the post-coin / character-select phase, long
@@ -314,6 +353,28 @@ the MAME evidence cited.
 
 Until that happens, the usable regression signal is the black-fraction table
 above plus the 8 bring-up gates.
+
+### ✅ That comparison has now been done — see
+### `docs/DYNAGEAR_TILEMAP_PAGE_FIX_MAME_VERIFICATION.md`
+
+Both builds were run side by side against MAME 0.285 on the same input
+schedule. The pre-fix scratch build reproduces
+`rtl_final96_gameplay_frames.crc` **byte-for-byte over all 950 frames**, so the
+A/B isolates this fix and nothing else. The 236 changed frames form two runs,
+`176..369` and `380..421`; everything from 422 on is unchanged.
+
+At 8 of the 14 sampled frames inside those runs the **new** renderer is
+*pixel-identical to MAME* (masking only the DIP-driven credit text). The old
+renderer is wrong by ~15,000 px/frame across `176..369` — it drops the whole
+`DYNA GEAR` logo background layer from the character-select screen. No sampled
+frame favours the old renderer. Control frames on either side of the changed
+range (172, 174, 430) are pixel-exact in both builds, which is what validates
+the comparison.
+
+**Recommendation: re-baseline the golden**, in its own commit, citing that
+document. Two pre-existing residuals it turned up (a ~2-frame character-select
+exit offset at 370–379, and ~1,300 missing faint background pixels in the
+380–421 cutscene, which this fix halves) are separate follow-ups.
 
 ## 1.6a Original localisation notes (superseded by the fix above)
 
