@@ -1,5 +1,16 @@
 # Issue contract: Dyna Gear frozen/corrupt MiSTer video
 
+> **RESOLVED 28 Jul 2026 (frozen half).** The static-frame symptom is gone.
+> With the vblank cache deadline in RBF `a23cbf06…`, the core boots into the
+> game on hardware and runs the whole attract sequence: title screen, gameplay
+> demo, world map, and a playable-looking stage with HUD. Root cause was the
+> descriptor-build latch-up documented in `DYNAGEAR_HW_RENDER_FIX_PLAN.md`
+> §1.3, **not** the timing failure this issue originally blamed.
+>
+> A **separate, new** symptom remains and is tracked in the fix plan: horizontal
+> tearing/striping concentrated in the upper part of the frame. That is a
+> different failure with a different signature — see "Post-fix state" below.
+
 ## Issue
 
 The current Dyna Gear core loads on the physical MiSTer but displays a mostly
@@ -106,6 +117,43 @@ boundary **on real hardware**:
 A uniform index-0 field means the line buffer is being scanned correctly and
 `palette[0]` happens to be teal. **The renderer is simply not writing pixels
 into it.**
+
+## Post-fix state — 28 Jul 2026, RBF `a23cbf06…`
+
+Deployed `a23cbf0622e65e7f467a6f43dcbeb43d1a0a11a2a89cc9f4db0e96d20e9a1c08`
+(md5 `b2f0964117406e47779bfdd041609e3f`, 4,395,216 bytes). Fit: 34,433 ALMs
+(82%), 532 M10K, all corners pass, worst setup +0.119 ns, `Deployable: True`.
+
+**The frozen frame is gone.** Successive captures show the attract sequence
+advancing on its own: Dyna Gear title with logo and Sammy copyright → an
+animated gameplay demo → the WORLD MAP screen → a stage scene with the
+character, platforms, and a live `AUTO SHOT` / `ROGER x 1` HUD. The core boots
+into the game.
+
+**New symptom: horizontal tearing/striping, worst near the top of the frame.**
+The lower part of a frame is generally clean; the upper third breaks into
+torn horizontal bands, and whole screens made largely of one big image (the
+world map) are striped throughout.
+
+Working interpretation — this signature is a *per-line deadline* failure, not
+the whole-frame stall that was just fixed. The renderer is failing to finish
+some lines before the buffer swap, so those lines show a mix of old and new
+content. Verilator reports `overruns bg=0 obj=0` across all 950 frames, which
+is exactly what you would expect if the difference is SDRAM service time: every
+full-core bench drives the renderer through a **behavioural SDRAM model with
+fixed low latency**, while the real controller round-robins six ports, stretches
+ack over two `clk_ram` cycles, and stalls for refresh. The renderer's GFX fetch
+(`sdr_p1`) is the bandwidth-critical consumer, and it is the one thing no
+current testbench exercises realistically.
+
+This makes Phase 3.1 of the fix plan (put `rtl/mem/sdram.sv` plus an SDRAM chip
+model in front of `tb_ssv_frame_crc`) the load-bearing next step rather than an
+optional investment: until it exists, simulation cannot reproduce or regress
+this class of defect at all.
+
+Confirming evidence to collect next: the state of the overrun LED
+(`LED_DISK`/HDD LED). If it is lit, `renderer_overrun` has latched and the
+per-line deadline miss is confirmed directly.
 
 ## Required next evidence
 

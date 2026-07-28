@@ -215,6 +215,33 @@ For whatever Phase 3 reproduces:
 |---|---|
 | 28 Jul | Timing-clean RBF (`846c7b02…`) deployed; renderer still emits almost nothing. Timing hypothesis refuted. |
 | 28 Jul | Phase 1 complete. One real defect found and fixed (1.3); three suspects cleared with recorded reasoning. |
+| 28 Jul | **Fix confirmed on hardware.** RBF `a23cbf06…` boots into the game and runs the full attract sequence — title, gameplay demo, world map, stage with live HUD. The frozen frame is gone. |
+| 28 Jul | **New symptom:** horizontal tearing/striping, worst in the upper third of the frame. Different signature (per-line, not whole-frame). Promotes Phase 3.1 from optional to load-bearing — see below. |
+
+## Status after the 28 Jul hardware test
+
+The freeze is fixed and the core reaches game content on real hardware for the
+first time. What remains is a *different* defect with a different shape:
+per-line tearing rather than a whole-frame stall.
+
+That reprioritises the plan. **Phase 3.1 is now the critical path**, not an
+optional verification investment:
+
+> Verilator reports `overruns bg=0 obj=0` across all 950 frames, yet hardware
+> visibly misses line deadlines. The one structural difference is that every
+> full-core bench drives the renderer through a behavioural SDRAM model with
+> fixed low latency, while the real controller round-robins six ports,
+> stretches ack across two `clk_ram` cycles, and stalls for refresh. The
+> renderer's GFX fetch on `sdr_p1` is the bandwidth-critical consumer and the
+> one thing no bench exercises realistically.
+
+Until `rtl/mem/sdram.sv` plus an SDRAM chip model sits in front of
+`tb_ssv_frame_crc`, simulation cannot reproduce, regress, or even detect this
+class of defect. Everything else is guesswork by comparison.
+
+Cheap confirming step first: read the overrun LED. If `renderer_overrun` has
+latched, the per-line deadline miss is confirmed directly and no inference is
+needed.
 
 ## Phase 1 results — completed 28 Jul 2026
 

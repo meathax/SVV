@@ -22,7 +22,7 @@ very nearly closes timing**, but it has not run on hardware.
 | Does it fit the 5CSEBA6U23I7? | **Yes** — 82% ALM, 96% M10K, 53% DSP |
 | Does it close timing? | **Yes** — all clocks positive at all four corners; worst is +0.392 ns |
 | Is there an RBF? | **Yes** — `releases/SSV.rbf`, built 28 Jul 12:25 |
-| Does it work on hardware? | **No** — boots and enables video, but the renderer emits almost nothing. See [`DYNAGEAR_FROZEN_VIDEO.md`](issues/DYNAGEAR_FROZEN_VIDEO.md) |
+| Does it work on hardware? | **Partly** — boots into the game and runs the whole attract sequence, but with horizontal tearing in the upper frame. See [`DYNAGEAR_HW_RENDER_FIX_PLAN.md`](DYNAGEAR_HW_RENDER_FIX_PLAN.md) |
 | Overall toward playable Dyna Gear (sim) | **~90%** (high confidence for the tested window) |
 
 ### Board completeness (sim-proven unless noted)
