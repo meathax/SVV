@@ -163,6 +163,9 @@ logic [15:0] tile_code_low;
 logic [15:0] tile_attr;
 logic [16:0] tile_word_addr;
 logic [16:0] tile_map_x;
+// Map origin for the current scanline; fixes which page (i.e. which tilemap)
+// the whole line reads from. See tile_address().
+logic [16:0] tile_map_x0;
 logic [16:0] tile_map_y;
 logic [16:0] tile_scroll_x;
 logic signed [10:0] tile_screen_x;
@@ -329,8 +332,21 @@ function automatic logic [15:0] tilemap_scroll_word(
     tilemap_scroll_word = values[index * 16 +: 16];
 endfunction
 
+// `x_base` is the map origin for this scanline; `x` is the running position
+// along it.
+//
+// tile_address() carries no per-group base, so a tilemap group is identified
+// purely by which page its scroll value lands in -- Dyna Gear puts group 1 in
+// page 3, group 3 in page 5 and group 4 in page 6. `page` therefore selects
+// *which map to read*, and must be fixed for the whole line by the origin.
+// Deriving it from the running `x` instead meant a group whose span crossed a
+// page boundary walked into the neighbouring group's map partway across the
+// screen: the background went blank and picked up font tiles from whatever
+// lived there. `column` already wraps inside the page via size_mask, which is
+// the correct behaviour for the scroll itself.
 function automatic logic [16:0] tile_address(
     input logic [16:0] x,
+    input logic [16:0] x_base,
     input logic [16:0] y,
     input logic [15:0] mode
 );
@@ -343,7 +359,7 @@ function automatic logic [16:0] tile_address(
     begin
         size_shift = 4'd8 + {1'b0, mode[15:13]};
         size_mask = (17'd1 << size_shift) - 17'd1;
-        page = (x & 17'h07fff) >> size_shift;
+        page = (x_base & 17'h07fff) >> size_shift;
         base = page << (size_shift + 2'd2);
         column = (x & (size_mask & 17'h1fff0)) << 2;
         row = (y & 17'h001f0) >> 3;
@@ -747,6 +763,7 @@ always_ff @(posedge clk) begin
         tile_attr <= 16'd0;
         tile_word_addr <= 17'd0;
         tile_map_x <= 17'd0;
+        tile_map_x0 <= 17'd0;
         tile_map_y <= 17'd0;
         tile_scroll_x <= 17'd0;
         tile_screen_x <= 11'sd0;
@@ -1071,10 +1088,12 @@ always_ff @(posedge clk) begin
                             end
                             else begin
                                 tile_map_x <= prep_tile_scroll_x_work[16:0];
+                                tile_map_x0 <= prep_tile_scroll_x_work[16:0];
                                 tile_screen_x <=
                                     -$signed({7'd0,
                                               prep_tile_scroll_x_work[3:0]});
                                 tile_word_addr <= tile_address(
+                                    prep_tile_scroll_x_work[16:0],
                                     prep_tile_scroll_x_work[16:0],
                                     prep_tile_map_y, prep_tile_mode
                                 );
@@ -1139,10 +1158,12 @@ always_ff @(posedge clk) begin
             TILE_ROW_ADDR: state <= TILE_ROW_WAIT;
             TILE_ROW_WAIT: begin
                 tile_map_x <= tile_scroll_x + {1'b0, spr_data};
+                tile_map_x0 <= tile_scroll_x + {1'b0, spr_data};
                 tile_screen_x <=
                     -$signed({7'd0,
                               tile_scroll_x[3:0] + spr_data[3:0]});
                 tile_word_addr <= tile_address(
+                    tile_scroll_x + {1'b0, spr_data},
                     tile_scroll_x + {1'b0, spr_data},
                     tile_map_y, tile_mode
                 );
@@ -1193,7 +1214,7 @@ always_ff @(posedge clk) begin
                                 tile_screen_x <= tile_screen_x + 11'sd16;
                                 tile_map_x <= tile_map_x + 17'd16;
                                 tile_word_addr <= tile_address(
-                                    tile_map_x + 17'd16,
+                                    tile_map_x + 17'd16, tile_map_x0,
                                     tile_map_y, tile_mode
                                 );
                                 state <= TILE_CODE_ADDR;
@@ -1232,7 +1253,7 @@ always_ff @(posedge clk) begin
                             tile_screen_x <= tile_screen_x + 11'sd16;
                             tile_map_x <= tile_map_x + 17'd16;
                             tile_word_addr <= tile_address(
-                                tile_map_x + 17'd16,
+                                tile_map_x + 17'd16, tile_map_x0,
                                 tile_map_y, tile_mode
                             );
                             state <= TILE_CODE_ADDR;

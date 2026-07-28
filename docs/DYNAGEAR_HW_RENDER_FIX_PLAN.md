@@ -262,7 +262,60 @@ without the fix.
 Both runs show the same starvation (22,372 bg + 24,337 obj line-deadline
 misses), so the difference is the ownership fix alone, not a change in load.
 
-## 1.6 Scroll-triggered background corruption — OPEN, localised
+## 1.6 Scroll-triggered background corruption — ROOT-CAUSED AND FIXED
+
+**Root cause.** `tile_address()` carries no per-group base address, so a tilemap
+group is identified *only* by which page its scroll value lands in — Dyna Gear
+puts group 1 in page 3, group 3 in page 5, group 4 in page 6. `page` therefore
+selects **which map to read**, and must stay fixed for a whole scanline. The
+code recomputed it per tile from the running `x`, so as soon as a group's
+336-pixel span crossed a page boundary the rest of the line read the
+*neighbouring group's* tilemap — blank in most places, font tiles where the text
+layer lives.
+
+**Fix.** `tile_address()` now takes the scanline's map origin separately and
+derives `page` from it; `x` still advances the column, which already wrapped
+correctly inside the page via `size_mask`. Applied to both
+`ssv_cached_sprite_renderer` and `ssv_bg_renderer` (identical copies of the
+function), each with a new origin register (`tile_map_x0` / `map_x0`).
+
+**Result**, play-area black fraction, `coin_start_p1_long`:
+
+| post-VE frame | 900 | 950 | 1000 | 1050 | 1100 | 1150 | 1200 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| before | 1.14 | 0.74 | 5.23 | 14.94 | 25.83 | 25.97 | 25.94 |
+| **after** | 1.14 | 0.74 | **0.16** | **0.04** | **1.15** | **0.03** | **0.00** |
+
+Frames that were already correct are untouched; every corrupted frame collapses
+to baseline. Frame 1100 now renders a complete jungle scene — full foliage
+across the width, both trunks, intact HUD. All 8 bring-up gates pass.
+
+### ⚠ The 950-frame golden CRC now differs, and must NOT simply be re-blessed
+
+The fix changes 236 frames of `sim_output/diff/rtl_final96_gameplay_frames.crc`,
+first divergence at **frame 176** — the post-coin / character-select phase, long
+before the corruption it repairs.
+
+That is expected: the same mechanism fires whenever *any* group crosses a page
+boundary, and the old behaviour there was wrong too, just less visibly. But
+"expected" is not "verified":
+
+* That golden is an **RTL-vs-RTL regression baseline, not a correctness
+  oracle.** Only attract frames 2–3 were ever pixel-matched against MAME, and
+  `DYNAGEAR_MAME_VERILATOR_GAMEPLAY.md` records the first post-coin visual split
+  from MAME at frame 36. Frames 176+ were never verified correct.
+* So the golden encodes the *old, buggy* rendering for those frames.
+
+**Do not overwrite it to make the gate green** — that is exactly the
+"modify expected output to make a test pass" failure mode. The gate is
+legitimately red until frames 176+ are compared against MAME and the new
+rendering is confirmed correct. Only then re-baseline, in its own commit, with
+the MAME evidence cited.
+
+Until that happens, the usable regression signal is the black-fraction table
+above plus the 8 bring-up gates.
+
+## 1.6a Original localisation notes (superseded by the fix above)
 
 Found by the long-scenario stream (`work/v60-opcode-audit`), reproduced
 independently in `main`. **This is the defect that matches the reported
