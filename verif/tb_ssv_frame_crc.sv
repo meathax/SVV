@@ -71,7 +71,11 @@ logic [15:0] external_ram [0:196607];
 string main_path, sprite_path, sample_path, crc_path, state_path, scenario;
 string sdram_stats_path;
 integer main_fd, sprite_fd, sample_fd, crc_fd, state_fd, sdram_stats_fd;
-integer main_count, sprite_count, sample_count, cycle_count, max_cycles, i;
+integer main_count, sprite_count, sample_count, i;
+// 32-bit `integer` caps +CYCLES at 2^31-1, which is only ~2640 post-VE frames
+// (~805k clk_sys per 60 Hz frame plus ~26M of boot).  The long gameplay
+// scenario needs more than that, so the cycle budget is 64-bit.
+longint cycle_count, max_cycles;
 integer p1_transactions;
 integer frame_idx, post_ve_frames, max_frames, soak_frames;
 integer active_pixels, nonblack_pixels, post_ve_nonblack;
@@ -164,6 +168,15 @@ logic stub_p0_ack, stub_p1_ack, stub_wr_ack, stub_p4_ack;
 logic [15:0] stub_p0_dout, stub_p4_dout;
 logic [63:0] stub_p1_dout;
 
+// +DUMP_TILEMAP=<frame> traces every tilemap tile fetch on that post-VE frame.
+// The scroll-triggered background corruption shows font glyphs where scenery
+// belongs, which means a wrong tile *index* -- i.e. tile_word_addr is landing
+// in the wrong tilemap. Dumping the address inputs alongside the result
+// localises that to either the address maths or the scroll/mode registers
+// feeding it.
+int dump_tilemap_frame;
+logic [5:0] tm_state_d;
+
 // Sticky multi-cycle ack (covers CE gaps from fractional enable).
 always_ff @(posedge clk_sys) begin
     stub_p0_ack <= 1'b0;
@@ -180,6 +193,7 @@ always_ff @(posedge clk_sys) begin
         bg_ack_while_obj_owns <= 0;
         bg_fetch_state_d <= 2'd0;
         obj_owned_d <= 1'b0;
+        tm_state_d <= 6'd0;
     end else begin
         // Ownership check, written against observable behaviour rather than
         // against the fix, so it is valid with or without it: the background
@@ -188,6 +202,26 @@ always_ff @(posedge clk_sys) begin
         // object renderer's tile data as its own background tile.
         bg_fetch_state_d <= dut.background_renderer.fetch.state;
         obj_owned_d      <= dut.obj_busy;
+
+        // Trace tilemap tile fetches on the requested frame. TILE_PREP is
+        // where code+attr have both landed, so every field below is settled.
+        tm_state_d <= dut.sprite_renderer.state;
+        if (dump_tilemap_frame >= 0 && post_ve_frames == dump_tilemap_frame &&
+            tm_state_d != dut.sprite_renderer.state &&
+            dut.sprite_renderer.state == 6'd32) begin   // TILE_PREP
+            $display("TM f=%0d y=%0d grp=%0d mode=%04x sz=%0d sx=%05x mapx=%05x mapy=%05x addr=%05x code=%04x attr=%04x scrx=%0d",
+                     post_ve_frames, dut.sprite_renderer.target_y_latched,
+                     dut.sprite_renderer.prep_tile_group,
+                     dut.sprite_renderer.tile_mode,
+                     dut.sprite_renderer.tile_mode[15:13],
+                     dut.sprite_renderer.tile_scroll_x,
+                     dut.sprite_renderer.tile_map_x,
+                     dut.sprite_renderer.tile_map_y,
+                     dut.sprite_renderer.tile_word_addr,
+                     dut.sprite_renderer.tile_code_low,
+                     dut.sprite_renderer.tile_attr,
+                     dut.sprite_renderer.tile_screen_x);
+        end
         if (bg_fetch_state_d == 2'd1 &&
             dut.background_renderer.fetch.state != 2'd1 &&
             obj_owned_d)
@@ -1219,7 +1253,8 @@ task automatic apply_inputs(input integer f);
     in_p1 = 16'hffff;
     in_system = 16'hffff;
     if (scenario == "coin_start_p1" ||
-        scenario == "coin_start_p1_gameplay") begin
+        scenario == "coin_start_p1_gameplay" ||
+        scenario == "coin_start_p1_long") begin
         if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
         // Wait for "PUSH START" after coin, then enter select.
         if (f >= 165 && f < 170) in_p1[0] = 1'b0;   // START
@@ -1230,7 +1265,8 @@ task automatic apply_inputs(input integer f);
         if (f >= 300 && f < 330) in_p1[4] = 1'b0;   // RIGHT
         if (f >= 330 && f < 360) in_p1[3] = 1'b0;   // B1
         if (f >= 360 && f < 390) in_p1[7] = 1'b0;   // UP
-        if (scenario == "coin_start_p1_gameplay") begin
+        if (scenario == "coin_start_p1_gameplay" ||
+            scenario == "coin_start_p1_long") begin
             // Skip the two long story beats, then dismiss the map transition.
             if (f >= 420 && f < 425) in_p1[3] = 1'b0; // B1
             if (f >= 480 && f < 485) in_p1[0] = 1'b0; // START
@@ -1240,6 +1276,34 @@ task automatic apply_inputs(input integer f);
             if ((f >= 840 && f < 848) ||
                 (f >= 875 && f < 883)) in_p1[3] = 1'b0; // B1
             if (f >= 890 && f < 920) in_p1[7] = 1'b0; // UP
+        end
+        // -------------------------------------------------------------
+        // coin_start_p1_long: identical to coin_start_p1_gameplay up to
+        // post-VE frame 950 (so the existing 950-frame gate is unchanged),
+        // then a repeating 240-frame gameplay cycle that keeps the player
+        // moving, attacking and jumping indefinitely.  The pattern is a
+        // pure function of `f`, so the scenario stays deterministic and
+        // needs no external input file.
+        //
+        // P1 bit map (active low, per verif/tb_ssv_input_matrix.sv):
+        //   7 UP  6 DOWN  5 LEFT  4 RIGHT  3 B1  2 B2  1 B3  0 START
+        // -------------------------------------------------------------
+        if (scenario == "coin_start_p1_long" && f >= 950) begin : long_play
+            automatic integer c;
+            c = (f - 950) % 240;
+            if (c < 140)                in_p1[4] = 1'b0;  // RIGHT (advance)
+            if (c >= 200 && c < 220)    in_p1[5] = 1'b0;  // LEFT  (back up)
+            if (c >= 150 && c < 170)    in_p1[7] = 1'b0;  // UP    (climb/aim)
+            if (c >= 176 && c < 190)    in_p1[6] = 1'b0;  // DOWN  (duck)
+            if ((c % 12) < 6)           in_p1[3] = 1'b0;  // B1    (attack)
+            if ((c >= 60 && c < 66) ||
+                (c >= 170 && c < 176)) in_p1[2] = 1'b0;   // B2    (jump)
+            if (c >= 232 && c < 236)    in_p1[1] = 1'b0;  // B3
+            // START every 30 s: answers a respawn / continue prompt without
+            // hammering it during normal play.
+            if (((f - 950) % 1800) < 5) in_p1[0] = 1'b0;  // START
+            // Re-coin every 60 s so a continue is always affordable.
+            if (((f - 950) % 3600) < 4) in_system[0] = 1'b0; // COIN1
         end
     end
 endtask
@@ -1682,6 +1746,8 @@ initial begin
         scenario = "attract_idle";
     if (!$value$plusargs("P1_LATENCY=%d", p1_latency))
         p1_latency = 0;
+    if (!$value$plusargs("DUMP_TILEMAP=%d", dump_tilemap_frame))
+        dump_tilemap_frame = -1;
     if (!$value$plusargs("FRAMES=%d", max_frames))
         max_frames = 120;
     if (!$value$plusargs("SOAK_FRAMES=%d", soak_frames))

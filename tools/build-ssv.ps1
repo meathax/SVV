@@ -12,6 +12,12 @@ $qsfPath = Join-Path $repoRoot "$project.qsf"
 
 function Assert-BuildPolicy {
     $qsf = Get-Content -LiteralPath $qsfPath -Raw
+    # Fast Fit is pinned because Standard Fit CRASHES quartus_fit on this
+    # install (Error 293007, peak virtual memory 4649 MB, with 35 GB of host
+    # RAM free) - see the note in Arcade-SSV.qsf. It is a toolchain ceiling,
+    # not a preference. The pll_hdmi domain is consequently seed-sensitive
+    # (+0.392 / +0.119 / -0.141 ns across three compiles); sweep SEED rather
+    # than raising fitter effort.
     $required = @(
         'set_global_assignment -name FITTER_EFFORT "FAST FIT"',
         'set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL NORMAL',
