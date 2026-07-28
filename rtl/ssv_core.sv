@@ -248,6 +248,22 @@ wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
 
 assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
+// p1 is one shared SDRAM port with two clients. obj_busy picks who drives
+// req/addr -- but the ack has to be steered as well. Both fetchers are level
+// sensitive on rom_ack, so handing the raw ack to the renderer that does NOT
+// own the port makes it latch the other renderer's tile data as its own.
+//
+// That is reachable: renderer_line_start is not gated on renderer_busy (a
+// still-busy renderer only *records* renderer_overrun), so a line that misses
+// its deadline starts the background renderer while the object renderer is
+// still fetching. Both then sit in WAIT_ACK on the same ack. Simulation never
+// hits it because the behavioural SDRAM is fast enough that lines never
+// overrun; on hardware it paints large parts of the background with sprite
+// tile data until the scene thins out.
+wire p1_owner_obj = obj_busy;
+wire bg_rom_ack   = sdr_p1_ack && !p1_owner_obj;
+wire obj_rom_ack  = sdr_p1_ack &&  p1_owner_obj;
+
 assign sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req;
 assign sdr_p1_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
 assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
@@ -276,7 +292,7 @@ ssv_bg_renderer background_renderer (
     .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
     .spr_addr(bg_spr_addr), .spr_data(spr_video_q),
     .rom_req(bg_rom_req), .rom_addr(bg_rom_addr),
-    .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
+    .rom_data(sdr_p1_dout), .rom_ack(bg_rom_ack),
     .plot_we(bg_plot_we), .plot_x(bg_plot_x),
     .plot_color(bg_plot_color),
     .plot_shadow(bg_plot_shadow), .plot_pen(bg_plot_pen),
@@ -297,7 +313,7 @@ ssv_cached_sprite_renderer sprite_renderer (
     .tilemap_scrolls(tilemap_scrolls),
     .spr_addr(obj_spr_addr), .spr_data(spr_video_q),
     .rom_req(obj_rom_req), .rom_addr(obj_rom_addr),
-    .rom_data(sdr_p1_dout), .rom_ack(sdr_p1_ack),
+    .rom_data(sdr_p1_dout), .rom_ack(obj_rom_ack),
     .plot_we(obj_plot_we), .plot_x(obj_plot_x),
     .plot_color(obj_plot_color),
     .plot_shadow(obj_plot_shadow), .plot_pen(obj_plot_pen),

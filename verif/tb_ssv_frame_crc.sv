@@ -110,6 +110,28 @@ ssv_core dut (
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
 
+// ---------------------------------------------------------------------------
+// SDRAM port model.
+//
+// Default: every port is served independently after one cycle. That is what
+// all existing gates and the golden frame CRC were produced against, so it is
+// preserved bit-for-bit.
+//
+// +P1_LATENCY=N inserts N extra cycles before each GFX-fetch ack. The real
+// rtl/mem/sdram.sv serialises all six ports through one chip with ~11 clk_ram
+// per 4-word burst plus arbitration and refresh stalls, so the renderer's real
+// service time is several times this model's. Starving p1 is what makes a
+// scanline miss its deadline, which is the precondition for the whole class of
+// hardware-only rendering faults -- with the default model, `overruns bg=0
+// obj=0` across 950 frames and none of them are reachable.
+// ---------------------------------------------------------------------------
+int p1_latency;
+int p1_delay;
+// A renderer must never complete a transaction it does not own.
+int bg_ack_while_obj_owns;
+logic [1:0] bg_fetch_state_d;
+logic obj_owned_d;
+
 // Sticky multi-cycle ack (covers CE gaps from fractional enable).
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
@@ -122,7 +144,22 @@ always_ff @(posedge clk_sys) begin
         p0_hold <= 4'd0; p1_hold <= 4'd0;
         wr_hold <= 4'd0; p4_hold <= 4'd0;
         p1_transactions <= 0;
+        p1_delay <= 0;
+        bg_ack_while_obj_owns <= 0;
+        bg_fetch_state_d <= 2'd0;
+        obj_owned_d <= 1'b0;
     end else begin
+        // Ownership check, written against observable behaviour rather than
+        // against the fix, so it is valid with or without it: the background
+        // fetcher must never complete a transaction (leave WAIT_ACK=1) while
+        // the object renderer owns p1. If it does, it has just latched the
+        // object renderer's tile data as its own background tile.
+        bg_fetch_state_d <= dut.background_renderer.fetch.state;
+        obj_owned_d      <= dut.obj_busy;
+        if (bg_fetch_state_d == 2'd1 &&
+            dut.background_renderer.fetch.state != 2'd1 &&
+            obj_owned_d)
+            bg_ack_while_obj_owns <= bg_ack_while_obj_owns + 1;
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1'b1;
             p0_byte_addr = {sdr_p0_addr, 1'b0};
@@ -165,13 +202,19 @@ always_ff @(posedge clk_sys) begin
                 };
             end else
                 sdr_p1_dout <= 64'd0;
-            p1_hold <= 4'd2;
+            // Hold the ack off for the configured extra latency first.
+            p1_delay <= p1_latency;
+            if (p1_latency == 0) p1_hold <= 4'd2;
             p1_transactions <= p1_transactions + 1;
+        end
+        if (p1_delay != 0) begin
+            p1_delay <= p1_delay - 1;
+            if (p1_delay == 1) p1_hold <= 4'd2;
         end
         if (p1_hold != 0) begin
             sdr_p1_ack <= 1'b1;
             p1_hold <= p1_hold - 1'd1;
-        end else if (!sdr_p1_req)
+        end else if (!sdr_p1_req && p1_delay == 0)
             p1_seen <= 1'b0;
 
         if (sdr_wr_req && !wr_seen) begin
@@ -692,6 +735,8 @@ initial begin
     end
     if (!$value$plusargs("SCENARIO=%s", scenario))
         scenario = "attract_idle";
+    if (!$value$plusargs("P1_LATENCY=%d", p1_latency))
+        p1_latency = 0;
     if (!$value$plusargs("FRAMES=%d", max_frames))
         max_frames = 120;
     if (!$value$plusargs("SOAK_FRAMES=%d", soak_frames))
@@ -809,6 +854,11 @@ initial begin
 
     $display("CACHE_BUILD max=%0d cycles (frame %0d) deadline_aborts=%0d",
              cache_build_max, cache_build_max_frame, cache_deadline_hits);
+    $display("P1_LATENCY=%0d bg_ack_while_obj_owns=%0d",
+             p1_latency, bg_ack_while_obj_owns);
+    if (bg_ack_while_obj_owns != 0)
+        $fatal(1, "background renderer latched %0d acks it did not own",
+               bg_ack_while_obj_owns);
     $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d max_line_entries=%0d",
              scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path,
              bg_overruns, obj_overruns, obj_max_line_entries);

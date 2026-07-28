@@ -218,6 +218,50 @@ For whatever Phase 3 reproduces:
 | 28 Jul | **Fix confirmed on hardware.** RBF `a23cbf06…` boots into the game and runs the full attract sequence — title, gameplay demo, world map, stage with live HUD. The frozen frame is gone. |
 | 28 Jul | **New symptom:** horizontal tearing/striping, worst in the upper third of the frame. Different signature (per-line, not whole-frame). Promotes Phase 3.1 from optional to load-bearing — see below. |
 
+## 1.5 Shared p1 ack delivered to both renderers — REAL DEFECT, FIXED
+
+Found from a user observation that the earlier "tearing" description had
+missed: *large parts of the level draw as white cross-hatch boxes, then render
+in correctly further on*. That is not tearing, it is **wrong tile data**.
+
+`ssv_core` muxes `sdr_p1_req`/`sdr_p1_addr` between the background and object
+renderers on `obj_busy`, but handed the **raw `sdr_p1_ack` to both**. Both
+fetchers are level-sensitive on `rom_ack`, so a renderer that does not own the
+port still completes its transaction and latches `sdr_p1_dout` — the *other*
+renderer's tile data.
+
+It is reachable because `renderer_line_start` is **not** gated on
+`renderer_busy`: a still-busy renderer only *records* `renderer_overrun`. So a
+line that misses its deadline starts the background renderer while the object
+renderer is still fetching, and both sit in `WAIT_ACK` on the same ack.
+
+Simulation never saw it because the behavioural SDRAM is fast enough that lines
+never overrun (`overruns bg=0 obj=0` across 950 frames). On hardware, where p1
+is shared with the CPU and audio through one chip, lines do overrun and the
+background gets painted with sprite graphics until the scene thins out.
+
+Fix: steer the ack to the owner.
+
+```systemverilog
+wire p1_owner_obj = obj_busy;
+wire bg_rom_ack   = sdr_p1_ack && !p1_owner_obj;
+wire obj_rom_ack  = sdr_p1_ack &&  p1_owner_obj;
+```
+
+Reproduction harness: `+P1_LATENCY=N` in `tb_ssv_frame_crc` starves the GFX
+fetch so lines genuinely miss deadlines — the precondition the default model
+can never create. The check is written against observable behaviour (the
+background fetcher leaving `WAIT_ACK` while `obj_busy`), so it is valid with or
+without the fix.
+
+| Run (120 frames, `+P1_LATENCY=40`) | `bg_ack_while_obj_owns` |
+|---|---:|
+| Without the fix | **1,166,752** |
+| With the fix | **0** |
+
+Both runs show the same starvation (22,372 bg + 24,337 obj line-deadline
+misses), so the difference is the ownership fix alone, not a change in load.
+
 ## Status after the 28 Jul hardware test
 
 The freeze is fixed and the core reaches game content on real hardware for the
