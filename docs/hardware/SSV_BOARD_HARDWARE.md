@@ -144,6 +144,31 @@ interleave model.
 | **Cartridge logic is 74LS-series only** | LS245 / LS244 / LS273 buffers and latches; `CN-CP40…CP43` designators | **No custom silicon, no protection device, no battery on the Dyna Gear cart** — nothing cartridge-side left to emulate for this title |
 | 3P / 4P connector positions | White pin header at the right edge, `3P` and `4P` silkscreen | Platform feature; Dyna Gear is 2-player |
 
+#### Socket type: `16M-MASK` `[PRIMARY]`
+
+The graphics sockets are silkscreened **`16M-MASK`** — 16-Megabit (2 MB) mask ROMs. Sixteen
+positions × 2 MB = **32 MB maximum graphics capacity** on a fully populated SAM-5127.
+
+This is a useful cross-check on the core's memory map. Dyna Gear's sprite data is 12,582,912
+bytes = 12 MB = **six 16 Mbit devices**, and the sample ROM is 4,194,304 bytes = 4 MB = two
+more. That is consistent with the partial population visible on the board, and consistent
+with `ssv_pkg.sv` allocating GFX `0x100000–0xcfffff` (12 MB) and samples
+`0xd00000–0x10fffff` (4 MB). The SDRAM layout matches the physical ROM complement.
+
+It also bounds the family: any SSV title needing more than 32 MB of graphics cannot be a
+plain SAM-5127 cartridge, so a differently-sized ROM board implies a different loader map.
+
+Mask ROMs carry both **Sammy** and **Sharp** branding on this board.
+
+#### Other silkscreen now legible `[PRIMARY]`
+
+- Buffer/latch designators **`CN-CP34` … `CN-CP43`** on the LS245/LS244/ALS273 row along the
+  cartridge edge — address/data buffering between cart and motherboard.
+- **`I/O-FILTER`** near the `3P`/`4P` connectors with devices at U30/U31 — input conditioning
+  for the third and fourth player wiring.
+- Board-to-board mating is via **four box-header connectors** (visible from the solder side:
+  two light, two dark), not card-edge fingers.
+
 #### The four banks probably *are* our "quarters"
 
 `rtl/video/ssv_gfx_row_fetch.sv` fetches graphics as *quarters* — Q0/Q1 packed into one
