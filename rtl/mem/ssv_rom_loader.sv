@@ -46,6 +46,17 @@ function automatic logic [24:0] stream_byte_address(
             // MAME layout Q0/Q1 are separate 4 MiB quarters. Pack their
             // corresponding 32-bit rows into one aligned 64-bit beat:
             // [31:0]=Q0, [63:32]=Q1.
+            //
+            // The "quarters" model is supported by the physical board: a
+            // SAM-5127 carries four graphics banks A/B/C/D of four `16M-MASK`
+            // sockets each, and Dyna Gear populates six of the sixteen (photos,
+            // 28 Jul 2026 — docs/hardware/SSV_BOARD_HARDWARE.md). What is *not*
+            // established is which physical bank feeds which quarter here. This
+            // interleave is known-good only in the sense that Dyna Gear's
+            // graphics decode CRC-exact with it; the bank-to-quarter assignment
+            // has never been checked against the board. If a second SSV title
+            // ever decodes with scrambled graphics under this same loader, this
+            // function is the first thing to suspect.
             stream_byte_address = SDR_SPRITES_BASE +
                 {2'd0, within_quarter[21:5], 6'd0} +
                 {19'd0, within_quarter[4:2], 3'd0} +

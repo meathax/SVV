@@ -50,6 +50,27 @@ filtered 3P/4P inputs.
 
 **Priority: medium.** No effect on Dyna Gear; a hard blocker for any 4-player family title.
 
+### Measured, 28 Jul 2026 — the port is dead for Dyna Gear
+
+`tb_ssv_frame_crc` now counts completed CPU reads of the window. Over 1,250 frames of the
+`coin_start_p1_long` gameplay scenario — attract, coin, character select and play:
+
+```
+EXTRA_PORT $500008 reads=0
+```
+
+**What this settles:** the `16'hFFFF` tie in `Arcade-SSV.sv` is provably harmless for this
+title, and step 3's acceptance test is now trivially satisfiable — a future `in_p3`/`in_p4`
+path cannot regress Dyna Gear, because Dyna Gear never looks.
+
+**What this does not settle:** the 3P/4P hypothesis itself. A two-player game would read
+zero either way, so this is consistent with the hypothesis without being evidence *for* it.
+Confirming it still needs a 4-player family title or a strapped board. The counter stays in
+the testbench so the same question is one run away for the next ROM set.
+
+The decode site in `ssv_core.sv` now carries the hypothesis and this measurement, so whoever
+picks up a 4-player title finds the reasoning instead of a bare address comparison.
+
 ---
 
 ## Item 2 — the ROM budget is Dyna-Gear-shaped and should be parameterised
@@ -79,6 +100,28 @@ But `SDR_DYNA_RAM_BASE` is named after the game, and the offsets assume its exac
 **Priority: medium.** Pure hygiene, zero behavioural change, but it is the difference between
 "a Dyna Gear core" and "an SSV core". Do it before adding a second title, not after.
 
+### Done, 28 Jul 2026
+
+1. `SDR_DYNA_RAM_BASE` → `SDR_CPU_RAM_BASE`, and the matching `sel_dynaram` → `sel_cpuram`
+   in `ssv_core.sv`. Both had a single consumer, so the rename could not miss a site — and
+   an unrenamed reference would have been a compile error, not a silent behaviour change.
+2. The layout constants are now one commented block carrying the region sizes and the
+   physical justification (`16M-MASK` sockets, six of sixteen populated), instead of five
+   loose addresses whose relationship to each other was implicit.
+3. `ssv_pkg::layout_fault()` checks nine rules — four adjacency, one SDRAM ceiling, four
+   stream/base agreement — and `ssv_core` reports it at time 0. A package cannot hold an
+   `initial` block, hence the split between the rule and its reporting.
+
+**Observed to fail before being trusted:** temporarily widening `SDR_SPRITES_SIZE` from
+12 MB to 13 MB produced, at time 0 and before any other output,
+
+```
+%Fatal: ssv_core.sv:61: ssv_pkg SDRAM layout is invalid (rule 2)
+```
+
+which is the graphics-overlaps-samples rule. Reverted; the 1,250-frame soak then passed
+with the CRC stream unchanged.
+
 ---
 
 ## Item 3 — verify the bank→quarter mapping (cheap, closes a real unknown)
@@ -99,6 +142,17 @@ loader interleave, this is the first thing to suspect. Record that pointer now �
 nothing links the loader's interleave to the physical bank layout.
 
 **Priority: low now, high the moment a second game misbehaves.**
+
+### Done, 28 Jul 2026
+
+The pointer now lives at the interleave itself, in `ssv_rom_loader.sv`'s `stream_byte_address`,
+rather than only in this document. It states the physical evidence (four banks of four
+`16M-MASK` sockets, six populated), states plainly that the bank-to-quarter assignment has
+never been checked against the board, and says that this function is the first suspect if a
+second title decodes with scrambled graphics.
+
+That is the whole of the work this item asked for. No code changed — the interleave is
+CRC-exact for Dyna Gear, and there is no evidence pointing at a defect to fix.
 
 ---
 
@@ -132,10 +186,11 @@ Nothing in the photographs can settle these. They need a board.
 
 ## Recommended order
 
-1. **Item 2** (ROM layout hygiene) — free, no behavioural risk, and it is cheapest before a
-   second title exists rather than after.
-2. **Item 1** (3P/4P) — start with the `$500008` investigation; only build the input path if
-   the hypothesis holds.
+1. ~~**Item 2** (ROM layout hygiene)~~ — **done 28 Jul 2026.**
+2. **Item 1** (3P/4P) — `$500008` investigation **done**: zero reads over 1,250 frames, so
+   the current tie is safe and Dyna Gear cannot regress. Building the actual `in_p3`/`in_p4`
+   path still waits on evidence that the window really is the 3P/4P port, which needs a
+   four-player family title.
 3. **Item 4** measurements — whenever a board is to hand. The sync-width scope trace is ten
    minutes and closes the last invented constants in the video path.
 4. **Item 3** — record the pointer now, act only if a second game decodes wrongly.

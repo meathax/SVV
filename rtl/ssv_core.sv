@@ -53,6 +53,16 @@ module ssv_core (
 
 import ssv_pkg::*;
 
+// Report a bad SDRAM layout at time 0 rather than as unexplained corruption.
+// ssv_pkg computes the rule; a package cannot host an initial block, so the
+// reporting lives here. Guarded on SIMULATION -- the project's own define, set
+// by every verif script -- rather than on a vendor SYNTHESIS macro, so the
+// block provably never reaches Quartus.
+`ifdef SIMULATION
+initial if (SDR_LAYOUT_FAULT != 0)
+    $fatal(1, "ssv_pkg SDRAM layout is invalid (rule %0d)", SDR_LAYOUT_FAULT);
+`endif
+
 logic        c_req, c_we, c_ack;
 logic [31:0] c_addr, c_wdata, c_rdata;
 logic  [1:0] c_size;
@@ -110,12 +120,25 @@ wire sel_irqvec  = (a >= 24'h230000) && (a <= 24'h230071);
 wire sel_irqack  = (a >= 24'h240000) && (a <= 24'h240071);
 wire sel_irqen   = (a >= 24'h260000) && (a <= 24'h260001);
 wire sel_sound   = (a >= 24'h300000) && (a <= 24'h30007f);
-wire sel_dynaram = (a >= 24'h400000) && (a <= 24'h43ffff);
+wire sel_cpuram  = (a >= 24'h400000) && (a <= 24'h43ffff);
+// $500008-$500009. The SAM-5127 cartridge carries 3P and 4P connectors with a
+// dedicated I/O-FILTER stage at U30/U31, and this is the only decoded input
+// window unaccounted for -- so this is the prime candidate for where the third
+// and fourth player ports read back. Unproven: Dyna Gear is a 2-player game.
+// `in_extra` is tied high by the wrapper, which is correct for any game that
+// does not read it. See docs/hardware/SSV_PCB_FINDINGS_ACTION_PLAN.md item 1.
 wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
 wire sel_rom     = (a >= 24'hf00000);
-wire sel_extmem  = sel_xram | sel_dynaram;
+wire sel_extmem  = sel_xram | sel_cpuram;
 
-(* ramstyle = "MLAB, no_rw_check" *) logic [15:0] scroll [0:63];
+// Registers, not memory, and it cannot be otherwise: every one of these 64
+// words is read combinationally in parallel (sprite_offsets, tilemap_scrolls
+// and the individual control words below), and the array takes a reset. The
+// old ramstyle="MLAB" attribute here was silently ignored -- the fit report
+// lists scroll[63][1], scroll[62][0] and friends as discrete flops -- so it
+// described an implementation that never existed. About 1k flops is the
+// honest, irreducible cost of a 64-word file with 64 concurrent readers.
+logic [15:0] scroll [0:63];
 
 wire [14:0] wram_addr = a[15:1];
 wire [16:0] spr_addr  = a[17:1];
@@ -363,7 +386,7 @@ end
 
 function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
     if (cpu_addr >= 24'h400000)
-        external_byte_addr = SDR_DYNA_RAM_BASE + (cpu_addr - 24'h400000);
+        external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h400000);
     else
         external_byte_addr = SDR_XRAM_BASE + (cpu_addr - 24'h160000);
 endfunction
@@ -386,7 +409,7 @@ logic        read_wait;
 // V60 ROM fetch via SDRAM p0, through a small I/D cache (from s32):
 //   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
 //   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.
-// p0 is shared with XRAM/Dyna RAM reads — icache fills have priority.
+// p0 is shared with the XRAM and $400000 CPU RAM reads — icache fills win.
 // ---------------------------------------------------------------------------
 logic        rom_req_r;
 logic [23:1] rom_addr_r;
@@ -540,7 +563,7 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
-// XRAM / Dyna Gear RAM via SDRAM p0/wr (not cached). Yields to icache fills.
+// XRAM / $400000 CPU RAM via SDRAM p0/wr (uncached). Yields to icache fills.
 always_ff @(posedge clk_sys) begin
     if (rst) begin
         ext_busy      <= 1'b0;
