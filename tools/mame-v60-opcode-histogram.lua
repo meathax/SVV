@@ -86,11 +86,34 @@ for name, region in pairs(manager.machine.memory.regions) do
     end
 end
 
+----------------------------------------------------------------------------
+-- Positive control.  A detector that reports "never executed" is worthless
+-- until it has been shown to fire when the opcode IS executed.  V60_INJECT
+-- takes "addr:op:sub" (hex) and patches the loaded program ROM image so the
+-- instruction at `addr` becomes the two-byte group opcode `op`/`sub`.  The
+-- game will usually crash immediately afterwards - that is fine, the point is
+-- only that the histogram records the hit.
+--
+--   V60_INJECT=f10130:59:00  -> expect "GROUP 59  EXECUTED"
+--
+-- Never set this for an evidence run.
+local inject = os.getenv("V60_INJECT")
+
 local function rom_byte(addr)
     if not rom_region then return -1 end
     local off = addr - ROM_BASE
     if off < 0 or off >= rom_region.size then return -1 end
     return rom_region:read_u8(off)
+end
+
+if inject then
+    local a, o, s = inject:match("^(%x+):(%x+):(%x+)$")
+    assert(a, "V60_INJECT must be addr:op:sub in hex")
+    a, o, s = tonumber(a, 16), tonumber(o, 16), tonumber(s, 16)
+    assert(rom_region, "no program ROM region to patch")
+    rom_region:write_u8(a - ROM_BASE, o)
+    rom_region:write_u8(a - ROM_BASE + 1, s)
+    print(string.format("V60_INJECT patched %06x <- %02x %02x", a, o, s))
 end
 
 ----------------------------------------------------------------------------
