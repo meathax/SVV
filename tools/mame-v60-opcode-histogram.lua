@@ -361,8 +361,10 @@ local function write_report(final)
     -- Optional: the full set of instruction addresses actually executed.
     -- tools/scan-v60-opcode-sites.py consumes this to mark which static
     -- candidate sites were reached.
+    -- Written on every dump, not only the final one: a run that is killed
+    -- before its exit notifier still leaves a usable list.
     local pclist = os.getenv("V60_PCLIST")
-    if final and pclist then
+    if pclist then
         local pf = io.open(pclist, "w")
         if pf then
             for _, pc in ipairs(sorted_keys(seen_pc)) do
