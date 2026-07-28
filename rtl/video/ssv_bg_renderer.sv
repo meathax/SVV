@@ -59,6 +59,8 @@ logic shadow;
 logic [8:0] color;
 logic signed [10:0] screen_x;
 logic [16:0] map_x;
+// Map origin for the current scanline; fixes which page the line reads from.
+logic [16:0] map_x0;
 logic [16:0] map_y;
 logic [4:0] plot_i;
 
@@ -81,8 +83,12 @@ endfunction
 
 assign global_y_base_s = signed10(global_y_base);
 
+// `x_base` is this scanline's map origin and selects which page (i.e. which
+// tilemap) the line reads; `x` is the running position within it. See the
+// longer note on the matching function in ssv_cached_sprite_renderer.sv.
 function automatic logic [16:0] tile_address(
     input logic [16:0] x,
+    input logic [16:0] x_base,
     input logic [16:0] y,
     input logic [15:0] mode
 );
@@ -95,7 +101,7 @@ function automatic logic [16:0] tile_address(
     begin
         size_shift = 4'd8 + {1'b0, mode[15:13]};
         size_mask = (17'd1 << size_shift) - 17'd1;
-        page = (x & 17'h07fff) >> size_shift;
+        page = (x_base & 17'h07fff) >> size_shift;
         base = page << (size_shift + 2'd2);
         column = (x & (size_mask & 17'h1fff0)) << 2;
         row = (y & 17'h001f0) >> 3;
@@ -167,6 +173,7 @@ always_ff @(posedge clk) begin
         color            <= 9'd0;
         screen_x         <= 11'sd0;
         map_x            <= 17'd0;
+        map_x0           <= 17'd0;
         map_y            <= 17'd0;
         plot_i           <= 5'd0;
         busy             <= 1'b0;
@@ -207,8 +214,10 @@ always_ff @(posedge clk) begin
                 end
                 else begin
                     map_x <= {1'b0, scroll_x};
+                    map_x0 <= {1'b0, scroll_x};
                     tile_word_addr <= tile_address(
-                        {1'b0, scroll_x}, map_y, scroll_mode
+                        {1'b0, scroll_x}, {1'b0, scroll_x},
+                        map_y, scroll_mode
                     );
                     state <= TILE_CODE_ADDR;
                 end
@@ -217,7 +226,9 @@ always_ff @(posedge clk) begin
             ROW_ADDR: state <= ROW_WAIT;
             ROW_WAIT: begin
                 map_x <= {1'b0, scroll_x} + {1'b0, spr_data};
+                map_x0 <= {1'b0, scroll_x} + {1'b0, spr_data};
                 tile_word_addr <= tile_address(
+                    {1'b0, scroll_x} + {1'b0, spr_data},
                     {1'b0, scroll_x} + {1'b0, spr_data},
                     map_y, scroll_mode
                 );
@@ -270,7 +281,7 @@ always_ff @(posedge clk) begin
                         screen_x <= screen_x + 11'sd16;
                         map_x <= map_x + 17'd16;
                         tile_word_addr <= tile_address(
-                            map_x + 17'd16, map_y, scroll_mode
+                            map_x + 17'd16, map_x0, map_y, scroll_mode
                         );
                         state <= TILE_CODE_ADDR;
                     end
