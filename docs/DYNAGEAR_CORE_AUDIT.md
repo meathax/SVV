@@ -449,6 +449,14 @@ physical MiSTer attract (RBF deferred).
   inside `ssv_core`'s 4,778-ALM block. Fill words now land in a `fill_buf`
   register and the whole 8-byte line is written once, which is the same shape
   as `icache_tag` (which *did* infer, into two MLABs).
+- **Descriptor build could latch the display dead** (this pass) — the vblank
+  cache build had no deadline, and `line_buffer_start` gates on
+  `!obj_cache_busy`. A build that overran into active display stopped every
+  line swap, and because the next vblank re-arms the build via `cache_pending`
+  it could never recover — one overrun froze the picture permanently. The build
+  now aborts at `vcnt >= SSV_VTOTAL-2`, publishes a partial cache and raises
+  `cache_overflow` (which drives the overrun LED). Regression test in
+  `tb_ssv_cached_sprite_renderer`, observed to fail with the abort removed.
 - **Renderer overrun surfaced on hardware** (this pass) — `LED_DISK`.
 - **Input-matrix bench anchored to the MAME replay constants** (this pass).
 - **Dead `ssv_sprite_decode.sv` dropped from `files.qip`** (this pass) — nothing

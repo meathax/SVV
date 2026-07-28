@@ -214,3 +214,114 @@ For whatever Phase 3 reproduces:
 | Date | Finding |
 |---|---|
 | 28 Jul | Timing-clean RBF (`846c7b02…`) deployed; renderer still emits almost nothing. Timing hypothesis refuted. |
+| 28 Jul | Phase 1 complete. One real defect found and fixed (1.3); three suspects cleared with recorded reasoning. |
+
+## Phase 1 results — completed 28 Jul 2026
+
+### 1.1 `s32_big_dpram` read-during-write — CLEARED
+
+Port B never writes in any of the four instances (`work_ram`, `sprite_ram`, and
+both palette banks), so the only same-port RDW case is port A, and every client
+samples `q_a` exclusively on read transactions: `ssv_core`'s read mux reaches
+`wram_q`/`spr_q`/`pal_q` only through the `!m_we` path, and `s32_v60_bus` is
+single-outstanding so a read and a write can never overlap. The `NEW_DATA` vs
+old-data divergence between silicon and the behavioural model is therefore
+unobservable. Mixed-port collisions (CPU write vs renderer/video read) are
+configured `OLD_DATA`, which matches the model.
+
+Corroborating evidence: the 28 Jul compile produced **no read-during-write or
+altsyncram warnings at all** in `map.smsg` or `fit.smsg`, so Quartus honoured
+the configuration as written.
+
+### 1.2 `no_rw_check` arrays — ONE REAL COLLISION, PROVEN HARMLESS
+
+`descriptor_cache` and `line_entries` are written only in `BUILD_*` states and
+read only in `RENDER_*` states, which are mutually exclusive. Clean.
+
+`line_counts` and `line_page_starts` are **not**: their reads are
+unconditional, use the same `line_count_addr` as the `BUILD_CLEAR_LINES` and
+`BUILD_BUCKET_WRITE` writes, and therefore collide on every one of those
+cycles — exactly the case `no_rw_check` promises cannot happen. It is safe only
+because the colliding read is never consumed: `line_count_q` is overwritten by
+the next `BUILD_BUCKET_READ` (at the incremented address) before any state
+reads it. Now documented in the RTL, because a future change that samples one
+cycle earlier turns this into a live divergence.
+
+`ssv_mlab32_sdp` in `ssv_es5506_regs` has the same shape and is also safe, for
+a different reason: `wr_addr` and `rd_addr` are both `eng_voice` during the
+one-cycle writeback, so they do collide, but that cycle has `ce` low and the
+voice engine only samples `q` in `S_START` under `ce` — at least three
+`clk_sys` cycles later, by which point `rd_addr` has moved on.
+
+### 1.3 Cache-build starvation — REAL DEFECT, FIXED
+
+The vblank descriptor build had **no deadline**. It is bounded only by 1024
+globals × 32 locals × up to 240 bucket lines, which is orders of magnitude
+longer than a frame. If it ever overran into active display, `ssv_core`'s
+`line_buffer_start` — which gates on `!obj_cache_busy` — stopped firing, so no
+line swapped and the picture froze. And it could not recover: the next vblank
+sets `cache_pending`, which re-arms the build the moment it finishes, holding
+`cache_busy` high forever. **A single overrun latches the core into a dead
+display permanently.**
+
+That is an exact match for the hardware symptom: a static frame showing stale
+buffer content, with everything the renderer never wrote reading back as
+cleared index 0.
+
+Fix: `cache_deadline` (asserted by `ssv_core` for `vcnt >= SSV_VTOTAL-2`, the
+two lines that prepare display rows 0 and 1) forces `BUILD_ADVANCE` to publish
+the partial cache and release `cache_busy`, raising `cache_overflow` — which
+feeds `renderer_overrun` and therefore the overrun LED. One frame of degraded
+sprites, flagged, instead of a permanent freeze.
+
+Regression test: `tb_ssv_cached_sprite_renderer` builds a sprite list that
+never terminates itself and asserts the deadline mid-build. **Observed to fail
+with the abort removed** (`cache_deadline ignored: still busy after 2000
+cycles`) and pass with it (`released cache_busy in 20 cycles, overflow=1`).
+
+**How close it already was.** Instrumentation added to `tb_ssv_frame_crc` for
+this pass measures the build against its window:
+
+```
+CACHE_BUILD max=44020 cycles (frame 527) deadline_aborts=0
+```
+
+The window is lines 240–259, i.e. 20 lines × 454 pixels at 6.749 `clk_sys` per
+pixel (`PIXEL_INC` 9710/65536) = **61,284 cycles**. So the worst frame in the
+validated window already consumed **72% of the budget, leaving 17,264 cycles
+of margin**. That is not a comfortable design point for something whose failure
+mode is a permanent freeze — a walk 40% longer than the observed peak is enough
+to fall off the cliff, and the cliff had no floor.
+
+Note this is a containment fix. It converts an unrecoverable freeze into a
+visible, flagged degradation — it does not explain *why* a build would overrun
+on silicon but not in Verilator. Leading theory: the slower real SDRAM leaves
+the V60 further behind the raster, so at vblank the sprite list can still be
+mid-update and lack its `global_w1[15]` terminator, sending the walk through
+all 1024 global entries. If the overrun LED lights on the next board test, that
+root cause is still open and the next move is to make the build *cheaper*
+rather than merely to survive it.
+
+**Two build-cost levers, and one trap.** The obvious idea — skip globals whose
+local count is zero — is **wrong and must not be attempted**. `BUILD_GLOBAL_3`
+enters the local loop unconditionally, and with the `local_index <
+global_w0[4:0]` test in `BUILD_ADVANCE` that produces count+1 iterations, which
+is exactly what MAME's `for (; num >= 0; num--)` does. Skipping would drop a
+descriptor MAME draws and break CRC parity. This is now commented in the RTL.
+
+The real lever is the bucket loop, which dominates the 44,020 cycles: every
+visible descriptor costs two cycles per scanline it covers
+(`BUILD_BUCKET_READ` + `BUILD_BUCKET_WRITE`), so a 64-pixel-tall sprite costs
+128 cycles on its own. Halving that to one cycle per line requires the running
+count to be available without a separate read cycle — either a small
+combinational count cache or pipelining the next line's read under the current
+write. That roughly halves the peak build and would restore real margin, but it
+touches CRC-locked logic and should only be done with the full soak as a gate.
+
+### 1.4 `sdr_p1` ownership mux — CLEARED
+
+The mux moves on `obj_busy`, and the BG renderer only raises `done` (which
+starts the object renderer) from its `PLOT` state, by which point
+`ssv_gfx_row_fetch` is back in `IDLE` with `rom_req` low. The two fetchers are
+never concurrently active, so the mux cannot switch mid-transaction and cannot
+manufacture or destroy a request edge.

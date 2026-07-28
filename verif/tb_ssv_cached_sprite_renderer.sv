@@ -14,6 +14,7 @@ end
 `endif
 
 logic rst, cache_start, start;
+logic cache_deadline;
 logic [8:0] target_y;
 logic [15:0] local_control, flip_control, coordinate_control;
 logic [15:0] global_y_base, global_y_adjust;
@@ -132,6 +133,7 @@ initial begin
 
     rst = 1'b1;
     cache_start = 1'b0;
+    cache_deadline = 1'b0;
     start = 1'b0;
     target_y = 9'd20;
     local_control = 16'd0;
@@ -337,6 +339,56 @@ initial begin
     $display("DENSE_LINE cycles=%0d limit=2691", cycles);
     if (cycles > 2691)
         $fatal(1, "dense line deadline cycles=%0d limit=2691", cycles);
+
+    // ------------------------------------------------------------------
+    // Vblank deadline abort.
+    //
+    // The sprite list is only bounded by 1024 globals x 32 locals, which is
+    // far longer than a frame. Build a list that never terminates itself
+    // (no global has bit 15 of word 1 set, so the walk runs to LAST_GLOBAL)
+    // and assert cache_deadline part-way through.
+    //
+    // Without the abort in BUILD_ADVANCE the build ignores the deadline and
+    // holds cache_busy for the rest of the walk. In ssv_core that suppresses
+    // every line_buffer_start, and because the next vblank re-arms the build
+    // it never recovers -- the display freezes permanently. Observed failure
+    // mode with the abort removed: cache_busy still high after the timeout
+    // below, so this $fatal fires.
+    // ------------------------------------------------------------------
+    for (i = 0; i < 4096; i = i + 4) begin
+        sprite_mem[i + 0] = 16'h0001;  // one local entry
+        sprite_mem[i + 1] = 16'h0400;  // local list ptr, bit15 clear = no end
+        sprite_mem[i + 2] = 16'd0;
+        sprite_mem[i + 3] = 16'd0;
+    end
+
+    cache_deadline = 1'b0;
+    @(negedge clk);
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+
+    // Let it get well past the line clear, then close the window.
+    repeat (600) @(negedge clk);
+    if (cache_ready)
+        $fatal(1, "unterminated list completed early - test is not exercising the abort");
+    cache_deadline = 1'b1;
+
+    cycles = 0;
+    while (cache_busy && cycles < 2000) begin
+        @(negedge clk);
+        cycles = cycles + 1;
+    end
+    if (cache_busy)
+        $fatal(1, "cache_deadline ignored: still busy after %0d cycles", cycles);
+    if (!cache_ready || !cache_overflow)
+        $fatal(1, "aborted build must publish ready+overflow (ready=%0b overflow=%0b)",
+               cache_ready, cache_overflow);
+    $display("DEADLINE_ABORT released cache_busy in %0d cycles, overflow=%0b",
+             cycles, cache_overflow);
+    cache_deadline = 1'b0;
+
     $display("PASS tb_ssv_cached_sprite_renderer");
     $finish;
 end

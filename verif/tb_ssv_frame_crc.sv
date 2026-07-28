@@ -66,6 +66,9 @@ integer obj_line_cycles, obj_rom_wait_cycles, obj_max_line_cycles;
 integer obj_line_descriptors, obj_line_fetches, obj_line_tilemap_fetches;
 integer obj_line_plot_cycles;
 integer obj_max_line_entries;
+integer cache_build_cycles, cache_build_max, cache_build_max_frame;
+integer cache_build_start_v, cache_deadline_hits;
+logic   cache_busy_d;
 logic obj_busy_d, dump_renderer_budget, stop_on_renderer_overrun;
 logic obj_cache_overflow_d;
 integer dump_x, dump_y, dump_count;
@@ -302,6 +305,12 @@ always_ff @(posedge clk_sys) begin
         obj_line_tilemap_fetches <= 0;
         obj_line_plot_cycles <= 0;
         obj_max_line_entries <= 0;
+        cache_build_cycles = 0;
+        cache_build_max = 0;
+        cache_build_max_frame = 0;
+        cache_build_start_v = 0;
+        cache_deadline_hits = 0;
+        cache_busy_d <= 1'b0;
         obj_busy_d <= 1'b0;
         obj_cache_overflow_d <= 1'b0;
         stuck <= 0;
@@ -554,6 +563,26 @@ always_ff @(posedge clk_sys) begin
             end
         end
 
+        // Vblank budget for the descriptor build. The build owns vblank; if it
+        // ever runs past the lines that prepare display rows 0/1 the core now
+        // aborts it (cache_deadline) rather than freezing the display, but the
+        // margin is what says whether hardware could realistically get there.
+        cache_busy_d <= dut.obj_cache_busy;
+        if (dut.obj_cache_busy && !cache_busy_d) begin
+            cache_build_cycles = 0;
+            cache_build_start_v = dut.timing.vcnt;
+        end
+        else if (dut.obj_cache_busy) begin
+            cache_build_cycles = cache_build_cycles + 1;
+        end
+        else if (!dut.obj_cache_busy && cache_busy_d) begin
+            if (cache_build_cycles > cache_build_max) begin
+                cache_build_max = cache_build_cycles;
+                cache_build_max_frame = post_ve_frames;
+            end
+            if (dut.cache_deadline) cache_deadline_hits = cache_deadline_hits + 1;
+        end
+
         obj_cache_overflow_d <= dut.obj_cache_overflow;
         if (dut.obj_cache_overflow && !obj_cache_overflow_d) begin
             $display("FIRST_CACHE_OVERFLOW f=%0d state=%0d cache=%0d writes=%0d bucket_y=%0d line_count=%0d",
@@ -778,6 +807,8 @@ initial begin
         $fatal(1, "controllable jungle gameplay not reached by frame %0d",
                post_ve_frames);
 
+    $display("CACHE_BUILD max=%0d cycles (frame %0d) deadline_aborts=%0d",
+             cache_build_max, cache_build_max_frame, cache_deadline_hits);
     $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d max_line_entries=%0d",
              scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path,
              bg_overruns, obj_overruns, obj_max_line_entries);

@@ -9,6 +9,10 @@ module ssv_cached_sprite_renderer #(
     input  logic         clk,
     input  logic         rst,
     input  logic         cache_start,
+    // Asserted once the raster reaches the lines where the first display rows
+    // must be prepared. The vblank descriptor build must give up by then --
+    // see the BUILD_ADVANCE abort for why overrunning is unrecoverable.
+    input  logic         cache_deadline,
     input  logic         start,
     input  logic   [8:0] target_y,
 
@@ -572,6 +576,18 @@ wire [CACHE_ADDR_WIDTH-1:0] line_entry_descriptor = {
     line_entry_page_q, line_entry_q
 };
 
+// NOTE on `no_rw_check` for these tables: the unconditional reads below use
+// the same address as the BUILD_CLEAR_LINES / BUILD_BUCKET_WRITE writes, so a
+// same-address read-during-write happens on every one of those cycles. That is
+// exactly the case `no_rw_check` promises cannot occur, and on hardware the
+// read data is undefined where simulation returns the pre-write value.
+//
+// It is safe only because the colliding read is never consumed. During
+// BUILD_BUCKET_WRITE the value landing in line_count_q is replaced by the next
+// BUILD_BUCKET_READ (which uses the incremented address) before any state
+// reads it, and during BUILD_CLEAR_LINES nothing reads line_count_q at all.
+// If a future change ever samples line_count_q one cycle earlier, this
+// attribute becomes a live sim-versus-silicon divergence.
 always_ff @(posedge clk) begin
     line_count_q <= line_counts[line_count_addr];
     line_page_q <= line_page_starts[line_count_addr];
@@ -809,6 +825,13 @@ always_ff @(posedge clk) begin
                     state <= IDLE;
                 end
                 else begin
+                    // Enter the local loop unconditionally, even when the
+                    // global's count field is zero. Combined with the
+                    // `local_index < global_w0[4:0]` test in BUILD_ADVANCE
+                    // this yields count+1 iterations, which is what MAME's
+                    // `for (; num >= 0; num--)` does. Do NOT "optimise" a
+                    // zero-count global into a skip: it would drop a
+                    // descriptor MAME draws and break frame-CRC parity.
                     local_base <= {global_w1[14:0], 2'b00};
                     local_index <= 5'd0;
                     state <= BUILD_LOCAL_WAIT;
@@ -913,7 +936,24 @@ always_ff @(posedge clk) begin
 
 
             BUILD_ADVANCE: begin
-                if ((local_index < global_w0[4:0]) &&
+                // Hard vblank deadline. The sprite list is only bounded by
+                // 1024 globals x 32 locals x up to 240 bucket lines, which is
+                // orders of magnitude longer than a frame. If the build ever
+                // runs past the start of display, ssv_core's line_buffer_start
+                // -- which gates on !cache_busy -- stops firing, so no line
+                // ever swaps and the picture freezes. Worse, it cannot
+                // recover: the next vblank re-arms the build, so it stays busy
+                // forever. Publishing a partial cache degrades one frame's
+                // sprites and raises cache_overflow (wired to the overrun LED)
+                // instead of latching the whole core into a dead display.
+                if (cache_deadline) begin
+                    cache_count <= cache_write_count;
+                    cache_ready <= 1'b1;
+                    cache_overflow <= 1'b1;
+                    cache_busy <= 1'b0;
+                    state <= IDLE;
+                end
+                else if ((local_index < global_w0[4:0]) &&
                     ((local_base + 17'd4) <= LAST_LOCAL)) begin
                     local_index <= local_index + 1'd1;
                     local_base <= local_base + 3'd4;

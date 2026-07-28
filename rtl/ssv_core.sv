@@ -202,6 +202,13 @@ always_comb begin
         renderer_target_y = vcnt + 2'd2;
 end
 
+// The descriptor cache is built during vblank and owns the whole of it, but
+// the build has no natural bound worth relying on. Cut it off once the raster
+// reaches the two lines that prepare display rows 0 and 1: past that point a
+// still-busy cache suppresses every line swap below, and since the next vblank
+// re-arms the build it would never recover.
+wire cache_deadline = (vcnt >= SSV_VTOTAL - 2);
+
 // Swap completed lines as active display enters horizontal blank. The extra
 // target_y==240 swap exposes the already-rendered final visible line; it must
 // not launch another renderer. Lines 0 and 1 are prepared at vblank's tail.
@@ -280,6 +287,7 @@ ssv_bg_renderer background_renderer (
 ssv_cached_sprite_renderer sprite_renderer (
     .clk(clk_sys), .rst(rst),
     .cache_start(video_enable && vblank_pulse),
+    .cache_deadline(cache_deadline),
     .start(bg_done),
     .target_y(renderer_target_y),
     .local_control(scroll[59]), .flip_control(scroll[58]),
