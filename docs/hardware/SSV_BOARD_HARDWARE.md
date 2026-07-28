@@ -133,6 +133,78 @@ natural second target).
 The `PRL`/`PRH` split and the banked graphics array are consistent with the loader's
 interleave model.
 
+### SAM-5127 component side, high resolution `[PRIMARY]`
+
+| Observation | Detail | Implication |
+|---|---|---|
+| **Program ROMs are windowed EPROMs at `PRL` / `PRH`** | One MX-branded with a black dot seal, one with a white label | Low/high byte of the 16-bit V60 bus, exactly as the loader's interleave assumes |
+| **Graphics ROMs are Sharp mask ROMs** | `Sharp` branding legible on the large DIPs | Mask ROM, not EPROM — these are production parts, so the graphics layout is fixed silicon |
+| **Graphics sockets are silkscreened in four banks: `A0–A3`, `B0–B3`, `C0–C3`, `D0–D3`** | A 4 × 4 = 16-position array | **See below — this looks like direct hardware evidence for the "quarters" model** |
+| **Many sockets are unpopulated** | Silkscreened footprints with no chip fitted, across several banks | Dyna Gear does not fill a board sized for larger family titles |
+| **Cartridge logic is 74LS-series only** | LS245 / LS244 / LS273 buffers and latches; `CN-CP40…CP43` designators | **No custom silicon, no protection device, no battery on the Dyna Gear cart** — nothing cartridge-side left to emulate for this title |
+| 3P / 4P connector positions | White pin header at the right edge, `3P` and `4P` silkscreen | Platform feature; Dyna Gear is 2-player |
+
+#### The four banks probably *are* our "quarters"
+
+`rtl/video/ssv_gfx_row_fetch.sv` fetches graphics as *quarters* — Q0/Q1 packed into one
+64-bit beat, Q2 in its own range — and its header comment says **"MAME's absent fourth
+plane-pair quarter reads as zero"**. That was inherited from the emulator with no hardware
+justification.
+
+The physical board has **exactly four graphics banks (A/B/C/D)**, and on this Dyna Gear
+cartridge **they are not all populated**. That is independent hardware support for the
+"fourth quarter is absent / reads as zero" behaviour: it is absent because *there is no chip
+in those sockets*, not because an emulator decided so.
+
+Confidence: **strong but not conclusive** — I can read the bank labels and see unpopulated
+positions, but cannot trace which bank maps to which quarter from a photograph. Confirming
+the mapping needs continuity testing on a board, or a close-up clear enough to read every
+populated chip's position label at once.
+
+### Solder side (SAM-5127 reverse) `[PRIMARY]`
+
+- **Two-layer board.** Traces on both faces, no evidence of inner layers. Modest complexity —
+  consistent with an early-90s cartridge whose job is mostly to hold EPROMs and route them.
+- **Four card-edge connectors** confirmed from the reverse: two along the top edge, two along
+  the bottom, mating with the motherboard's A/B (top) and C/D (bottom).
+- Large ground/power pour on the left third.
+- Nothing electrically surprising: no protection device, no battery, no logic beyond the
+  handful of DIPs visible on the component side. **Dyna Gear's cartridge appears to be
+  ROMs + address decoding only** — which is good news for the core, as it means no
+  cartridge-side custom silicon to emulate for this title.
+
+### Additional motherboard detail, second pass `[PRIMARY]` / `[UNCERTAIN]`
+
+Confident:
+
+| Observation | Note |
+|---|---|
+| Grid reference silkscreen **A–S** across the top, **1–9** down the right | Standard Seta service-grid; useful when following any future repair log |
+| **Jumper blocks JP1, JP2, JP3, JP4** | Configuration straps. Purpose unknown — a likely candidate for region/monitor/audio options. Worth probing on a real board |
+| Test points labelled **TP GND** in several places | |
+| Two heatsinks: large one upper-left in the analogue section (audio amp), one lower-centre (regulator) | Confirms an on-board audio power amp — the board drives speakers directly, per JAMMA |
+| Serial sticker `S-001419` with a Sammy ownership label | |
+
+Uncertain at this image resolution — **do not treat as established**:
+
+- A silkscreen that reads plausibly as **`ST0007`** beneath the large centre QFP (~U12).
+- A possible **`ST0005`** marking on a smaller QFP at the lower-left near the JAMMA edge.
+- A second large ~100-pin QFP upper-right (~U14) whose marking cannot be resolved at all.
+
+These need close-up shots before being written down as fact. The earlier commit recorded
+`ST0007` with more confidence than this resolution really supports; treat it as probable
+rather than confirmed until someone photographs it directly.
+
+### Photographs that would unlock the most, in value order
+
+1. **Close-up of the upper-right large QFP (~U14).** Completely unread. Given its size and
+   position between the CPU area and the video RAM, it is likely the sprite/tilemap engine —
+   the exact part we have no documentation for.
+2. **Close-up of the centre QFP and its silkscreen** — confirm or correct `ST0007`.
+3. **Close-up of the lower-left QFP near the JAMMA edge** — confirm or correct `ST0005`.
+4. **Close-up of the top-left Ensoniq QFP** — read the full part number and date code.
+5. **The four jumper blocks JP1–JP4**, close enough to see which are strapped.
+
 ## 5. Video output electrical
 
 Not established beyond the inference that SSV is a standard 15 kHz JAMMA RGB board
