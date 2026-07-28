@@ -380,7 +380,12 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL i_head : unsigned(127 DOWNTO 0);
 	SIGNAL i_acpt : natural RANGE 0 TO 15;
 	SIGNAL i_dpram : arr_dw(0 TO BLEN*2-1);
-	ATTRIBUTE ramstyle OF i_dpram : SIGNAL IS "no_rw_check";
+	-- Only 32 x N_DW.  As an M10K that is 4 blocks for 4096 bits, which this
+	-- core cannot afford at 98% block RAM.  Written on i_clk, read on avl_clk
+	-- (100 MHz, ~3.1 ns of slack), so LUTRAM is comfortable here.  Note the
+	-- output-side twin o_dpram is deliberately NOT moved: its read port is on
+	-- the 148.5 MHz o_clk, which is the one domain still missing setup.
+	ATTRIBUTE ramstyle OF i_dpram : SIGNAL IS "MLAB, no_rw_check";
 	SIGNAL i_endframe0,i_endframe1,i_vss : std_logic;
 	SIGNAL i_wad : natural RANGE  0 TO BLEN*2-1;
 	SIGNAL i_dw : unsigned(N_DW-1 DOWNTO 0);

@@ -51,25 +51,90 @@ matches through the retirement and ordered-write counts above.
 Unknown. The timing failure is a proven release blocker but is not yet proven
 to cause the frozen image.
 
-## Root-cause hypothesis
+## Root-cause hypothesis — FALSIFIED 28 Jul 2026
 
-Suspect: the deployed timing-failing RBF violates the descriptor-cache to
-coordinate path and corrupts or stalls sprite rendering. This predicts that a
-timing-qualified pipelined build will change or eliminate the static corrupt
-frame without changing architectural traces.
+Suspect *was*: the deployed timing-failing RBF violates the descriptor-cache to
+coordinate path and corrupts or stalls sprite rendering. This predicted that a
+timing-qualified build would change or eliminate the static corrupt frame.
 
-Status: `suspect`; evidence tier: `UNKNOWN`.
+**That prediction failed.** Steps 1 and 2 of "required next evidence" below were
+executed on 28 Jul 2026 and the symptom survived a fully timing-clean build.
+
+Status: `refuted`; evidence tier: `BOUNDARY` (hardware capture).
+
+### The falsifying experiment
+
+| | Value |
+|---|---|
+| RBF SHA-256 | `846c7b0269ee4e71b3f5a2aad1dec3d57d221ed7b9120cdd10a8c263a3a48e21` |
+| RBF MD5 verified on device | `4d17331497639b08993bc8a5f59097c0` (4,400,796 bytes) |
+| Deployed to | `/media/fat/_Arcade/cores/SSV.rbf`, MiSTer `192.168.0.69` |
+| Quartus | 17.0.2, Fast Fit profile, `NUM_PARALLEL_PROCESSORS 1` |
+| Fit | 34,366/41,910 ALMs (82%), 532/553 M10K (96%), 59 DSP |
+| Setup slack, worst corner | **+0.392 ns** (`pll_hdmi`, Slow 1100 mV −40 C) |
+| Worst hold | +0.100 ns |
+| Multicorner | setup/hold/recovery/removal/MPW all pass, 4 corners, TNS 0 |
+| `report-quartus.ps1` | `Deployable: True`, unconstrained clocks 0 |
+
+The previously deployed core was the Jul 24 build (MD5 `aeb6834219c1694e2448a626e56355d7`),
+preserved on the device as `SSV_backup_20260724.rbf`.
+
+### Observed symptom on the timing-clean build
+
+- Uniform **teal** active area with a short row of coloured blocks in the
+  upper-left corner.
+- Two screenshots ~20 s apart are identical — the frame is static, not animating.
+- The core later returned to `MENU`; not established whether it self-exited.
+
+Note the background is teal here, where the original report says "mostly
+black". The symptom may have shifted rather than reproduced exactly. Do not
+treat the two captures as the same failure until that is checked.
+
+### What the teal field proves is working
+
+`ssv_core` forces `rgb` to `24'h000000` whenever `!video_enable || hb || vb`.
+A non-black active area therefore proves the CPU reached and executed the
+`$21000E` bit-7 write. That places the following on the working side of the
+boundary **on real hardware**:
+
+- HPS ROM download and `ssv_rom_loader` interleave
+- SDRAM controller init, the two-word program signature probe, and `rom_loaded`
+- V60 reset, boot, and enough execution to reach the video-enable write
+- vblank IRQ delivery (the game polls/services it before enabling video)
+- `ssv_video_timing`, palette RAM, and the line-buffer scanout path
+
+A uniform index-0 field means the line buffer is being scanned correctly and
+`palette[0]` happens to be teal. **The renderer is simply not writing pixels
+into it.**
 
 ## Required next evidence
 
-1. Complete a fresh Quartus fit and pass
-   `tools/report-quartus.ps1 -RequireReady`.
-2. Deploy the exact hashed candidate and recapture at deterministic landmarks.
-3. If the symptom remains, add per-frame and per-layer/scanline hashes to MAME
-   and RTL and locate the first differing frame and scanline.
-4. Compare sprite descriptors, palette state, graphics fetches, and final
-   pixels at that boundary.
-5. Generate a narrow GTKWave capture only around the proven RTL divergence.
+1. ~~Complete a fresh Quartus fit and pass `-RequireReady`.~~ **Done 28 Jul.**
+2. ~~Deploy the exact hashed candidate and recapture.~~ **Done 28 Jul — symptom
+   persists. Hypothesis refuted.**
+3. Audit every `s32_big_dpram` client for whether it samples `q` on a write
+   cycle. Hardware is configured `read_during_write_mode_port_a/b =
+   "NEW_DATA_NO_NBE_READ"` while the behavioural model returns **old** data on
+   a same-port write. The module comment justifies this with "core clients
+   ignore q on a write cycle" — that assumption has never been checked, and if
+   it is wrong anywhere in the sprite-RAM or palette path, Verilator can never
+   reproduce the hardware behaviour. This is checkable in RTL with no hardware
+   round-trip and is the cheapest remaining lead.
+4. Confirm whether the frame is static because the renderer stalls or because
+   it is reset-looping: `wdog_rst` fires 180 frames (~3 s) after the last
+   `$210000` read and drops `video_enable`, which would blank the screen
+   briefly. Capture at ~1 s intervals for 10 s to distinguish a hard stall from
+   a ~3 s watchdog cycle.
+5. Read the renderer overrun flag. `LED_DISK` is now driven from the sticky
+   `renderer_overrun` bit (`debug_status[16]`), so the I/O board HDD LED lights
+   on a line-deadline miss or a truncated descriptor/line-slot list. This
+   distinguishes "renderer ran and overran" from "renderer never started".
+6. If the renderer never started, instrument `sdr_p1` (GFX fetch) — the
+   behavioural SDRAM in the testbenches acks on a fixed schedule, whereas the
+   real controller round-robins six ports and stretches ack across two
+   `clk_ram` cycles.
+7. Only then add per-frame and per-scanline hashes to MAME and RTL to locate a
+   first differing scanline, and a narrow GTKWave capture around it.
 
 ## Exit gate
 

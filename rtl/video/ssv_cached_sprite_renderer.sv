@@ -848,6 +848,9 @@ always_ff @(posedge clk) begin
                     (cache_write_count < CACHE_COUNT_VALUE)) begin
                     // Write+bucket every accepted slot, including the last;
                     // stop after that entry's buckets so it is not orphaned.
+                    // Because the stop fires exactly as the count reaches
+                    // CACHE_COUNT_VALUE, the "already full" arm below is
+                    // unreachable in practice and is kept only as a guard.
                     cache_write_count <= cache_write_count + 1'd1;
                     bucket_descriptor <=
                         cache_write_count[CACHE_ADDR_WIDTH-1:0];
@@ -884,6 +887,12 @@ always_ff @(posedge clk) begin
                 end
                 if (bucket_y == bucket_last_y) begin
                     if (cache_stop_after_bucket) begin
+                        // Every descriptor up to here was stored, but the
+                        // scan is being abandoned at the ceiling, so anything
+                        // still left in the sprite list is dropped. Report it:
+                        // cache_overflow means "list truncated", not "write
+                        // failed". Same flag is raised above when one scanline
+                        // needs more than LINE_SLOTS descriptors.
                         cache_count <= CACHE_COUNT_VALUE;
                         cache_ready <= 1'b1;
                         cache_overflow <= 1'b1;

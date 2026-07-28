@@ -120,7 +120,7 @@ assign HDMI_BOB_DEINT = 1'b0;
 assign AUDIO_S = 1'b1;
 assign AUDIO_MIX = 2'b00;
 assign LED_POWER = 2'b00;
-assign LED_DISK = 2'b00;
+// LED_DISK is driven below from the renderer overrun status.
 assign BUTTONS = 2'b00;
 
 assign DDRAM_BURSTCNT = 8'd0;
@@ -480,6 +480,14 @@ assign VGA_DE = use_core_video ? ~(core_hb | core_vb) : ~(diag_hb | diag_vb);
 assign VGA_SL = status[4:3];
 assign AUDIO_L = status[7] ? 16'd0 : core_audio_l;
 assign AUDIO_R = status[7] ? 16'd0 : core_audio_r;
+
+// The scanline renderer latches a sticky flag when it misses a line deadline
+// or truncates a descriptor/line-slot list. With ENABLE_DIAG_VIDEO=0 nothing
+// else reads debug_status, so on hardware that failure was silent -- it just
+// drops sprites. Drive the I/O board's HDD LED from it so the first board
+// bring-up can see it. {1'b1, value} is the MiSTer override encoding.
+wire renderer_overrun = debug_status[16];
+assign LED_DISK = {1'b1, renderer_overrun};
 
 wire [1:0] aspect = status[2:1];
 assign VIDEO_ARX = (aspect == 0) ? 13'd4 : {11'd0, aspect - 1'b1};

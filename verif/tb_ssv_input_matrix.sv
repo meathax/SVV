@@ -1,5 +1,17 @@
 `timescale 1ns/1ps
 // Lock Arcade-SSV.sv player/system/DSW1/DSW2 bit mapping vs MAME dynagear ports.
+//
+// SCOPE WARNING: this bench re-declares its own copy of the wrapper functions
+// and checks them against constants in this same file. It is a change-detector
+// for Arcade-SSV.sv, NOT an independent golden — when the P1 bit order was
+// corrected, this file was edited in the same commit, so a PASS here proved
+// only that the two copies agreed.
+//
+// What actually pins the port order to the board is the raw in_p1 / in_system
+// values in verif/scenarios/dynagear/coin_start_p1*.json: they come from a
+// MAME 0.288 replay and are driven straight into ssv_core by tb_ssv_frame_crc,
+// so the game itself has to respond to them. Change a mapping here and re-run
+// that scenario before believing it.
 
 module tb_ssv_input_matrix;
 
@@ -96,6 +108,29 @@ initial begin
     expect16("P1 B2", player_port(32'h20), 16'hFFFB);
     expect16("P1 B3", player_port(32'h40), 16'hFFFD);
     expect16("P1 START", player_port(32'h80), 16'hFFFE);
+
+    // ---------------------------------------------------------------------
+    // Independent anchor: these five constants are NOT derived from
+    // Arcade-SSV.sv. They are the literal in_p1 / in_system words that
+    // verif/scenarios/dynagear/coin_start_p1.json feeds straight into
+    // ssv_core, captured from a MAME 0.288 dynagear replay in which the game
+    // actually inserts a coin, starts, confirms a character and moves. If the
+    // wrapper mapping and these disagree, the wrapper is wrong -- editing the
+    // mirror above cannot make this block pass.
+    //
+    // scenario frame 165/250: "P1 START pressed (active-low bit0)"
+    expect16("SCENARIO START", player_port(32'h80), 16'hFFFE);
+    // scenario frame 255/330: "P1 B1 confirm" / "P1 B1 attack"
+    expect16("SCENARIO B1", player_port(32'h10), 16'hFFF7);
+    // scenario frame 300: "P1 RIGHT"
+    expect16("SCENARIO RIGHT", player_port(32'h1), 16'hFFEF);
+    // scenario frame 360: "P1 UP"
+    expect16("SCENARIO UP", player_port(32'h8), 16'hFF7F);
+    // scenario frame 840 (gameplay): "RIGHT+B1 attack" == 0xFFE7
+    expect16("SCENARIO RIGHT+B1", player_port(32'h11), 16'hFFE7);
+    // scenario frame 30: "COIN1 pressed (active-low bit0)"
+    expect16("SCENARIO COIN1", system_port(1, 0, 0, 0), 16'hFFFE);
+    // ---------------------------------------------------------------------
 
     // SYSTEM: COIN1,COIN2,SERVICE1,TILT=0,TEST
     expect16("SYS idle", system_port(0, 0, 0, 0), 16'hFFFF);

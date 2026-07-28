@@ -36,11 +36,15 @@ always_ff @(posedge clk) begin
             vectors[i] <= 3'd0;
     end
     else begin
-        if (vblank_pulse)
-            requested[3] <= 1'b1;
-
+        // Clear first, set second: a $240000 ack that lands on the same
+        // clk_sys edge as vblank must not swallow the new frame interrupt.
+        // On the board the vblank latch is set by the raster, not by the CPU
+        // write, so the set always wins.
         if (ack_we)
             requested[ack_level] <= 1'b0;
+
+        if (vblank_pulse)
+            requested[3] <= 1'b1;
 
         if (vector_we)
             vectors[vector_level] <= vector_data[2:0];

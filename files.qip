@@ -7,7 +7,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_diag_video.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_sprite_decode.sv
+# rtl/video/ssv_sprite_decode.sv is intentionally absent: nothing in the build
+# instantiates it. Its only consumer was the legacy rtl/video/ssv_sprite_renderer.sv,
+# which is already out of the file list (the release uses the cached renderer).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_fetch.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_palette_ram.sv

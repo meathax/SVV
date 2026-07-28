@@ -366,6 +366,12 @@ logic        read_wait;
 // ---------------------------------------------------------------------------
 logic        rom_req_r;
 logic [23:1] rom_addr_r;
+// Fill words land in this register, and the completed 8-byte line is written
+// to the array in one piece. A per-word bit-select write into the array made
+// Quartus give up on memory inference (warning 10999), so the 32x64 array was
+// built from 2048 flops plus three 64-bit 32:1 read muxes; whole-word writes
+// map to LUTRAM like icache_tag already did.
+logic [63:0] fill_buf;
 (* ramstyle = "MLAB, no_rw_check" *) logic [63:0] icache_data [0:31];
 (* ramstyle = "MLAB, no_rw_check" *) logic [12:0] icache_tag  [0:31]; // addr[20:8]
 logic [31:0] icache_valid;
@@ -404,6 +410,9 @@ logic        fill_awaiting;   // waiting for rising ack of current fill word
 logic        fill_need_req;   // issue next word req after stretched ack falls
 logic        sdr_p0_ack_d;
 wire         sdr_p0_ack_rise = sdr_p0_ack && !sdr_p0_ack_d;
+// Complete line as of the final fill word: three buffered words plus the beat
+// being acked this cycle.
+wire [63:0]  fill_line_data = {sdr_p0_dout, fill_buf[47:0]};
 
 wire icache_p0_busy = rom_filling || rom_req_r || (if_req && !if_served);
 
@@ -440,20 +449,20 @@ always_ff @(posedge clk_sys) begin
                 rom_addr_r    <= {3'b000, fill_wbase, fill_word};
             end
             else if (fill_awaiting && sdr_p0_ack_rise && !ext_p0_req_r) begin
-                icache_data[fill_line][{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
+                fill_buf[{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
                 fill_awaiting <= 1'b0;
                 if (fill_word == 2'd3) begin
                     rom_filling <= 1'b0;
+                    icache_data[fill_line]  <= fill_line_data;
                     icache_tag[fill_line]   <= fill_tag;
                     icache_valid[fill_line] <= 1'b1;
                     if (fill_isfetch) begin
-                        if_data   <= ({sdr_p0_dout, icache_data[fill_line][47:0]})
-                                     >> {fill_foff, 3'b000};
+                        if_data   <= fill_line_data >> {fill_foff, 3'b000};
                         if_served <= 1'b1;
                     end
                     else begin
-                        rom_word_r <= (fill_dsel == 2'd3) ? sdr_p0_dout
-                                     : icache_data[fill_line][{fill_dsel, 4'b0000} +: 16];
+                        rom_word_r <=
+                            fill_line_data[{fill_dsel, 4'b0000} +: 16];
                         rom_ready  <= 1'b1;
                     end
                 end

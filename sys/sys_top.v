@@ -714,7 +714,7 @@ wire         bob_deint;
 	ascal 
 	#(
 		.RAMBASE(32'h20000000),
-		// System 32 is at most 416 pixels wide.  Keep the scaler's maximum
+		// SSV's active image is 336 pixels wide.  Keep the scaler's maximum
 		// input-line width bounded even if downscaling is enabled in a later
 		// build; the default 2048-pixel width wastes RAM on this core.
 		.IHRES(512),
@@ -724,6 +724,10 @@ wire         bob_deint;
 		.RAMSIZE(32'h00800000),
 	`endif
 	`ifndef MISTER_FB
+		// No framebuffer mode in this core, so neither 8bpp palette is
+		// reachable.  Upstream MiSTer drops both here; keeping PALETTE on
+		// left ascal's 128x48 pal1_mem instantiated for 2 dead M10Ks.
+		.PALETTE("false"),
 		.PALETTE2("false"),
 	`else
 		`ifndef MISTER_FB_PALETTE
