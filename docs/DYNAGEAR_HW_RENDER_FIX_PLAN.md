@@ -262,6 +262,78 @@ without the fix.
 Both runs show the same starvation (22,372 bg + 24,337 obj line-deadline
 misses), so the difference is the ownership fix alone, not a change in load.
 
+## 1.6 Scroll-triggered background corruption — OPEN, localised
+
+Found by the long-scenario stream (`work/v60-opcode-audit`), reproduced
+independently in `main`. **This is the defect that matches the reported
+hardware symptom** ("large parts of the level draw as white boxes, then render
+in correctly further on"), and unlike everything else in this document it
+reproduces on the **default fast SDRAM model** — so it is a pure RTL/data bug,
+not a timing artefact, and it iterates in minutes.
+
+### Reproduction
+
+`+SCENARIO=coin_start_p1_long`, black fraction inside the play area
+(x 8–327, y 20–189), measured in `main`:
+
+| post-VE frame | 900 | 950 | 1000 | 1050 | 1100 | 1150 | 1200 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| moving | 1.14 | 0.74 | **5.23** | **14.94** | **25.83** | **25.97** | **25.94** |
+
+Matches the originating stream's numbers to two significant figures. The
+stationary control holds ~0.8% for 3000 frames, so **scrolling is the trigger**.
+
+Frame 950 renders a flawless jungle scene. Frame 1100 shows a hard vertical
+edge at screen x≈152: background correct to the left, **black to the right**,
+with font glyphs mixed into the left portion. Sprites, the tree, the grass and
+the whole HUD render correctly throughout.
+
+### What the tilemap trace ruled out
+
+`+DUMP_TILEMAP=<frame>` traces every tilemap tile fetch (group, mode, scroll,
+map_x/y, computed address, code, attr). On frame 1100 all three active groups
+are `size=1` (512-pixel pages); groups 1 and 3 use row-scroll (`mode[12]`).
+
+**Refuted — the page-boundary theory.** Addresses are continuous across it:
+map_x `0x7ff → 0x80f` gives address `0x1FE8 → 0x2028`, exactly the +0x40
+one-column stride. `tile_address()` computes correctly here.
+
+**Refuted — dropped or truncated columns.** Every group emits 22 tiles on all
+240 lines (5,280 each). Nothing is skipped; the renderer covers the full width.
+
+Also checked and *not* the cause, though it is a genuine latent defect worth
+fixing separately: in `tile_address()` the shift amount `size_shift + 2'd2` is
+self-determined to 4 bits, so it wraps for `size_shift` 14/15 (`mode[15:13]`
+6 or 7). Those page sizes are wider than the screen so `page` stays 0 in
+practice — it cannot produce this symptom.
+
+### What the trace points at
+
+The renderer faithfully draws what it reads; the **tile codes themselves go
+flat** exactly where the picture goes black. On y=100 of frame 1100, group 1
+codes vary through the visible region (`8002, 803e, 801a`…) then hold constant
+`0x8002` from `scrx=145` — the black band. Group 3 is constant `0x8000` across
+the entire line.
+
+Scroll values are large and growing (2015 / 2686 / 3080 across the three
+groups), and `tile_address` turns those into `page = x >> 9`, `base = page << 11`,
+marching further into sprite RAM as the player advances.
+
+**Working hypothesis:** the tilemap is meant to wrap within a fixed-size map and
+the renderer instead pages off the end of it, reading blank memory (and
+occasionally the font tilemap). Fits every observation: clean while stationary,
+progressive once scrolling, sprites unaffected.
+
+**Refutation condition:** if the frame-950 trace shows the same groups at lower
+scroll with varied codes across the full line, the only difference is how far
+right we have paged, and the fix is in how `x` is masked before the page term —
+the stride is already proven correct.
+
+**Still unseparated:** "renderer reads too far" versus "CPU never wrote that
+region". Deciding needs the tilemap RAM contents compared against MAME at the
+same frame — and MAME/RTL game state has already diverged by frame 1100, so
+that comparison has to be built carefully to mean anything.
+
 ## Status after the 28 Jul hardware test
 
 The freeze is fixed and the core reaches game content on real hardware for the
