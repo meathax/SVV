@@ -315,6 +315,28 @@ the MAME evidence cited.
 Until that happens, the usable regression signal is the black-fraction table
 above plus the 8 bring-up gates.
 
+### ✅ That comparison has now been done — see
+### `docs/DYNAGEAR_TILEMAP_PAGE_FIX_MAME_VERIFICATION.md`
+
+Both builds were run side by side against MAME 0.285 on the same input
+schedule. The pre-fix scratch build reproduces
+`rtl_final96_gameplay_frames.crc` **byte-for-byte over all 950 frames**, so the
+A/B isolates this fix and nothing else. The 236 changed frames form two runs,
+`176..369` and `380..421`; everything from 422 on is unchanged.
+
+At 8 of the 14 sampled frames inside those runs the **new** renderer is
+*pixel-identical to MAME* (masking only the DIP-driven credit text). The old
+renderer is wrong by ~15,000 px/frame across `176..369` — it drops the whole
+`DYNA GEAR` logo background layer from the character-select screen. No sampled
+frame favours the old renderer. Control frames on either side of the changed
+range (172, 174, 430) are pixel-exact in both builds, which is what validates
+the comparison.
+
+**Recommendation: re-baseline the golden**, in its own commit, citing that
+document. Two pre-existing residuals it turned up (a ~2-frame character-select
+exit offset at 370–379, and ~1,300 missing faint background pixels in the
+380–421 cutscene, which this fix halves) are separate follow-ups.
+
 ## 1.6a Original localisation notes (superseded by the fix above)
 
 Found by the long-scenario stream (`work/v60-opcode-audit`), reproduced
