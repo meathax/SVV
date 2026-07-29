@@ -289,16 +289,50 @@ enddata_table(
 	.q_b(end_val)
 );
 
-// RAM chunk used to store valid hiscore data 
+// LOCAL CHANGE (SSV): one role per port, so these two can live in block RAM.
+//
+// As written upstream, each of these arrays used a single port for BOTH reading
+// and writing -- hiscore_data wrote on port B and read q_b from it, and
+// hiscore_buffer wrote on port A and read q_a from it. Combined with the
+// write-first bypass inside dpram_hs that asks for something a Cyclone V M10K
+// cannot do: new-data read-during-write on a true dual-port array. Quartus
+// therefore built both in flip-flops, and the fitter charged 1,003 ALM for
+// hiscore_data and 384 for hiscore_buffer -- about one ALM per stored bit, and
+// roughly 3.3% of the device for a high score table.
+//
+// The four config tables above do not have this problem because each of their
+// ports has a single role: port A writes, port B reads. They infer cleanly.
+// These two now have the same shape.
+//
+// Nothing observes the behaviour that changes. In SM_EXTRACT the copy-back
+// reads hiscore_buffer with buffer_write already cleared (SM_COMPAREDONE clears
+// it), and hiscore_data_out is not consumed while dump_write is high. In
+// SM_COMPAREDONE the comparison reads hiscore_data_out with dump_write low and
+// does not look at hiscore_buffer_out. So no read ever needed the new data from
+// a write in the same cycle.
+//
+// The two writers into hiscore_data are mutually exclusive by construction, not
+// by luck: downloading_dump requires ioctl_download, and dump_write is only set
+// by the state machine, which advances in the else branch of that same
+// ioctl_download test.
+wire                     hs_data_we = downloading_dump | dump_write;
+wire [HS_SCOREWIDTH-1:0] hs_data_wraddr = downloading_dump
+                                        ? ioctl_addr[(HS_SCOREWIDTH-1):0]
+                                        : data_addr;
+wire               [7:0] hs_data_wrdata = downloading_dump ? data_from_hps
+                                                           : hiscore_buffer_out;
+
+// RAM chunk used to store valid hiscore data
 dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
 hiscore_data (
 	.clk(clk),
-	.addr_a(ioctl_addr[(HS_SCOREWIDTH-1):0]),
-	.we_a(downloading_dump),
-	.d_a(data_from_hps),
+	.addr_a(hs_data_wraddr),
+	.we_a(hs_data_we),
+	.d_a(hs_data_wrdata),
+	.q_a(),
 	.addr_b(data_addr),
-	.we_b(dump_write), 
-	.d_b(hiscore_buffer_out),
+	.we_b(1'b0),
+	.d_b(8'd0),
 	.q_b(hiscore_data_out)
 );
 // RAM chunk used to store temporary high score data
@@ -308,7 +342,11 @@ hiscore_buffer (
 	.addr_a(buffer_addr),
 	.we_a(buffer_write),
 	.d_a(data_from_ram),
-	.q_a(hiscore_buffer_out)
+	.q_a(),
+	.addr_b(buffer_addr),
+	.we_b(1'b0),
+	.d_b(8'd0),
+	.q_b(hiscore_buffer_out)
 );
 
 assign data_to_ram = hiscore_data_out;
