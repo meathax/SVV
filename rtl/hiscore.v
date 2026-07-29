@@ -830,7 +830,23 @@ if (aWidth <= 5) begin : g_ram_logic
 
 end else begin : g_ram_block
 
-	reg [dWidth-1:0] ram [2**aWidth-1:0];
+	// LOCAL CHANGE (SSV): ramstyle forced.
+	//
+	// Left to itself Quartus put these in LOGIC, not block RAM, and the cost
+	// was not small -- the fit report priced hiscore_data at 1,003 ALM and
+	// hiscore_buffer at 384 for 1,024 bits each, about one ALM per bit, with
+	// the whole hiscore module reporting only 768 memory bits. That is roughly
+	// 3.3% of the device spent on a high score table.
+	//
+	// The blocker is the write-first bypass below: q_a follows d_a on a write,
+	// and a TRUE dual-port array cannot promise that across ports on an M10K,
+	// so the tool falls back to registers. no_rw_check says it does not have to
+	// promise it. That is safe here rather than merely convenient -- neither
+	// deep instance has a consumer that reads an address in the cycle it writes
+	// it. hiscore_buffer's q_a is only read once buffer_write has been cleared,
+	// and hiscore_data's q_b is only read while we_b is low. The bypass mux
+	// itself stays, in a few ALMs, so behaviour is unchanged either way.
+	(* ramstyle = "M10K, no_rw_check" *) reg [dWidth-1:0] ram [2**aWidth-1:0];
 
 	always @(posedge clk) begin
 		if (we_a) begin

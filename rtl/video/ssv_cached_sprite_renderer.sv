@@ -143,12 +143,27 @@ logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
 (* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
-// MLAB, not M10K. At 240 x 77 this costs two M10K blocks but only about 32
-// MLAB cells, and M10K is the scarce resource in this design (532/553 used
-// against 82% ALM occupancy). It shares line_count_addr and its access shape
-// with line_counts above, so the no_rw_check argument documented there applies
-// unchanged.
-(* ramstyle = "MLAB, no_rw_check" *)
+// M10K, reversing the earlier MLAB choice, because the resource balance this
+// array was tuned against has inverted.
+//
+// The original note said MLAB cost "about 32 MLAB cells" against two M10K
+// blocks, and chose MLAB because M10K was the scarce resource at 532/553 with
+// ALM at 82%. The first half of that was an underestimate. The fitter charges
+// this array 751.3 ALM -- 480 in LUTRAM cells, 236.8 for mux_rib:rd_mux and 5
+// for the write decoder -- because 240 deep by 77 wide needs eight MLABs of
+// depth by four of width, and a 240-entry read mux on top.
+//
+// Meanwhile the design has moved the other way: the last fit came back at 92%
+// ALM, and quartus_sta then ran out of memory before it could produce a timing
+// report at all. Dropping the stock video chain freed block RAM but little
+// logic, so ALM is now the binding resource and M10K is not. Two blocks for
+// 751 ALM is the right way round at this operating point.
+//
+// The access shape and the no_rw_check argument are unchanged from the note on
+// line_counts above; only the storage choice moves. line_counts itself stays
+// MLAB: the fitter charges it 103 ALM, so trading it for a whole M10K would be
+// close to break-even rather than a win.
+(* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_starts [0:239];
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 logic [7:0] clear_y;
