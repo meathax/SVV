@@ -68,6 +68,11 @@ module ssv_tilemap_page_check (
     // Narrowing it would halve that bank (64 -> 32 M10K) but changes what the
     // CPU reads back -- so count whether the CPU ever reads the palette at all.
     // Likewise track how much of the 256 KB sprite RAM the game actually walks.
+    // ES5506 output cadence. The chip gives each voice a fixed 16-clock slot,
+    // so the sample period must be exactly 16 * (active_voices + 1) ce ticks.
+    input logic        snd_sample_tick,
+    input logic  [4:0] snd_active_voices,
+
     input logic        pal_sel,
     input logic        cpu_we,
     input logic        cpu_ack,
@@ -101,6 +106,8 @@ int p4_lat_worst, p4_lat_total, p4_lat_count, p4_lat_timer;
 logic p4_inflight;
 
 int  pal_reads, pal_writes;
+int  tick_gap, tick_last, tick_count, tick_total, tick_min, tick_max;
+int  tick_voices;
 logic cpu_ack_d;
 logic [16:0] spr_addr_hi;           // highest sprite-RAM word the CPU touched
 int  spr_writes;
@@ -134,6 +141,8 @@ initial begin
     p4_lat_worst = 0; p4_lat_total = 0; p4_lat_count = 0;
     p4_lat_timer = 0; p4_inflight = 1'b0;
     pal_reads = 0; pal_writes = 0; cpu_ack_d = 1'b0;
+    tick_gap = 0; tick_last = 0; tick_count = 0; tick_total = 0;
+    tick_min = 1000000; tick_max = 0; tick_voices = 0;
     spr_addr_hi = 17'd0; spr_writes = 0;
     worst_frame = -1; worst_bad = 0;
     // Enough to characterise the pattern without drowning the log.
@@ -154,6 +163,18 @@ always_ff @(posedge clk) begin
             p4_frame <= p4_frame + 1;
             p4_total <= p4_total + 1;
         end
+        tick_gap <= tick_gap + 1;
+        if (snd_sample_tick) begin
+            if (tick_count > 2) begin   // ignore the first, partial interval
+                tick_total <= tick_total + tick_gap;
+                if (tick_gap < tick_min) tick_min <= tick_gap;
+                if (tick_gap > tick_max) tick_max <= tick_gap;
+            end
+            tick_count <= tick_count + 1;
+            tick_voices <= {27'd0, snd_active_voices};
+            tick_gap <= 0;
+        end
+
         // One count per completed CPU access, not per cycle of a stretched ack.
         cpu_ack_d <= cpu_ack;
         if (pal_sel && cpu_ack && !cpu_ack_d) begin
@@ -278,6 +299,10 @@ final begin
              p4_lat_worst,
              (p4_lat_count != 0) ? (p4_lat_total / p4_lat_count) : 0,
              p4_lat_count);
+    $display("SND_RATE samples=%0d avg_gap=%0d min=%0d max=%0d active_voices=%0d jitter=%0d",
+             tick_count,
+             (tick_count > 3) ? (tick_total / (tick_count - 3)) : 0,
+             tick_min, tick_max, tick_voices, tick_max - tick_min);
     $display("PALETTE_ACCESS cpu_reads=%0d cpu_writes=%0d", pal_reads, pal_writes);
     $display("SPRITERAM_USE cpu_writes=%0d highest_word=0x%05x of 0x1ffff",
              spr_writes, spr_addr_hi);
@@ -297,13 +322,14 @@ endmodule
 
 // TILE_ROW_WAIT is state 27 and ROW_WAIT is state 4; both are the cycle in
 // which the renderer latches the row-scrolled origin for the scanline.
-// TILE_PREP is 32, the same encoding the frame-CRC testbench already traces.
+// TILE_PREP is 30, the same encoding the frame-CRC testbench already traces.
+// It was 32 before TILE_ATTR_ADDR/TILE_ATTR_WAIT were removed from the enum.
 bind ssv_core ssv_tilemap_page_check u_tilemap_page_check (
     .clk(clk_sys),
     .rst(rst),
     .frame_tick(video_enable && vblank_pulse),
 
-    .obj_tile(sprite_renderer.state == 6'd32),
+    .obj_tile(sprite_renderer.state == 6'd30),
     .obj_active(sprite_renderer.state == 6'd27),
     .obj_raw_scroll_x(tilemap_scrolls[{sprite_renderer.prep_tile_group,
                                        6'd0} +: 16]),
@@ -330,6 +356,8 @@ bind ssv_core ssv_tilemap_page_check u_tilemap_page_check (
     .obj_state(sprite_renderer.state),
     .obj_fetch_start(sprite_renderer.fetch_start),
 
+    .snd_sample_tick(sound_voices.sample_tick),
+    .snd_active_voices(sound_active_voices),
     .pal_sel(sel_palette),
     .cpu_we(m_we),
     .cpu_ack(ack_r),

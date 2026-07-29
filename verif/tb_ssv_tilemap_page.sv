@@ -41,6 +41,9 @@ logic [15:0] global_y_base, global_y_adjust, flip_control;
 logic shadow_4bit;
 logic [16:0] spr_addr;
 logic [15:0] spr_data;
+// Sprite RAM is banked by word parity in ssv_core, so the word at spr_addr|1
+// is available in the same cycle. Model both banks here.
+logic [15:0] spr_data_next;
 logic rom_req;
 logic [24:4] rom_addr;
 logic [127:0] rom_data;
@@ -56,8 +59,10 @@ logic busy, done;
 ssv_bg_renderer dut (.*);
 
 logic [15:0] sprite_mem [0:131071];
-always_ff @(posedge clk)
-    spr_data <= sprite_mem[spr_addr];
+always_ff @(posedge clk) begin
+    spr_data      <= sprite_mem[spr_addr];
+    spr_data_next <= sprite_mem[spr_addr | 17'd1];
+end
 
 // Minimal ROM responder, same shape as tb_ssv_bg_renderer.
 logic rom_req_d;
@@ -236,6 +241,7 @@ initial begin
     flip_control = 16'd0;
     shadow_4bit = 1'b0;
     spr_data = 16'd0;
+    spr_data_next = 16'd0;
     rom_data = 128'd0;
     rom_ack = 1'b0;
     rom_req_d = 1'b0;

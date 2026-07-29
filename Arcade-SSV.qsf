@@ -70,10 +70,14 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 2
+set_global_assignment -name SEED 5
 # quartus_map/fit Access Violation on this host at 4-way; keep single-threaded.
+# NUM_PARALLEL_PROCESSORS is 1 on purpose, not by omission. Raising it to 4 on
+# 29 Jul 2026 took quartus_fit to 9,072 MB peak virtual memory and it died with
+# Error (293007) after 7m41s - the same crash the Fast Fit note above describes,
+# reached by a different route. More processors means more peak memory, and this
+# design has no headroom against the Quartus 17.0.2 Lite ceiling.
 set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
-
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 
 #enable it only if 8bit indexed mode is used in core
@@ -321,6 +325,7 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to LED_*
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to BTN_*
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BTN_*
 source files.qip
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_debug_overlay.sv
 set_global_assignment -name QIP_FILE sys/sys.qip
 set_global_assignment -name SDC_FILE SSV.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE "Arcade-SSV.sv"

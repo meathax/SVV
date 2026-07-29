@@ -3,8 +3,15 @@
 `timescale 1ns/1ps
 
 module ssv_cached_sprite_renderer #(
-    // Attract soak used ~1277; keep margin for denser in-game lists.
-    parameter integer CACHE_ENTRIES = 1536
+    // Attract soak used ~1277, but a 1500-frame gameplay soak peaked at 1519 of
+    // 1536 -- seventeen entries of margin. On hardware the sticky overrun
+    // indicator lights with no per-line deadline marks, which points at this
+    // overflowing rather than the renderer running late; an overflow silently
+    // drops descriptors, so sprites and tilemap slices simply go missing.
+    //
+    // 2048 costs roughly eight more M10K. That is affordable now only because
+    // narrowing the palette's odd bank freed 31 blocks (530 -> 499 of 553).
+    parameter integer CACHE_ENTRIES = 2048
 ) (
     input  logic         clk,
     input  logic         rst,
@@ -27,6 +34,11 @@ module ssv_cached_sprite_renderer #(
 
     output logic  [16:0] spr_addr,
     input  logic  [15:0] spr_data,
+    // The sprite-RAM word at `spr_addr | 1`, available in the same cycle as
+    // `spr_data` because sprite RAM is banked by word parity. Valid only when
+    // `spr_addr` is even, which every consumer of it below guarantees -- see
+    // tile_address(), whose result is always even.
+    input  logic  [15:0] spr_data_next,
 
     output logic         rom_req,
     output logic  [24:4] rom_addr,
@@ -91,8 +103,10 @@ typedef enum logic [5:0] {
     RENDER_EVAL,
     RENDER_SPRITE_PREP, RENDER_ADVANCE,
     TILE_ROW_ADDR, TILE_ROW_WAIT,
+    // One address, both words. The tile code and its attribute are an adjacent
+    // even/odd pair, and sprite RAM is banked by parity, so the separate
+    // TILE_ATTR_ADDR/TILE_ATTR_WAIT pair that used to follow is gone.
     TILE_CODE_ADDR, TILE_CODE_WAIT,
-    TILE_ATTR_ADDR, TILE_ATTR_WAIT,
     TILE_PREP,
     FETCH_START, FETCH_WAIT, PLOT
 } state_t;
@@ -182,6 +196,35 @@ logic [16:0] tile_scroll_x;
 logic signed [10:0] tile_screen_x;
 logic        last_was_tilemap;
 logic  [2:0] last_tilemap_group;
+
+// --- Tilemap code/attribute prefetch ---------------------------------------
+// FETCH_WAIT is ~10 cycles in which the renderer does nothing at all but wait
+// for the 128-bit graphics row to come back from SDRAM. Sprite RAM is a
+// different memory, and its video port is idle for that entire window, so the
+// *next* tilemap tile's code/attribute pair is read there and reduced to fetch
+// operands ahead of time. When PLOT (or a transparent row) finishes, the
+// TILE_CODE_ADDR / TILE_CODE_WAIT / TILE_PREP trio is skipped outright.
+//
+// This touches sprite RAM only. The graphics row itself is still fetched
+// strictly one at a time, and nothing here issues a second p2 transaction --
+// the p2 mux is deliberately left alone.
+//
+// Stages, all of which occur inside FETCH_WAIT/PLOT:
+//   1 = drive spr_addr with tile_next_word_addr
+//   2 = one-cycle sprite-RAM latency has elapsed; latch the pair
+//   3 = do TILE_PREP's arithmetic into the shadow registers, set valid
+//   0 = idle: either finished, or never armed (sprite, or last tile of line)
+// If the row fetch somehow completed before stage 3, tile_pf_valid stays low
+// and the original TILE_CODE_ADDR path runs unchanged.
+logic  [1:0] tile_pf_stage;
+logic        tile_pf_valid;
+logic [15:0] tile_pf_code_low;
+logic [15:0] tile_pf_attr;
+logic        tile_pf_flip_x;
+logic        tile_pf_flip_y;
+logic  [8:0] tile_pf_color;
+logic  [2:0] tile_pf_row;
+logic [19:0] tile_pf_fetch_code;
 
 logic        fetch_start;
 logic        fetch_done;
@@ -676,6 +719,25 @@ wire tile_flip_x = tile_attr[15] ^
 wire tile_flip_y = tile_attr[14] ^
                    (flip_control[14] && !flip_control[13]);
 
+// Sprite-RAM address of the next tilemap tile along this scanline. tile_map_x,
+// tile_map_x0, tile_map_y and tile_mode are all fixed for the whole of the
+// current tile, so this is stable from the moment that tile starts fetching --
+// which is exactly what lets the prefetch run inside FETCH_WAIT. The two
+// advance points (FETCH_WAIT's transparent exit and PLOT's) each used to
+// instantiate this same tile_address() call; they now share this one.
+wire [16:0] tile_next_word_addr =
+    tile_address(tile_map_x + 17'd16, tile_map_x0, tile_map_y, tile_mode);
+// True when a further tile still fits on the line. This is the same test the
+// advance points make, just evaluated one tile earlier, so an armed prefetch
+// can never read past the end of the line.
+wire tile_next_in_range =
+    !((tile_screen_x + 11'sd16) > $signed({2'd0, LAST_PIXEL}));
+// tile_flip_x/y above, but for the prefetched attribute.
+wire tile_pf_flip_x_next = tile_pf_attr[15] ^
+                           (flip_control[12] && !flip_control[13]);
+wire tile_pf_flip_y_next = tile_pf_attr[14] ^
+                           (flip_control[14] && !flip_control[13]);
+
 always_comb begin
     spr_addr = {5'd0, global_base};
     unique case (state)
@@ -688,10 +750,17 @@ always_comb begin
         BUILD_LOCAL_2: spr_addr = local_base + 2'd3;
         TILE_ROW_ADDR, TILE_ROW_WAIT:
             spr_addr = ({9'd0, tile_mode[7:0]} << 9) + tile_map_y[8:0];
-        TILE_CODE_ADDR, TILE_CODE_WAIT,
-        TILE_ATTR_ADDR, TILE_ATTR_WAIT: spr_addr = tile_word_addr;
+        TILE_CODE_ADDR, TILE_CODE_WAIT: spr_addr = tile_word_addr;
         default: ;
     endcase
+
+    // The prefetch borrows the idle sprite-RAM video port. It is gated on the
+    // two states that own the port but do not use it, so it can never fight the
+    // descriptor-cache build walk, the row-scroll table lookup, or the ordinary
+    // TILE_CODE_ADDR read above -- none of which can be the current state here.
+    if ((tile_pf_stage == 2'd1) &&
+        ((state == FETCH_WAIT) || (state == PLOT)))
+        spr_addr = tile_next_word_addr;
 
     fetch_start = (state == FETCH_START);
     plot_we = 4'd0;
@@ -784,6 +853,15 @@ always_ff @(posedge clk) begin
         last_tilemap_group <= 3'd0;
         fetch_code <= 20'd0;
         fetch_row <= 3'd0;
+        tile_pf_stage <= 2'd0;
+        tile_pf_valid <= 1'b0;
+        tile_pf_code_low <= 16'd0;
+        tile_pf_attr <= 16'd0;
+        tile_pf_flip_x <= 1'b0;
+        tile_pf_flip_y <= 1'b0;
+        tile_pf_color <= 9'd0;
+        tile_pf_row <= 3'd0;
+        tile_pf_fetch_code <= 20'd0;
         busy <= 1'b0;
         done <= 1'b0;
     end
@@ -791,6 +869,42 @@ always_ff @(posedge clk) begin
         done <= 1'b0;
         if (cache_start)
             cache_pending <= 1'b1;
+
+        // Prefetch sequencer. Runs beside the main state machine, and only in
+        // the two states where the sprite-RAM video port is idle. FETCH_WAIT is
+        // reachable only from FETCH_START, which always re-arms tile_pf_stage,
+        // so a stage left over from an early-terminating fetch can never be
+        // mistaken for a live one.
+        if ((state == FETCH_WAIT) || (state == PLOT)) begin
+            case (tile_pf_stage)
+                2'd1: tile_pf_stage <= 2'd2;
+                2'd2: begin
+                    tile_pf_code_low <= spr_data;
+                    tile_pf_attr     <= spr_data_next;
+                    tile_pf_stage    <= 2'd3;
+                end
+                2'd3: begin
+                    // TILE_PREP's arithmetic, verbatim, run early. tile_mode
+                    // and tile_map_y are fixed for the whole tilemap run, so
+                    // only the attribute-derived terms need shadowing.
+                    tile_pf_flip_x <= tile_pf_flip_x_next;
+                    tile_pf_flip_y <= tile_pf_flip_y_next;
+                    tile_pf_color  <= tile_pf_attr[8:0];
+                    tile_pf_row    <= tile_pf_flip_y_next ? ~tile_map_y[2:0]
+                                                          :  tile_map_y[2:0];
+                    if (tile_pf_flip_y_next ? !tile_map_y[3] : tile_map_y[3])
+                        tile_pf_fetch_code <=
+                            expand_code(tile_pf_code_low, tile_pf_attr) + 1'd1;
+                    else
+                        tile_pf_fetch_code <=
+                            expand_code(tile_pf_code_low, tile_pf_attr);
+                    tile_pf_valid <= 1'b1;
+                    tile_pf_stage <= 2'd0;
+                end
+                default: ;
+            endcase
+        end
+
         unique case (state)
             IDLE: begin
                 busy <= 1'b0;
@@ -1190,15 +1304,15 @@ always_ff @(posedge clk) begin
             end
 
             TILE_CODE_ADDR: state <= TILE_CODE_WAIT;
+            // tile_word_addr is even for every tile (see tile_address), so the
+            // attribute is the odd word at the same bank index and arrives on
+            // spr_data_next in this very cycle. The old
+            // TILE_ATTR_ADDR/TILE_ATTR_WAIT pair -- and the +1 address bump
+            // that fed them -- are gone; the address is recomputed from
+            // scratch by tile_address() for the next tile either way.
             TILE_CODE_WAIT: begin
                 tile_code_low <= spr_data;
-                tile_word_addr <= tile_word_addr + 1'd1;
-                state <= TILE_ATTR_ADDR;
-            end
-
-            TILE_ATTR_ADDR: state <= TILE_ATTR_WAIT;
-            TILE_ATTR_WAIT: begin
-                tile_attr <= spr_data;
+                tile_attr <= spr_data_next;
                 state <= TILE_PREP;
             end
 
@@ -1218,7 +1332,18 @@ always_ff @(posedge clk) begin
                 state <= FETCH_START;
             end
 
-            FETCH_START: state <= FETCH_WAIT;
+            FETCH_START: begin
+                // Arm the prefetch for the tile *after* the one now being
+                // fetched. tile_map_x / tile_screen_x were already advanced to
+                // the current tile, so tile_next_word_addr and
+                // tile_next_in_range both refer to the correct successor.
+                // Normal sprites index by code and never walk a map, so they
+                // leave the sequencer idle.
+                tile_pf_valid <= 1'b0;
+                tile_pf_stage <= (render_tilemap && tile_next_in_range)
+                                 ? 2'd1 : 2'd0;
+                state <= FETCH_WAIT;
+            end
             FETCH_WAIT: begin
                 if (fetch_done) begin
                     if (pens == 128'd0) begin
@@ -1232,11 +1357,27 @@ always_ff @(posedge clk) begin
                             else begin
                                 tile_screen_x <= tile_screen_x + 11'sd16;
                                 tile_map_x <= tile_map_x + 17'd16;
-                                tile_word_addr <= tile_address(
-                                    tile_map_x + 17'd16, tile_map_x0,
-                                    tile_map_y, tile_mode
-                                );
-                                state <= TILE_CODE_ADDR;
+                                tile_word_addr <= tile_next_word_addr;
+                                if (tile_pf_valid) begin
+                                    // Code and attribute were read out of the
+                                    // idle sprite-RAM port during FETCH_WAIT
+                                    // and already reduced to fetch operands, so
+                                    // TILE_CODE_ADDR/TILE_CODE_WAIT/TILE_PREP
+                                    // have nothing left to do.
+                                    gfx_mode <= tile_mode[10:8];
+                                    shadow <= tile_mode[11];
+                                    flip_x <= tile_pf_flip_x;
+                                    flip_y <= tile_pf_flip_y;
+                                    color <= tile_pf_color;
+                                    fetch_row <= tile_pf_row;
+                                    fetch_code <= tile_pf_fetch_code;
+                                    tile_code_low <= tile_pf_code_low;
+                                    tile_attr <= tile_pf_attr;
+                                    state <= FETCH_START;
+                                end
+                                else begin
+                                    state <= TILE_CODE_ADDR;
+                                end
                             end
                         end
                         else if (sprite_tile_x + 1'd1 < sprite_xnum) begin
@@ -1271,11 +1412,23 @@ always_ff @(posedge clk) begin
                         else begin
                             tile_screen_x <= tile_screen_x + 11'sd16;
                             tile_map_x <= tile_map_x + 17'd16;
-                            tile_word_addr <= tile_address(
-                                tile_map_x + 17'd16, tile_map_x0,
-                                tile_map_y, tile_mode
-                            );
-                            state <= TILE_CODE_ADDR;
+                            tile_word_addr <= tile_next_word_addr;
+                            if (tile_pf_valid) begin
+                                // See the matching note in FETCH_WAIT above.
+                                gfx_mode <= tile_mode[10:8];
+                                shadow <= tile_mode[11];
+                                flip_x <= tile_pf_flip_x;
+                                flip_y <= tile_pf_flip_y;
+                                color <= tile_pf_color;
+                                fetch_row <= tile_pf_row;
+                                fetch_code <= tile_pf_fetch_code;
+                                tile_code_low <= tile_pf_code_low;
+                                tile_attr <= tile_pf_attr;
+                                state <= FETCH_START;
+                            end
+                            else begin
+                                state <= TILE_CODE_ADDR;
+                            end
                         end
                     end
                     else if (sprite_tile_x + 1'd1 < sprite_xnum) begin

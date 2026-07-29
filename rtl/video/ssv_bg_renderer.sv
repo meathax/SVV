@@ -19,6 +19,9 @@ module ssv_bg_renderer (
 
     output logic [16:0] spr_addr,
     input  logic [15:0] spr_data,
+    // The sprite-RAM word at `spr_addr | 1`, from the odd parity bank. Valid
+    // only for an even `spr_addr`; tile_address() below always returns one.
+    input  logic [15:0] spr_data_next,
 
     output logic         rom_req,
     output logic  [24:4] rom_addr,
@@ -41,8 +44,9 @@ localparam logic [8:0] LAST_PIXEL = 9'd335;
 typedef enum logic [4:0] {
     IDLE, WAIT_CLEAR, ROW_DECIDE,
     ROW_ADDR, ROW_WAIT,
+    // Code and attribute arrive together from the two parity banks, so the
+    // TILE_ATTR_ADDR/TILE_ATTR_WAIT pair that used to follow is gone.
     TILE_CODE_ADDR, TILE_CODE_WAIT,
-    TILE_ATTR_ADDR, TILE_ATTR_WAIT,
     TILE_PREP, FETCH_START, FETCH_WAIT, PLOT
 } state_t;
 state_t state;
@@ -256,15 +260,13 @@ always_ff @(posedge clk) begin
             end
 
             TILE_CODE_ADDR: state <= TILE_CODE_WAIT;
+            // tile_word_addr is always even, so the attribute is the odd word
+            // at the same bank index and lands on spr_data_next in this cycle.
+            // The next tile's address is recomputed by tile_address() below,
+            // so the +1 bump that used to walk to the attribute is dead.
             TILE_CODE_WAIT: begin
                 tile_code_low <= spr_data;
-                tile_word_addr <= tile_word_addr + 1'd1;
-                state <= TILE_ATTR_ADDR;
-            end
-
-            TILE_ATTR_ADDR: state <= TILE_ATTR_WAIT;
-            TILE_ATTR_WAIT: begin
-                tile_attr <= spr_data;
+                tile_attr <= spr_data_next;
                 state <= TILE_PREP;
             end
 

@@ -60,6 +60,11 @@ module ssv_debug_overlay #(
     input  logic        renderer_busy,     // bg_busy | obj_busy
     input  logic        gfx_wait,          // p2 req asserted, ack not yet back
     input  logic        overrun_sticky,    // core's sticky renderer_overrun
+    // Split by cause so one glance says which fired. A missed line deadline
+    // and a full descriptor cache both set renderer_overrun but need
+    // completely different fixes.
+    input  logic        overrun_deadline,
+    input  logic        overrun_cachefull,
 
     // Pixel path.
     input  logic [23:0] rgb_in,
@@ -177,7 +182,14 @@ always_comb begin
     rgb_out = rgb_in;
     if (draw_en) begin
         if (in_sticky)
-            rgb_out = overrun_sticky ? C_RED : C_OK;
+            // green  = clean
+            // red    = missed a line deadline (renderer too slow)
+            // yellow = descriptor cache overflowed (dropped sprites)
+            // white  = both
+            rgb_out = (overrun_deadline && overrun_cachefull) ? 24'hffffff :
+                       overrun_deadline                       ? C_RED       :
+                       overrun_cachefull                      ? 24'hffff00  :
+                       overrun_sticky                         ? C_RED       : C_OK;
         else begin
             case (mode)
                 3'd1: if (d_ovr && in_mark)     rgb_out = C_RED;

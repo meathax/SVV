@@ -47,12 +47,35 @@ Push-Location $repoRoot
 try {
     Assert-BuildPolicy
 
-    $activeQuartus = Get-Process -Name 'quartus*' -ErrorAction SilentlyContinue
-    if ($activeQuartus) {
-        $activeList = ($activeQuartus | ForEach-Object {
-            "$($_.ProcessName)[$($_.Id)]"
-        }) -join ', '
-        throw "Another Quartus process is active: $activeList"
+    # Concurrency guard, counted by PROJECT rather than by process.
+    #
+    # One build spawns several quartus executables (quartus_sh plus quartus_map
+    # or quartus_fit), so counting processes counts builds several times over.
+    # The old check refused whenever any quartus process existed anywhere on the
+    # machine, which meant an unrelated project compiling blocked this one -- on
+    # 29 Jul 2026 that cost four separate SSV builds their slot.
+    #
+    # Two concurrent builds are fine on this hardware: a single-processor fit
+    # uses about 2-3.5 GB and one core of 24. What is NOT fine is two builds on
+    # the SAME project, which corrupts the shared compilation database, so that
+    # case is always refused regardless of the limit.
+    $maxConcurrentBuilds = 2
+
+    $running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'quartus%'" -ErrorAction SilentlyContinue)
+    $projects = @($running | ForEach-Object {
+        # Project name is the -c argument, else the last bare token.
+        if ($_.CommandLine -match '-c\s+"?([A-Za-z0-9_.\-]+)"?') { $Matches[1] }
+        elseif ($_.CommandLine -match '"?([A-Za-z0-9_.\-]+)"?\s*$') { $Matches[1] }
+    } | Where-Object { $_ } | Sort-Object -Unique)
+
+    if ($projects -contains $project) {
+        throw "This project ($project) is already being compiled. Two builds sharing one compilation database will corrupt it."
+    }
+    if ($projects.Count -ge $maxConcurrentBuilds) {
+        throw "$($projects.Count) builds already running ($($projects -join ', ')); limit is $maxConcurrentBuilds. Wait for one to finish."
+    }
+    if ($projects.Count -gt 0) {
+        Write-Host "note: building alongside $($projects -join ', ')"
     }
 
     $map = Join-Path $quartusBin "quartus_map.exe"

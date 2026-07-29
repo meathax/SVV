@@ -154,13 +154,15 @@ wire [16:0] spr_addr  = a[17:1];
 wire [15:0] pal_addr  = a[16:1];
 wire  [5:0] scr_addr  = a[6:1];
 
-wire [15:0] wram_q, spr_q, pal_q;
+wire [15:0] wram_q, pal_q;
+wire [15:0] spr_q;
 logic [15:0] scroll_q;
 wire [16:0] renderer_spr_addr;
 wire [16:0] bg_spr_addr, obj_spr_addr;
 wire [255:0] sprite_offsets;
 wire [511:0] tilemap_scrolls;
 wire [15:0] spr_video_q;
+wire [15:0] spr_video_next_q;
 wire [14:0] line_color;
 wire [23:0] palette_video_rgb;
 integer scroll_init_i;
@@ -172,12 +174,61 @@ s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
     .byteena_b(2'b00), .wren_b(1'b0), .q_b()
 );
 
-s32_big_dpram #(.ADDR_WIDTH(17), .NUM_WORDS(131072)) sprite_ram (
-    .clock_a(clk_sys), .address_a(spr_addr), .data_a(m_wdata),
-    .byteena_a(m_be), .wren_a(m_req && m_we && sel_sprram), .q_a(spr_q),
-    .clock_b(clk_sys), .address_b(renderer_spr_addr), .data_b(16'd0),
-    .byteena_b(2'b00), .wren_b(1'b0), .q_b(spr_video_q)
+// Sprite RAM is split by word parity, exactly as ssv_palette_ram is. Both
+// banks are addressed by the same index (word address >> 1), so one address
+// hands the renderer the word at `addr` *and* the word at `addr | 1` in the
+// same cycle.
+//
+// That matters because ssv_cached_sprite_renderer's tile_address() is always
+// even: base = page << (size_shift+2) with size_shift >= 8, column =
+// (x & mask & 0x1fff0) << 2, and row = (y & 0x1f0) >> 3 are each even. A tile's
+// 16-bit code and its 16-bit attribute are therefore an even/odd pair at one
+// bank index, and the renderer no longer needs a second address cycle to walk
+// from one to the other -- two cycles saved out of ten per drawn tile, which is
+// what decides whether a heavily-loaded scanline makes its deadline.
+//
+// Readers at arbitrary addresses (the descriptor-cache build walking the global
+// and local lists, the row-scroll table lookup) still work: for an odd address
+// the wanted word is the odd bank at the same index, selected by the registered
+// parity bit below. Only `spr_video_next_q` requires an even address.
+//
+// Block RAM is unchanged: 2 x 65536 x 16 is the same 2,097,152 bits as
+// 1 x 131072 x 16, and a 16-bit-wide true-dual-port M10K holds 512 words either
+// way (256 blocks before, 128 + 128 after). This is reasoned, not fitted --
+// no Quartus run was made.
+logic spr_cpu_bank_d;
+logic spr_video_bank_d;
+wire [15:0] spr_even_cpu_q, spr_odd_cpu_q;
+wire [15:0] spr_even_video_q, spr_odd_video_q;
+
+always_ff @(posedge clk_sys) begin
+    spr_cpu_bank_d   <= spr_addr[0];
+    spr_video_bank_d <= renderer_spr_addr[0];
+end
+
+s32_big_dpram #(.ADDR_WIDTH(16), .NUM_WORDS(65536)) sprite_ram_even (
+    .clock_a(clk_sys), .address_a(spr_addr[16:1]), .data_a(m_wdata),
+    .byteena_a(m_be),
+    .wren_a(m_req && m_we && sel_sprram && !spr_addr[0]), .q_a(spr_even_cpu_q),
+    .clock_b(clk_sys), .address_b(renderer_spr_addr[16:1]), .data_b(16'd0),
+    .byteena_b(2'b00), .wren_b(1'b0), .q_b(spr_even_video_q)
 );
+
+s32_big_dpram #(.ADDR_WIDTH(16), .NUM_WORDS(65536)) sprite_ram_odd (
+    .clock_a(clk_sys), .address_a(spr_addr[16:1]), .data_a(m_wdata),
+    .byteena_a(m_be),
+    .wren_a(m_req && m_we && sel_sprram && spr_addr[0]), .q_a(spr_odd_cpu_q),
+    .clock_b(clk_sys), .address_b(renderer_spr_addr[16:1]), .data_b(16'd0),
+    .byteena_b(2'b00), .wren_b(1'b0), .q_b(spr_odd_video_q)
+);
+
+// One-cycle read latency, so the parity that selects the bank is the one that
+// was presented with the address, not the current one.
+assign spr_q          = spr_cpu_bank_d   ? spr_odd_cpu_q   : spr_even_cpu_q;
+assign spr_video_q    = spr_video_bank_d ? spr_odd_video_q : spr_even_video_q;
+// The word after `renderer_spr_addr`; meaningful only for an even address,
+// which is the only case any consumer uses it in.
+assign spr_video_next_q = spr_odd_video_q;
 
 ssv_palette_ram palette_ram (
     .clk(clk_sys), .cpu_addr(pal_addr), .cpu_data(m_wdata),
@@ -278,6 +329,7 @@ wire [24:4] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
 wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
+logic overrun_deadline, overrun_cachefull;
 wire dbg_hide_obj, dbg_hide_bg;
 
 assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
@@ -336,6 +388,7 @@ ssv_bg_renderer background_renderer (
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
     .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
     .spr_addr(bg_spr_addr), .spr_data(spr_video_q),
+    .spr_data_next(spr_video_next_q),
     .rom_req(bg_rom_req), .rom_addr(bg_rom_addr),
     .rom_data(sdr_p2_dout), .rom_ack(bg_rom_ack),
     .plot_we(bg_plot_we), .plot_x(bg_plot_x),
@@ -357,6 +410,7 @@ ssv_cached_sprite_renderer sprite_renderer (
     .sprite_offsets(sprite_offsets), .shadow_4bit(scroll[59][7]),
     .tilemap_scrolls(tilemap_scrolls),
     .spr_addr(obj_spr_addr), .spr_data(spr_video_q),
+    .spr_data_next(spr_video_next_q),
     .rom_req(obj_rom_req), .rom_addr(obj_rom_addr),
     .rom_data(sdr_p2_dout), .rom_ack(obj_rom_ack),
     .plot_we(obj_plot_we), .plot_x(obj_plot_x),
@@ -370,11 +424,22 @@ ssv_cached_sprite_renderer sprite_renderer (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst)
+    if (rst) begin
         renderer_overrun <= 1'b0;
-    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
-        // Line deadline miss, or descriptor/line-slot cache overflow.
-        renderer_overrun <= 1'b1;
+        overrun_deadline <= 1'b0;
+        overrun_cachefull <= 1'b0;
+    end
+    else begin
+        // Split by cause. One bit could not tell a missed line deadline from a
+        // full descriptor cache, and on hardware the sticky indicator lit with
+        // no per-line marks -- which points at the cache, but could not prove
+        // it. renderer_overrun keeps its original meaning (either cause) so the
+        // LED and every existing check are unchanged.
+        if (line_buffer_start && renderer_busy) overrun_deadline <= 1'b1;
+        if (obj_cache_overflow)                 overrun_cachefull <= 1'b1;
+        if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
+            renderer_overrun <= 1'b1;
+    end
 end
 
 wire vector_we = m_req && m_we && sel_irqvec;
@@ -437,6 +502,8 @@ ssv_debug_overlay debug_overlay (
     .renderer_busy(renderer_busy),
     .gfx_wait(sdr_p2_req && !sdr_p2_ack),
     .overrun_sticky(renderer_overrun),
+    .overrun_deadline(overrun_deadline),
+    .overrun_cachefull(overrun_cachefull),
     .rgb_in(core_pixel), .rgb_out(rgb),
     .hide_obj(dbg_hide_obj), .hide_bg(dbg_hide_bg)
 );

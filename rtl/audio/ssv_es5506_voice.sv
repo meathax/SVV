@@ -83,6 +83,20 @@ typedef enum logic [3:0] {
 
 st_t state;
 logic [4:0] voice_i;
+// Fixed voice slot.
+//
+// The ES5506 gives every voice exactly 16 clocks, so the output sample rate is
+// clk / (16 * active voices) and is completely independent of what the voice is
+// doing. This engine instead emitted a sample whenever the last voice's state
+// machine happened to finish -- nine states minimum, plus however long the
+// sample fetch took -- so the rate moved with voice count AND with SDRAM
+// latency. Sound effects (few voices) sounded right while music (many voices)
+// played at the wrong pitch and drifted as instruments entered and left.
+//
+// slot_cnt paces each voice to the full 16 ticks regardless of how early its
+// work finishes.
+localparam int SLOT_TICKS = 16;
+logic [4:0] slot_cnt;
 logic [3:0] filtcount [0:31];
 logic signed [23:0] mix_l, mix_r;
 logic signed [15:0] s1, s2;
@@ -173,6 +187,7 @@ always_ff @(posedge clk) begin
     if (rst) begin
         state <= S_START;
         voice_i <= '0;
+        slot_cnt <= 5'd0;
         sdr_req <= 1'b0;
         sdr_addr <= '0;
         got_ack <= 1'b0;
@@ -243,7 +258,9 @@ always_ff @(posedge clk) begin
         end
 
         if (ce) begin
-            unique case (state)
+            if (slot_cnt != SLOT_TICKS[4:0] - 5'd1) slot_cnt <= slot_cnt + 5'd1;
+
+        unique case (state)
                 S_START: begin
                     cr       <= eng_cr_valid ? eng_cr : 16'h0003;
                     cr_valid <= eng_cr_valid;
@@ -490,6 +507,15 @@ always_ff @(posedge clk) begin
                 end
 
                 S_NEXT: begin
+                    // Hold here until this voice has consumed its whole
+                    // 16-tick slot. Everything below runs on the last tick, so
+                    // the sample period is exactly 16 * (active_voices + 1)
+                    // ticks whatever the fetch and filter took.
+                    if (slot_cnt != SLOT_TICKS[4:0] - 5'd1) begin
+                        state <= S_NEXT;
+                    end
+                    else begin
+                    slot_cnt <= 5'd0;
                     if (voice_i == active_voices) begin
                         if (mix_l > 24'sh007fff) audio_l <= 16'sh7fff;
                         else if (mix_l < -24'sh008000) audio_l <= -16'sh8000;
@@ -504,6 +530,7 @@ always_ff @(posedge clk) begin
                     end else
                         voice_i <= voice_i + 5'd1;
                     state <= S_START;
+                    end
                 end
 
                 default: state <= S_START;

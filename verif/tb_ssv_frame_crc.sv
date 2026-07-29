@@ -146,6 +146,15 @@ integer irq_entries_post_ve, vb_pulses_post_ve;
 integer diag_i;
 logic [31:0] list_crc, scroll_crc, spr8k_crc, pal_crc;
 
+// Sprite RAM is two parity banks in ssv_core (even words / odd words at the
+// same bank index), so recombine them here. The diagnostic CRCs below then see
+// exactly the flat 131072-word array they saw when it was a single dpram.
+function automatic logic [15:0] spr_peek(input logic [16:0] word_addr);
+    spr_peek = word_addr[0]
+        ? dut.sprite_ram_odd.sim_peek(word_addr[16:1])
+        : dut.sprite_ram_even.sim_peek(word_addr[16:1]);
+endfunction
+
 ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 // With the real controller the core must stay in reset until the chip has
@@ -262,7 +271,7 @@ always_ff @(posedge clk_sys) begin
         tm_state_d <= dut.sprite_renderer.state;
         if (dump_tilemap_frame >= 0 && post_ve_frames == dump_tilemap_frame &&
             tm_state_d != dut.sprite_renderer.state &&
-            dut.sprite_renderer.state == 6'd32) begin   // TILE_PREP
+            dut.sprite_renderer.state == 6'd30) begin   // TILE_PREP
             $display("TM f=%0d y=%0d grp=%0d mode=%04x sz=%0d sx=%05x mapx=%05x mapy=%05x addr=%05x code=%04x attr=%04x scrx=%0d",
                      post_ve_frames, dut.sprite_renderer.target_y_latched,
                      dut.sprite_renderer.prep_tile_group,
@@ -642,13 +651,13 @@ always_ff @(posedge clk_sys) begin
                     for (diag_i = 0; diag_i < 8192; diag_i = diag_i + 1) begin
                         spr8k_crc = ssv_crc32_byte(
                             ssv_crc32_byte(spr8k_crc,
-                                dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
-                            dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                                spr_peek(diag_i[16:0])[7:0]),
+                            spr_peek(diag_i[16:0])[15:8]);
                         if (diag_i < 512)
                             list_crc = ssv_crc32_byte(
                                 ssv_crc32_byte(list_crc,
-                                    dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
-                                dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                                    spr_peek(diag_i[16:0])[7:0]),
+                                spr_peek(diag_i[16:0])[15:8]);
                     end
                     scroll_crc = 32'hffffffff;
                     for (diag_i = 0; diag_i < 64; diag_i = diag_i + 1) begin
@@ -713,13 +722,13 @@ always_ff @(posedge clk_sys) begin
                 for (diag_i = 0; diag_i < 8192; diag_i = diag_i + 1) begin
                     spr8k_crc = ssv_crc32_byte(
                         ssv_crc32_byte(spr8k_crc,
-                            dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
-                        dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                            spr_peek(diag_i[16:0])[7:0]),
+                        spr_peek(diag_i[16:0])[15:8]);
                     if (diag_i < 512)
                         list_crc = ssv_crc32_byte(
                             ssv_crc32_byte(list_crc,
-                                dut.sprite_ram.sim_peek(diag_i[16:0])[7:0]),
-                            dut.sprite_ram.sim_peek(diag_i[16:0])[15:8]);
+                                spr_peek(diag_i[16:0])[7:0]),
+                            spr_peek(diag_i[16:0])[15:8]);
                 end
                 scroll_crc = 32'hffffffff;
                 for (diag_i = 0; diag_i < 64; diag_i = diag_i + 1) begin
@@ -861,16 +870,20 @@ always_ff @(posedge clk_sys) begin
         end
         else if (dut.obj_busy) begin
             obj_line_cycles <= obj_line_cycles + 1;
-            if (dut.sprite_renderer.state == 6'd33)
+            // Encoding shifted down by two when TILE_ATTR_ADDR/TILE_ATTR_WAIT
+            // were removed: FETCH_START 33->31, TILE_PREP 32->30,
+            // FETCH_WAIT 34->32. RENDER_PREP is still 22. The states observed
+            // are unchanged, only their numbers.
+            if (dut.sprite_renderer.state == 6'd31)
                 obj_rom_wait_cycles <= obj_rom_wait_cycles + 1;
             if (dut.sprite_renderer.state == 6'd22)
                 obj_line_descriptors <= obj_line_descriptors + 1;
-            if (dut.sprite_renderer.state == 6'd32) begin
+            if (dut.sprite_renderer.state == 6'd30) begin
                 obj_line_fetches <= obj_line_fetches + 1;
                 if (dut.sprite_renderer.render_tilemap)
                     obj_line_tilemap_fetches <= obj_line_tilemap_fetches + 1;
             end
-            if (dut.sprite_renderer.state == 6'd34)
+            if (dut.sprite_renderer.state == 6'd32)
                 obj_line_plot_cycles <= obj_line_plot_cycles + 1;
         end
         else if (obj_busy_d && obj_line_cycles > obj_max_line_cycles) begin
