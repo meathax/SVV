@@ -43,5 +43,5 @@
     <dip bits="14" name="Flip Screen" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

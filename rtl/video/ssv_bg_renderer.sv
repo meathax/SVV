@@ -5,6 +5,7 @@
 module ssv_bg_renderer (
     input  logic        clk,
     input  logic        rst,
+    input  ssv_pkg::ssv_cfg_t cfg,
     input  logic        line_start,
     input  logic  [8:0] target_y,
     input  logic        clear_done,
@@ -24,7 +25,7 @@ module ssv_bg_renderer (
     input  logic [15:0] spr_data_next,
 
     output logic         rom_req,
-    output logic  [24:4] rom_addr,
+    output logic  [ssv_pkg::SDR_AW:4] rom_addr,
     input  logic [127:0] rom_data,
     input  logic         rom_ack,
 
@@ -74,11 +75,18 @@ logic [31:0] plane01, plane23, plane45, plane67;
 logic [127:0] pens;
 logic signed [10:0] global_y_base_s;
 
+// MAME's init_ssv builds m_tile_code[i] = bitswap<4>(i,0,1,2,3) << 16, which
+// is attr[13:10] REVERSED. cairblad uses init_ssv_tilescram, whose table is the
+// identity (m_tile_code[i] = i << 16), so the high nibble passes through in
+// natural order. One config bit selects between them.
 function automatic logic [19:0] expand_code(
+    input ssv_pkg::ssv_cfg_t cfg,
     input logic [15:0] low,
     input logic [15:0] attr
 );
-    expand_code = {{attr[10], attr[11], attr[12], attr[13]}, low};
+    expand_code = cfg.tile_code_identity
+                ? {attr[13:10], low}
+                : {{attr[10], attr[11], attr[12], attr[13]}, low};
 endfunction
 
 function automatic logic signed [10:0] signed10(input logic [15:0] value);
@@ -119,7 +127,7 @@ function automatic logic [16:0] tile_address(
 endfunction
 
 ssv_gfx_row_fetch fetch (
-    .clk(clk), .rst(rst), .start(fetch_start),
+    .clk(clk), .rst(rst), .cfg(cfg), .start(fetch_start),
     .tile_code(fetch_code), .tile_row(fetch_row),
     .rom_req(rom_req), .rom_addr(rom_addr),
     .rom_data(rom_data), .rom_ack(rom_ack),
@@ -278,9 +286,9 @@ always_ff @(posedge clk) begin
                 fetch_row <= tile_flip_y ? ~map_y[2:0] : map_y[2:0];
 
                 if (tile_flip_y ? !map_y[3] : map_y[3])
-                    fetch_code <= expand_code(tile_code_low, tile_attr) + 1'd1;
+                    fetch_code <= expand_code(cfg, tile_code_low, tile_attr) + 1'd1;
                 else
-                    fetch_code <= expand_code(tile_code_low, tile_attr);
+                    fetch_code <= expand_code(cfg, tile_code_low, tile_attr);
                 state <= FETCH_START;
             end
 

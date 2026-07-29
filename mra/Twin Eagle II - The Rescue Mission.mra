@@ -9,6 +9,9 @@
   <manufacturer>Seta</manufacturer>
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
+  <rom index="1">
+    <part>53010218100103440F02010F00000019</part>
+  </rom>
   <rom index="0" zip="twineag2.zip">
     <!-- program -->
     <part name="sx002-12.u22" crc="846044dc"/>
@@ -42,5 +45,5 @@
     <dip bits="14" name="Flip Screen" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

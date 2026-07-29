@@ -3,22 +3,27 @@
 // forever on ext_done while never starting an SDRAM cycle (ext_busy stuck 0).
 
 module tb_ssv_rom_write_ack;
+
+// Layout comes from ssv_pkg, not a local copy: five benches used to
+// restate 0x0100000/0x1100000/0x1160000 and a divergence between them and
+// the RTL is the classic "wrong ROM load offset" fake bug.
+import ssv_pkg::*;
 logic clk_sys = 0;
 always #5 clk_sys = ~clk_sys;
 logic rst = 1;
 logic ce_cpu = 1;
 logic sdr_p0_req, sdr_p0_ack;
-logic [24:1] sdr_p0_addr;
+logic [SDR_AW:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
 logic sdr_p2_req, sdr_p2_ack;
-logic [24:4] sdr_p2_addr;
+logic [SDR_AW:4] sdr_p2_addr;
 logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
-logic [24:1] sdr_p4_addr;
+logic [SDR_AW:1] sdr_p4_addr;
 logic [15:0] sdr_p4_dout;
 
-logic [24:1] sdr_wr_addr;
+logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic [23:0] rgb;
@@ -29,6 +34,7 @@ logic [23:0] debug_status;
 integer cycles;
 
 ssv_core dut (
+    .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),

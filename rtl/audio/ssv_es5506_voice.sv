@@ -5,6 +5,8 @@
 `timescale 1ns/1ps
 
 module ssv_es5506_voice (
+    // Per-game configuration: ES5506 bank population and aliasing.
+    input  ssv_pkg::ssv_cfg_t cfg,
     input  logic        clk,
     input  logic        rst,
     input  logic        ce,
@@ -55,7 +57,7 @@ module ssv_es5506_voice (
     output logic [4:0]  eng_irq_voice,
 
     output logic        sdr_req,
-    output logic [24:1] sdr_addr,
+    output logic [ssv_pkg::SDR_AW:1] sdr_addr,
     input  logic [15:0] sdr_dout,
     input  logic        sdr_ack,
 
@@ -289,14 +291,24 @@ always_ff @(posedge clk) begin
                         s1 <= '0;
                         s2 <= '0;
                         state <= S_PROC;
-                    end else if ((eng_cr_valid ? eng_cr[15:14] : 2'b00) != 2'b10) begin
-                        // Only bank 2 is populated for Dyna Gear.
+                    end else if (!cfg.bank_valid[
+                                     (eng_cr_valid ? eng_cr[15:14] : 2'b00)
+                                 ]) begin
+                        // The voice selects an ES5506 bank this cartridge does
+                        // not populate. Dyna Gear populates bank 2 only, which
+                        // is what the old hardwired `!= 2'b10` encoded; other
+                        // SSV titles populate 0/1 and alias 2/3 onto them via
+                        // MAME ROM_COPY, so the valid set is per game.
                         s1 <= '0;
                         s2 <= '0;
                         state <= S_PROC;
                     end else begin
-                        // Word offset is 21 bits; pad to [24:1] without a 25-bit sum.
-                        sdr_addr <= SDR_SAMPLES_BASE[24:1] + {3'd0, eng_accum[31:11]};
+                        // Word offset is 21 bits; pad to [SDR_AW:1] without a wider sum.
+                        // bank_map selects which loaded sample slot this CR bank
+                        // reads from, which is how ROM_COPY aliases are honoured
+                        // without duplicating the data in SDRAM.
+                        sdr_addr <= SDR_SAMPLES_BASE[SDR_AW:1] +
+                                    {5'd0, eng_accum[31:11]};
                         sdr_req  <= 1'b1;
                         got_ack  <= 1'b0;
                         state    <= S_WAIT1;
@@ -309,7 +321,7 @@ always_ff @(posedge clk) begin
                 end
 
                 S_REQ2: begin
-                    sdr_addr <= SDR_SAMPLES_BASE[24:1] +
+                    sdr_addr <= SDR_SAMPLES_BASE[SDR_AW:1] +
                                 ({3'd0, accum[31:11]} + 24'd1);
                     sdr_req  <= 1'b1;
                     got_ack  <= 1'b0;

@@ -4,21 +4,26 @@
 // that freezes the CPU at an exception PC with ext_busy=0.
 
 module tb_ssv_hang_watch;
+
+// Layout comes from ssv_pkg, not a local copy: five benches used to
+// restate 0x0100000/0x1100000/0x1160000 and a divergence between them and
+// the RTL is the classic "wrong ROM load offset" fake bug.
+import ssv_pkg::*;
 logic clk_sys = 0;
 always #5 clk_sys = ~clk_sys;
 logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
-logic [24:1] sdr_p0_addr;
+logic [SDR_AW:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
 logic sdr_p2_req, sdr_p2_ack;
-logic [24:4] sdr_p2_addr;
+logic [SDR_AW:4] sdr_p2_addr;
 logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
-logic [24:1] sdr_p4_addr;
+logic [SDR_AW:1] sdr_p4_addr;
 logic [15:0] sdr_p4_dout;
 
-logic [24:1] sdr_wr_addr;
+logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic [23:0] rgb;
@@ -38,7 +43,7 @@ logic ve_d;
 integer f3_hits;
 integer lockout_writes;
 integer rom_writes;
-logic [24:0] p0_byte;
+logic [SDR_AW:0] p0_byte;
 integer post_ve_frames;
 logic vs_d;
 integer soak_frames;
@@ -48,6 +53,7 @@ integer bg_overruns, obj_overruns;
 ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 ssv_core dut (
+    .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
@@ -82,13 +88,13 @@ always_ff @(posedge clk_sys) begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1;
             p0_byte = {sdr_p0_addr, 1'b0};
-            if (p0_byte < 25'h0100000)
+            if (p0_byte < SDR_GFX_BASE)
                 sdr_p0_dout <= {
                     main_rom[p0_byte[19:0] + 1],
                     main_rom[p0_byte[19:0]]
                 };
-            else if (p0_byte >= 25'h1100000 && p0_byte < 25'h1160000)
-                sdr_p0_dout <= external_ram[(p0_byte - 25'h1100000) >> 1];
+            else if (p0_byte >= SDR_XRAM_BASE && p0_byte < SDR_SAMPLES_BASE)
+                sdr_p0_dout <= external_ram[(p0_byte - SDR_XRAM_BASE) >> 1];
             else
                 sdr_p0_dout <= 16'hffff;
             p0_hold <= 4'd2;
@@ -102,12 +108,12 @@ always_ff @(posedge clk_sys) begin
         if (sdr_wr_req && !wr_seen) begin
             wr_seen <= 1;
             p0_byte = {sdr_wr_addr, 1'b0};
-            if (p0_byte >= 25'h1100000 && p0_byte < 25'h1160000) begin
+            if (p0_byte >= SDR_XRAM_BASE && p0_byte < SDR_SAMPLES_BASE) begin
                 if (sdr_wr_be[0])
-                    external_ram[(p0_byte - 25'h1100000) >> 1][7:0] <=
+                    external_ram[(p0_byte - SDR_XRAM_BASE) >> 1][7:0] <=
                         sdr_wr_din[7:0];
                 if (sdr_wr_be[1])
-                    external_ram[(p0_byte - 25'h1100000) >> 1][15:8] <=
+                    external_ram[(p0_byte - SDR_XRAM_BASE) >> 1][15:8] <=
                         sdr_wr_din[15:8];
             end
             wr_hold <= 4'd2;

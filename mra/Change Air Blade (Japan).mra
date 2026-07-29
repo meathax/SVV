@@ -8,6 +8,9 @@
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
+  <rom index="1">
+    <part>53010220120003000101010F00000063</part>
+  </rom>
   <rom index="0" zip="cairblad.zip">
     <!-- program -->
     <part name="ac1810e0.u32" crc="13a0b4c2"/>
@@ -35,5 +38,5 @@
     <dip bits="13,14" name="Bonus Life" ids="Every 2 Mil,2 Mil/6 Mil,4 Million,None" values="2,3,1,0"/>
     <dip bits="15" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

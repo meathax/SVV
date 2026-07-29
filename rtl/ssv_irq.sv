@@ -6,6 +6,12 @@ module ssv_irq (
     input              clk,
     input              rst,
     input              vblank_pulse,
+    // Scanline-0 pulse, and whether this board raises IRQ level 1 on it.
+    // MAME's init_ssv_irq1 sets m_interrupt_ultrax for ultrax and twineag2;
+    // ssv.cpp notes it is "needed by ultrax to coin up, breaks cairblad",
+    // which is why it is per game and not unconditional.
+    input              line0_pulse,
+    input              irq_level1_line0,
 
     input              vector_we,
     input        [2:0] vector_level,
@@ -45,6 +51,12 @@ always_ff @(posedge clk) begin
 
         if (vblank_pulse)
             requested[3] <= 1'b1;
+
+        // Level 1 at scanline 0, for boards whose init sets
+        // m_interrupt_ultrax (ultrax, twineag2). Raised alongside the level-3
+        // vblank request, never instead of it.
+        if (line0_pulse && irq_level1_line0)
+            requested[1] <= 1'b1;
 
         if (vector_we)
             vectors[vector_level] <= vector_data[2:0];

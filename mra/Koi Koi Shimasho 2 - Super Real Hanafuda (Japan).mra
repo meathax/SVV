@@ -8,6 +8,9 @@
   <year>1997</year>
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010420120003440F00000F00000011</part>
+  </rom>
   <rom index="0" zip="koikois2.zip">
     <!-- program -->
     <part repeat="0x200000">00</part>
@@ -52,5 +55,5 @@
     <dip bits="10" name="Nudity" ids="No,Yes" values="0,1"/>
     <dip bits="14,15" name="Communication" ids="None,Board 1 (Main),Board 2 (Sub)" values="3,1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

@@ -7,6 +7,9 @@
   <year>2000</year>
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010420120004040300000F0000005C</part>
+  </rom>
   <rom index="0" zip="janjans2.zip">
     <!-- program -->
     <part name="jan2-dat.u28" crc="0c9c62bf"/>
@@ -48,5 +51,5 @@
     <dip bits="12,13" name="Initial Score (vs CPU)" ids="1000,1500,2000,3000" values="2,3,1,0"/>
     <dip bits="14,15" name="Communication" ids="None,Transmitter,Receiver" values="3,1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

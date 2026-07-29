@@ -1,22 +1,27 @@
 `timescale 1ns/1ps
 
 module tb_ssv_realrom_boot;
+
+// Layout comes from ssv_pkg, not a local copy: five benches used to
+// restate 0x0100000/0x1100000/0x1160000 and a divergence between them and
+// the RTL is the classic "wrong ROM load offset" fake bug.
+import ssv_pkg::*;
 logic clk_sys = 0;
 always #5 clk_sys = ~clk_sys;
 logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
-logic [24:1] sdr_p0_addr;
+logic [SDR_AW:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
 logic sdr_p2_req, sdr_p2_ack;
-logic [24:4] sdr_p2_addr;
+logic [SDR_AW:4] sdr_p2_addr;
 logic [127:0] sdr_p2_dout;
 
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
-logic [24:1] sdr_p4_addr;
+logic [SDR_AW:1] sdr_p4_addr;
 logic [15:0] sdr_p4_dout;
 
-logic [24:1] sdr_wr_addr;
+logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic [23:0] rgb;
@@ -48,12 +53,13 @@ logic diff_count_started;
 longint unsigned retire_count, next_irq_retire;
 logic p0_seen, wr_seen, p4_seen;
 logic [3:0] ack_hold, wr_hold, p4_hold;
-logic [24:0] p0_byte_addr;
+logic [SDR_AW:0] p0_byte_addr;
 integer ext_index;
 logic [31:0] first_changed_pc;
 logic booted;
 
 ssv_core dut (
+    .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
@@ -108,14 +114,14 @@ always_ff @(posedge clk_sys) begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1;
             p0_byte_addr = {sdr_p0_addr, 1'b0};
-            if (p0_byte_addr < 25'h0100000)
+            if (p0_byte_addr < SDR_GFX_BASE)
                 sdr_p0_dout <= {
                     rom_bytes[p0_byte_addr[19:0] + 1],
                     rom_bytes[p0_byte_addr[19:0]]
                 };
-            else if (p0_byte_addr >= 25'h1100000 &&
-                     p0_byte_addr < 25'h1160000) begin
-                ext_index = (p0_byte_addr - 25'h1100000) >> 1;
+            else if (p0_byte_addr >= SDR_XRAM_BASE &&
+                     p0_byte_addr < SDR_SAMPLES_BASE) begin
+                ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
                 sdr_p0_dout <= external_ram[ext_index];
             end
             else
@@ -131,9 +137,9 @@ always_ff @(posedge clk_sys) begin
         if (sdr_wr_req && !wr_seen) begin
             wr_seen <= 1;
             p0_byte_addr = {sdr_wr_addr, 1'b0};
-            if (p0_byte_addr >= 25'h1100000 &&
-                p0_byte_addr < 25'h1160000) begin
-                ext_index = (p0_byte_addr - 25'h1100000) >> 1;
+            if (p0_byte_addr >= SDR_XRAM_BASE &&
+                p0_byte_addr < SDR_SAMPLES_BASE) begin
+                ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
                 if (sdr_wr_be[0])
                     external_ram[ext_index][7:0] <= sdr_wr_din[7:0];
                 if (sdr_wr_be[1])
@@ -153,11 +159,11 @@ always_ff @(posedge clk_sys) begin
             p4_seen <= 1;
             // ES5506 samples live at SDR_SAMPLES_BASE in the download image.
             p0_byte_addr = {sdr_p4_addr, 1'b0};
-            if (p0_byte_addr >= 25'h1160000 &&
+            if (p0_byte_addr >= SDR_SAMPLES_BASE &&
                 p0_byte_addr < 25'h1560000)
                 sdr_p4_dout <= {
-                    sample_bytes[p0_byte_addr - 25'h1160000 + 1],
-                    sample_bytes[p0_byte_addr - 25'h1160000]
+                    sample_bytes[p0_byte_addr - SDR_SAMPLES_BASE + 1],
+                    sample_bytes[p0_byte_addr - SDR_SAMPLES_BASE]
                 };
             else
                 sdr_p4_dout <= 16'd0;

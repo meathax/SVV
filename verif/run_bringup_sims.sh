@@ -69,6 +69,13 @@ run_one() {
 run_one tb_ssv_rom_loader \
   rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv verif/tb_ssv_rom_loader.sv
 
+# Line doubler. Shipped in 095d3b2 with "never produced a pixel"; this bench
+# found three real defects (907-vs-908 tick ratio, a one-pixel line shift, and
+# vsync emitted three times per frame) and is the regression for their fixes.
+run_one tb_ssv_scandoubler \
+  rtl/ssv_pkg.sv rtl/ssv_video_timing.sv rtl/ssv_scandoubler.sv \
+  verif/tb_ssv_scandoubler.sv
+
 run_one tb_ssv_loader_core_boot \
   "${CORE_FILES[@]}" verif/tb_ssv_loader_core_boot.sv
 

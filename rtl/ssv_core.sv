@@ -9,8 +9,12 @@ module ssv_core (
     input              rst,
     input              ce_cpu,
 
+    // Per-game configuration. The Dyna Gear record (ssv_pkg::cfg_dynagear)
+    // reproduces the behaviour that used to be hardwired here.
+    input  ssv_pkg::ssv_cfg_t cfg,
+
     output logic       sdr_p0_req,
-    output logic [24:1] sdr_p0_addr,
+    output logic [ssv_pkg::SDR_AW:1] sdr_p0_addr,
     input       [15:0] sdr_p0_dout,
     input              sdr_p0_ack,
 
@@ -19,19 +23,19 @@ module ssv_core (
     // row into one aligned 16-byte record -- see
     // docs/SDRAM_GFX_REPACK_DESIGN.md. p1 is now free.
     output logic       sdr_p2_req,
-    output logic [24:4] sdr_p2_addr,
+    output logic [ssv_pkg::SDR_AW:4] sdr_p2_addr,
     input      [127:0] sdr_p2_dout,
     input              sdr_p2_ack,
 
     output logic       sdr_wr_req,
-    output logic [24:1] sdr_wr_addr,
+    output logic [ssv_pkg::SDR_AW:1] sdr_wr_addr,
     output logic [15:0] sdr_wr_din,
     output logic [1:0] sdr_wr_be,
     input              sdr_wr_ack,
 
     // ES5506 sample fetches (16-bit SDRAM words)
     output logic       sdr_p4_req,
-    output logic [24:1] sdr_p4_addr,
+    output logic [ssv_pkg::SDR_AW:1] sdr_p4_addr,
     input       [15:0] sdr_p4_dout,
     input              sdr_p4_ack,
 
@@ -56,6 +60,9 @@ module ssv_core (
 
     output logic [23:0] rgb,
     output logic       ce_pixel,
+    // Exactly 2x ce_pixel, from the same accumulator. Used by the line
+    // doubler; see ssv_video_timing.
+    output logic       ce_pix_x2,
     output logic       hs,
     output logic       vs,
     output logic       hb,
@@ -146,7 +153,16 @@ wire sel_cpuram  = (a >= 24'h400000) && (a <= 24'h43ffff);
 // `in_extra` is tied high by the wrapper, which is correct for any game that
 // does not read it. See docs/hardware/SSV_PCB_FINDINGS_ACTION_PLAN.md item 1.
 wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
-wire sel_rom     = (a >= 24'hf00000);
+// MAME maps the program ROM as `ssv_map(map, rom)` with rom..0xffffff, and in
+// every SSV set rom == 0x1000000 - program_size: $f00000 for a 1 MB program
+// (dynagear, survarts), $e00000 for 2 MB (cairblad, twineag2, ultrax),
+// $c00000 for 4 MB (drifto94, stmblade, vasara, vasara2). So the base is a
+// function of prog_mb and does not need its own config field.
+// 0x1000000 does not fit the 24-bit CPU address, and it does not need to:
+// in 24-bit arithmetic 0x1000000 - size is exactly -size, which yields
+// 0xF00000 / 0xE00000 / 0xC00000 for 1 / 2 / 4 MB -- MAME's values.
+wire [23:0] rom_window_base = -(24'(cfg.prog_mb) << 20);
+wire sel_rom     = (a >= rom_window_base);
 wire sel_extmem  = sel_xram | sel_cpuram;
 
 // Registers, not memory, and it cannot be otherwise: every one of these 64
@@ -281,7 +297,7 @@ logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
 logic video_enable;
 ssv_video_timing timing (
-    .clk(clk_sys), .rst(rst), .ce_pixel(ce_pixel),
+    .clk(clk_sys), .rst(rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse)
 );
@@ -339,7 +355,7 @@ wire [35:0] obj_plot_x;
 wire [59:0] obj_plot_color;
 wire [31:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
-wire [24:4] bg_rom_addr, obj_rom_addr;
+wire [SDR_AW:4] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
 logic renderer_overrun;
 
@@ -386,7 +402,7 @@ ssv_line_buffer4 line_buffer (
 );
 
 ssv_bg_renderer background_renderer (
-    .clk(clk_sys), .rst(rst), .line_start(renderer_line_start),
+    .clk(clk_sys), .rst(rst), .cfg(cfg), .line_start(renderer_line_start),
     .target_y(renderer_target_y), .clear_done(line_clear_done),
     .scroll_x(scroll[0]), .scroll_y(scroll[1]), .scroll_mode(scroll[3]),
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
@@ -403,7 +419,7 @@ ssv_bg_renderer background_renderer (
 );
 
 ssv_cached_sprite_renderer sprite_renderer (
-    .clk(clk_sys), .rst(rst),
+    .clk(clk_sys), .rst(rst), .cfg(cfg),
     .cache_start(video_enable && vblank_pulse),
     .cache_deadline(cache_deadline),
     .start(bg_done),
@@ -441,6 +457,9 @@ wire [2:0] irq_reg_level = a[6:4];
 logic [7:0] irq_requested, irq_enabled;
 
 ssv_irq irqs (
+    // Scanline 0 of the visible frame; gated per game by the config.
+    .line0_pulse(ce_pixel && (hcnt == 9'd0) && (vcnt == 9'd0)),
+    .irq_level1_line0(cfg.irq_level1_line0),
     .clk(clk_sys), .rst(rst), .vblank_pulse(vblank_pulse),
     .vector_we(vector_we), .vector_level(irq_reg_level),
     .vector_data(m_wdata),
@@ -463,20 +482,20 @@ wire [23:0] core_pixel   = video_active ? palette_video_rgb : 24'h000000;
 
 assign rgb = core_pixel;
 
-function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
+function automatic [SDR_AW:0] external_byte_addr(input [23:0] cpu_addr);
     if (cpu_addr >= 24'h400000)
         external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h400000);
     else
         external_byte_addr = SDR_XRAM_BASE + (cpu_addr - 24'h160000);
 endfunction
 
-wire [24:0] ext_phys_addr = external_byte_addr(a);
+wire [SDR_AW:0] ext_phys_addr = external_byte_addr(a);
 logic      ext_busy;
 logic      ext_is_write;
 logic [15:0] ext_read_data;
 logic      ext_done;
 logic      ext_p0_req_r;
-logic [24:1] ext_p0_addr_r;
+logic [SDR_AW:1] ext_p0_addr_r;
 
 // Forward-declared: icache lookup suppresses re-arming a completed ROM read
 // while the V60 bus still holds m_req (ack_r driven in the read-mux block).
@@ -679,7 +698,7 @@ always_ff @(posedge clk_sys) begin
             !icache_p0_busy) begin
             if (m_we) begin
                 sdr_wr_req   <= 1'b1;
-                sdr_wr_addr  <= ext_phys_addr[24:1];
+                sdr_wr_addr  <= ext_phys_addr[SDR_AW:1];
                 sdr_wr_din   <= m_wdata;
                 sdr_wr_be    <= m_be;
                 ext_is_write <= 1'b1;
@@ -687,7 +706,7 @@ always_ff @(posedge clk_sys) begin
             end
             else begin
                 ext_p0_req_r  <= 1'b1;
-                ext_p0_addr_r <= ext_phys_addr[24:1];
+                ext_p0_addr_r <= ext_phys_addr[SDR_AW:1];
                 ext_is_write  <= 1'b0;
                 ext_busy      <= 1'b1;
             end
@@ -772,6 +791,7 @@ ssv_es5506_regs sound_registers (
 );
 
 ssv_es5506_voice sound_voices (
+    .cfg(cfg),
     .clk(clk_sys), .rst(rst), .ce(ce_snd),
     .active_voices(sound_active_voices),
     .eng_voice(eng_voice),
@@ -803,13 +823,24 @@ ssv_es5506_voice sound_voices (
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;
 
-// Watchdog: FBNeo / board ~3s @ 60 Hz = 180 frames without $210000 read.
+// Watchdog: FBNeo / board ~3s @ 60 Hz = 180 frames without a $210000 access.
 // Count only after video_enable so the long pre-lockout RAM clear cannot
 // self-reset the core before the game starts servicing the port.
+//
+// How the watchdog is kicked -- and whether the board has one at all -- is per
+// game, and getting this wrong is not subtle:
+//   mode 1  read-kick   dynagear, survarts, twineag2, ultrax  (reset16_r)
+//   mode 2  write-kick  vasara, vasara2                       (reset16_w)
+//   mode 0  no device   drifto94, stmblade
+// MAME's WATCHDOG_TIMER first appears at ssv.cpp:2513, after the drifto94 and
+// stmblade machine configs, so those two have no watchdog. Left unconditional,
+// this counter would reset them forever and never be kicked by vasara.
 logic       ack_r_d;
 logic [8:0] wdog_frame_cnt;
-wire        wdog_kick = m_req && !m_we && sel_io && (a[4:1] == 4'h0) &&
-                        ack_r && !ack_r_d;
+wire        wdog_addr_hit = sel_io && (a[4:1] == 4'h0) && ack_r && !ack_r_d;
+wire        wdog_kick = m_req && wdog_addr_hit &&
+                        ((cfg.wdog_mode == 2'd1) ? !m_we :
+                         (cfg.wdog_mode == 2'd2) ?  m_we : 1'b0);
 
 always_ff @(posedge clk_sys) begin
     if (rst) begin
@@ -822,7 +853,7 @@ always_ff @(posedge clk_sys) begin
         if (wdog_kick)
             wdog_frame_cnt <= 9'd0;
         else if (vblank_pulse && video_enable) begin
-            if (wdog_frame_cnt >= 9'd180)
+            if ((wdog_frame_cnt >= 9'd180) && (cfg.wdog_mode != 2'd0))
                 wdog_rst <= 1'b1;
             else
                 wdog_frame_cnt <= wdog_frame_cnt + 9'd1;

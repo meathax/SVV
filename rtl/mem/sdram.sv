@@ -22,7 +22,27 @@
 
 `timescale 1ns/1ps
 
-module sdram (
+module sdram #(
+    // SDRAM geometry. The DE10-Nano exposes SDRAM_A[12:0] and SDRAM_BA[1:0],
+    // so the row address caps at 13 bits and capacity is set by the column
+    // count:
+    //   2 + 13 +  9 = 24 bit word address ->  32 MB (4 x 8192 x  512)
+    //   2 + 13 + 10 = 25                  ->  64 MB (4 x 8192 x 1024)
+    //   2 + 13 + 11 = 26                  -> 128 MB (4 x 8192 x 2048)
+    // 128 MB is the only decomposition reachable for a 64M x 16 part: 8 banks
+    // would need BA[2] and 16384 rows would need A[13], neither of which is
+    // routed. The 11th column bit therefore rides on A11, since A10 is
+    // auto-precharge (JEDEC).
+    parameter int BANK_BITS = 2,
+    parameter int ROW_BITS  = 13,
+    parameter int COL_BITS  = 9,
+    // tRFC in clk_ram cycles, minus one (loaded into refw_cnt). Denser parts
+    // want ~110 ns = 11 cycles; the previous hardcoded 3'd6 could not even
+    // express that, which is why this is a parameter and refw_cnt is 4 bits.
+    parameter int TRFC_CYC  = 6,
+    // Refresh interval. 8192 rows / 64 ms at 96.6 MHz -> every ~755 cycles.
+    parameter int REF_CYC   = 700
+) (
     input             clk,          // clk_ram
     input             init,         // reset/init request
     output reg        ready,
@@ -41,47 +61,57 @@ module sdram (
 
     // download/write port (word writes, ROM load)
     input             wr_req,
-    input      [24:1] wr_addr,
+    input      [AW:1] wr_addr,
     input      [15:0] wr_din,
     input       [1:0] wr_be,
     output reg        wr_ack,
 
     // p0: V60
     input             p0_req,
-    input      [24:1] p0_addr,
+    input      [AW:1] p0_addr,
     output reg [15:0] p0_dout,
     output reg        p0_ack,
 
     // p1: tiles — 4-word burst, aligned to 8 bytes
     input             p1_req,
-    input      [24:3] p1_addr,
+    input      [AW:3] p1_addr,
     output reg [63:0] p1_dout,
     output reg        p1_ack,
 
     // p2: sprites — 8-word burst, aligned to 16 bytes
     input             p2_req,
-    input      [24:4] p2_addr,
+    input      [AW:4] p2_addr,
     output reg [127:0] p2_dout,
     output reg        p2_ack,
 
     // p3: Z80
     input             p3_req,
-    input      [24:1] p3_addr,
+    input      [AW:1] p3_addr,
     output reg [15:0] p3_dout,
     output reg        p3_ack,
 
     // p4: MultiPCM
     input             p4_req,
-    input      [24:1] p4_addr,
+    input      [AW:1] p4_addr,
     output reg [15:0] p4_dout,
     output reg        p4_ack,
 
     // p5: V25 program ROM - 4-word burst, aligned to 8 bytes
     input             p5_req,
-    input      [24:3] p5_addr,
+    input      [AW:3] p5_addr,
     output reg [63:0] p5_dout,
     output reg        p5_ack
 );
+
+// Derived address field positions. Everything below slices with these rather
+// than with literal bit numbers, so a geometry change cannot leave one stale
+// slice behind -- which is exactly how a silent address aliasing bug gets in.
+localparam int AW      = BANK_BITS + ROW_BITS + COL_BITS;
+localparam int COL_HI  = COL_BITS;
+localparam int ROW_LO  = COL_BITS + 1;
+localparam int ROW_HI  = COL_BITS + ROW_BITS;
+localparam int BANK_LO = ROW_HI + 1;
+localparam int BANK_HI = AW;
 
 reg [15:0] dq_out;
 reg        dq_oe;
@@ -140,7 +170,7 @@ state_t state = ST_IDLE;
 // where a mistake corrupts memory instead of merely costing time, and writes
 // are rare outside ROM download.
 reg  [3:0] row_open;            // per bank: a row is open
-reg [12:0] open_row [0:3];      // and which one
+reg [ROW_BITS-1:0] open_row [0:3];      // and which one
 reg  [1:0] prew_cnt;
 
 reg [2:0]  grant;
@@ -148,12 +178,12 @@ reg [2:0]  rr_next;
 reg [3:0]  rd_total;        // words to read (1/4/8)
 reg [3:0]  rd_issued;
 reg [3:0]  rd_captured;
-reg [24:1] xfer_addr;
+reg [AW:1] xfer_addr;
 reg        is_write;
 reg [15:0] din_r;
 reg [1:0]  be_r;
 reg [2:0]  wrrc_cnt;
-reg [2:0]  refw_cnt;
+reg [3:0]  refw_cnt;
 reg [1:0]  ack_stretch;     // acks held 2 clk_ram cycles (clk_sys is /2 sync)
 
 reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
@@ -163,10 +193,10 @@ reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
 // req or moves on to its next address.  This mirrors the latched per-slot
 // request interfaces used by mature MiSTer SDRAM frameworks.
 reg p0_pend, p1_pend, p2_pend, p3_pend, p4_pend, p5_pend, wr_pend;
-reg [24:1] p0_addr_p, p3_addr_p, p4_addr_p, wr_addr_p;
-reg [24:3] p1_addr_p;
-reg [24:3] p5_addr_p;
-reg [24:4] p2_addr_p;
+reg [AW:1] p0_addr_p, p3_addr_p, p4_addr_p, wr_addr_p;
+reg [AW:3] p1_addr_p;
+reg [AW:3] p5_addr_p;
+reg [AW:4] p2_addr_p;
 reg [15:0] wr_din_p;
 reg  [1:0] wr_be_p;
 
@@ -205,16 +235,26 @@ end
 // which is where it used to sit: it reads both, and a use-before-declaration
 // is only legal by the implicit-net rule. Pure reordering of declarations --
 // grant_row_hit has exactly one consumer, far below, and no logic changed.
-function automatic logic row_hit(input logic [1:0] bank, input logic [12:0] row);
+function automatic logic row_hit(input logic [1:0] bank,
+                                input logic [ROW_BITS-1:0] row);
     row_hit = row_open[bank] && (open_row[bank] == row);
 endfunction
 
-wire hit_p0 = row_hit(p0_addr_p[24:23], p0_addr_p[22:10]);
-wire hit_p1 = row_hit(p1_addr_p[24:23], p1_addr_p[22:10]);
-wire hit_p2 = row_hit(p2_addr_p[24:23], p2_addr_p[22:10]);
-wire hit_p3 = row_hit(p3_addr_p[24:23], p3_addr_p[22:10]);
-wire hit_p4 = row_hit(p4_addr_p[24:23], p4_addr_p[22:10]);
-wire hit_p5 = row_hit(p5_addr_p[24:23], p5_addr_p[22:10]);
+// p1/p2/p5 are declared narrower than [AW:1] (their bursts are 8- and 16-byte
+// aligned), so slicing them with [BANK_HI:BANK_LO] / [ROW_HI:ROW_LO] directly
+// would be reading bit numbers that mean something different in a narrower
+// vector. Build the full-width view first -- the same expression ST_IDLE
+// already forms when it loads xfer_addr -- and slice only that.
+wire [AW:1] p1_view = {p1_addr_p, 2'b00};
+wire [AW:1] p2_view = {p2_addr_p, 3'b000};
+wire [AW:1] p5_view = {p5_addr_p, 2'b00};
+
+wire hit_p0 = row_hit(p0_addr_p[BANK_HI:BANK_LO], p0_addr_p[ROW_HI:ROW_LO]);
+wire hit_p1 = row_hit(p1_view[BANK_HI:BANK_LO],   p1_view[ROW_HI:ROW_LO]);
+wire hit_p2 = row_hit(p2_view[BANK_HI:BANK_LO],   p2_view[ROW_HI:ROW_LO]);
+wire hit_p3 = row_hit(p3_addr_p[BANK_HI:BANK_LO], p3_addr_p[ROW_HI:ROW_LO]);
+wire hit_p4 = row_hit(p4_addr_p[BANK_HI:BANK_LO], p4_addr_p[ROW_HI:ROW_LO]);
+wire hit_p5 = row_hit(p5_view[BANK_HI:BANK_LO],   p5_view[ROW_HI:ROW_LO]);
 
 logic grant_row_hit;
 always @* begin
@@ -320,6 +360,224 @@ generate
         end
     end
 endgenerate
+
+// ---------------------------------------------------------------------------
+// Phase 0 instrumentation (C1 row conflicts, C2 service latency).
+//
+// Simulation only, so there is no synthesis impact and no `.qsf`/timing risk.
+//
+// Everything is sampled off the controller's OWN state transitions rather than
+// re-derived from the port addresses, because a re-derivation can disagree with
+// the machine it is supposed to be measuring and then the measurement is worse
+// than none.  The three exits from ST_IDLE are exhaustive and mutually
+// exclusive (sdram.sv ST_IDLE row-hit path):
+//
+//   ST_IDLE -> ST_RD        the row was already open        -> row HIT
+//   ST_IDLE -> ST_ACT       the bank was closed             -> cold MISS
+//   ST_IDLE -> ST_PRE_BANK  the WRONG row was open          -> CONFLICT
+//
+// Only the third costs the extra PRE + tRP + ACT + tRCD, and only the third
+// is attributable to another port -- so conflicts are recorded as
+// [evictor][victim], where the evictor is whichever port last ACTivated that
+// bank.  That attribution is the number Phase 2 is gated on: if
+// (p0 -> p2) and (p4 -> p2) are small, region-to-bank isolation is not worth
+// doing and the plan says to drop it.
+//
+// Port indices are 0..5 = p0..p5 and 6 = the write port (grant 3'd7 remaps to
+// 6; grant is never 6, so there is no collision).
+// ---------------------------------------------------------------------------
+localparam int SDR_NPORT = 7;
+localparam int SDR_WRI   = 6;   // write-port stats index
+localparam int SDR_UNK   = 7;   // "no recorded evictor" row in the matrix
+
+integer   sdr_row_hit   [0:SDR_NPORT-1];
+integer   sdr_row_miss  [0:SDR_NPORT-1];
+integer   sdr_conflict  [0:SDR_NPORT][0:SDR_NPORT-1];  // [evictor][victim]
+integer   sdr_conflict_total;
+integer   sdr_refresh_count;
+
+reg [2:0] sdr_row_owner       [0:3];
+reg       sdr_row_owner_valid [0:3];
+
+longint   sdr_now;
+longint   sdr_lat_sum  [0:SDR_NPORT-1];
+integer   sdr_lat_max  [0:SDR_NPORT-1];
+integer   sdr_lat_cnt  [0:SDR_NPORT-1];
+integer   sdr_lat_hist [0:SDR_NPORT-1][0:15];
+longint   sdr_req_t    [0:SDR_NPORT-1];
+reg       sdr_lat_busy [0:SDR_NPORT-1];
+
+// grant carries 3'd7 for the write port; fold it into index 6.
+wire [2:0] sdr_gi = (grant == 3'd7) ? 3'd6 : grant;
+state_t    sdr_state_d;
+
+integer sdr_i, sdr_j;
+initial begin
+    sdr_now            = 0;
+    sdr_conflict_total = 0;
+    sdr_refresh_count  = 0;
+    for (sdr_i = 0; sdr_i < SDR_NPORT; sdr_i = sdr_i + 1) begin
+        sdr_row_hit[sdr_i]  = 0;
+        sdr_row_miss[sdr_i] = 0;
+        sdr_lat_sum[sdr_i]  = 0;
+        sdr_lat_max[sdr_i]  = 0;
+        sdr_lat_cnt[sdr_i]  = 0;
+        sdr_req_t[sdr_i]    = 0;
+        sdr_lat_busy[sdr_i] = 1'b0;
+        for (sdr_j = 0; sdr_j < 16; sdr_j = sdr_j + 1)
+            sdr_lat_hist[sdr_i][sdr_j] = 0;
+    end
+    for (sdr_i = 0; sdr_i <= SDR_NPORT; sdr_i = sdr_i + 1)
+        for (sdr_j = 0; sdr_j < SDR_NPORT; sdr_j = sdr_j + 1)
+            sdr_conflict[sdr_i][sdr_j] = 0;
+    for (sdr_i = 0; sdr_i < 4; sdr_i = sdr_i + 1) begin
+        sdr_row_owner[sdr_i]       = 3'd0;
+        sdr_row_owner_valid[sdr_i] = 1'b0;
+    end
+end
+
+always @(posedge clk) begin
+    sdr_now     <= sdr_now + 1;
+    sdr_state_d <= state;
+
+    if (init) begin
+        // init's PRE-all closes every bank, exactly as row_open does above.
+        for (sdr_i = 0; sdr_i < 4; sdr_i = sdr_i + 1)
+            sdr_row_owner_valid[sdr_i] <= 1'b0;
+    end else if (init_done) begin
+        // --- C1: classify each transaction by how it left ST_IDLE ---
+        if (sdr_state_d == ST_IDLE) begin
+            case (state)
+            ST_RD: sdr_row_hit[sdr_gi] <= sdr_row_hit[sdr_gi] + 1;
+            ST_ACT: sdr_row_miss[sdr_gi] <= sdr_row_miss[sdr_gi] + 1;
+            ST_PRE_BANK: begin
+                // A wrong-row eviction. Attribute it to whoever opened it.
+                sdr_row_miss[sdr_gi] <= sdr_row_miss[sdr_gi] + 1;
+                sdr_conflict_total   <= sdr_conflict_total + 1;
+                if (sdr_row_owner_valid[xfer_addr[BANK_HI:BANK_LO]])
+                    sdr_conflict[sdr_row_owner[xfer_addr[BANK_HI:BANK_LO]]][sdr_gi] <=
+                        sdr_conflict[sdr_row_owner[xfer_addr[BANK_HI:BANK_LO]]][sdr_gi] + 1;
+                else
+                    sdr_conflict[SDR_UNK][sdr_gi] <=
+                        sdr_conflict[SDR_UNK][sdr_gi] + 1;
+            end
+            default: ;
+            endcase
+        end
+
+        // Record the owner as the row is actually activated. A write clears
+        // row_open again in ST_WR (auto-precharge), so drop ownership there
+        // or the next conflict is blamed on a row that is no longer open.
+        if (state == ST_ACT) begin
+            sdr_row_owner[xfer_addr[BANK_HI:BANK_LO]]       <= sdr_gi;
+            sdr_row_owner_valid[xfer_addr[BANK_HI:BANK_LO]] <= 1'b1;
+        end
+        if (state == ST_WR)
+            sdr_row_owner_valid[xfer_addr[BANK_HI:BANK_LO]] <= 1'b0;
+
+        // Refresh PRE-alls close every bank (see ST_IDLE refresh path).
+        if (state == ST_PRE_REF && sdr_state_d != ST_PRE_REF) begin
+            sdr_refresh_count <= sdr_refresh_count + 1;
+            for (sdr_i = 0; sdr_i < 4; sdr_i = sdr_i + 1)
+                sdr_row_owner_valid[sdr_i] <= 1'b0;
+        end
+    end
+end
+
+// --- C2: per-port req-rise -> ack-rise service latency, in clk_ram ---
+//
+// This is the number that matters to the renderer: it includes arbitration
+// queueing and the ack stretch, not just the chip transaction. The histogram
+// is 16 buckets of 4 cycles, saturating, so a long tail is visible as a
+// non-zero top bucket rather than being averaged away.
+generate
+    genvar gl;
+    for (gl = 0; gl < SDR_NPORT; gl = gl + 1) begin : g_latwatch
+        wire lreq = gl==0 ? p0_req : gl==1 ? p1_req : gl==2 ? p2_req :
+                    gl==3 ? p3_req : gl==4 ? p4_req : gl==5 ? p5_req : wr_req;
+        wire lreq_d = gl==0 ? p0_req_d : gl==1 ? p1_req_d : gl==2 ? p2_req_d :
+                      gl==3 ? p3_req_d : gl==4 ? p4_req_d : gl==5 ? p5_req_d :
+                      wr_req_d;
+        wire lack = gl==0 ? p0_ack : gl==1 ? p1_ack : gl==2 ? p2_ack :
+                    gl==3 ? p3_ack : gl==4 ? p4_ack : gl==5 ? p5_ack : wr_ack;
+        wire lack_d = gl==0 ? p0_ack_d2 : gl==1 ? p1_ack_d2 : gl==2 ? p2_ack_d2 :
+                      gl==3 ? p3_ack_d2 : gl==4 ? p4_ack_d2 : gl==5 ? p5_ack_d2 :
+                      wr_ack_d2;
+        always @(posedge clk) begin
+            automatic int ldelta;
+            automatic int lbucket;
+            if (init) begin
+                sdr_lat_busy[gl] <= 1'b0;
+            end else begin
+                // Latch the request edge. Ports are single-outstanding by
+                // contract (see REQUEST CONTRACT above), so one timestamp is
+                // exact; the watchdog above is what catches a violator.
+                if (lreq && !lreq_d) begin
+                    sdr_req_t[gl]    <= sdr_now;
+                    sdr_lat_busy[gl] <= 1'b1;
+                end
+                if (lack && !lack_d && sdr_lat_busy[gl]) begin
+                    sdr_lat_busy[gl] <= 1'b0;
+                    ldelta  = int'(sdr_now - sdr_req_t[gl]);
+                    lbucket = ldelta >> 2;
+                    if (lbucket > 15) lbucket = 15;
+                    sdr_lat_hist[gl][lbucket] <= sdr_lat_hist[gl][lbucket] + 1;
+                    sdr_lat_sum[gl] <= sdr_lat_sum[gl] + longint'(ldelta);
+                    sdr_lat_cnt[gl] <= sdr_lat_cnt[gl] + 1;
+                    if (ldelta > sdr_lat_max[gl]) sdr_lat_max[gl] <= ldelta;
+                end
+            end
+        end
+    end
+endgenerate
+
+// Called by the testbench at end of run. Nothing is printed unless asked for,
+// so existing gates keep their exact output.
+task automatic sdram_dump_stats(input string tag);
+    integer i, j, tot;
+    begin
+        $display("=== SDRAM STATS %s ===", tag);
+        $display("SDRAM_REFRESH count=%0d", sdr_refresh_count);
+        $display("SDRAM_ROWS port     hits     misses   hit%%");
+        for (i = 0; i < SDR_NPORT; i = i + 1) begin
+            tot = sdr_row_hit[i] + sdr_row_miss[i];
+            if (tot != 0)
+                $display("SDRAM_ROWS %-4s %8d %8d %6.2f",
+                         (i == SDR_WRI) ? "wr" : $sformatf("p%0d", i),
+                         sdr_row_hit[i], sdr_row_miss[i],
+                         100.0 * real'(sdr_row_hit[i]) / real'(tot));
+        end
+        $display("SDRAM_CONFLICT total=%0d  (rows=evictor, cols=victim)",
+                 sdr_conflict_total);
+        for (i = 0; i <= SDR_NPORT; i = i + 1) begin
+            tot = 0;
+            for (j = 0; j < SDR_NPORT; j = j + 1) tot = tot + sdr_conflict[i][j];
+            if (tot != 0)
+                $display("SDRAM_CONFLICT %-4s -> p0=%0d p1=%0d p2=%0d p3=%0d p4=%0d p5=%0d wr=%0d",
+                         (i == SDR_UNK) ? "none" :
+                         (i == SDR_WRI) ? "wr" : $sformatf("p%0d", i),
+                         sdr_conflict[i][0], sdr_conflict[i][1],
+                         sdr_conflict[i][2], sdr_conflict[i][3],
+                         sdr_conflict[i][4], sdr_conflict[i][5],
+                         sdr_conflict[i][6]);
+        end
+        $display("SDRAM_LAT port     count      avg    max  (clk_ram, req->ack)");
+        for (i = 0; i < SDR_NPORT; i = i + 1)
+            if (sdr_lat_cnt[i] != 0)
+                $display("SDRAM_LAT %-4s %9d %8.2f %6d",
+                         (i == SDR_WRI) ? "wr" : $sformatf("p%0d", i),
+                         sdr_lat_cnt[i],
+                         real'(sdr_lat_sum[i]) / real'(sdr_lat_cnt[i]),
+                         sdr_lat_max[i]);
+        for (i = 0; i < SDR_NPORT; i = i + 1) begin
+            if (sdr_lat_cnt[i] == 0) continue;
+            $write("SDRAM_LAT_HIST %-4s",
+                   (i == SDR_WRI) ? "wr" : $sformatf("p%0d", i));
+            for (j = 0; j < 16; j = j + 1) $write(" %0d", sdr_lat_hist[i][j]);
+            $write("\n");
+        end
+    end
+endtask
 `endif
 
 // Centre the SDRAM board interface with SDRAM_CLK forwarded at 180 degrees.
@@ -328,6 +586,15 @@ endgenerate
 // SDC input-delay and multicycle constraints, so Quartus can place dq_in in
 // the input IOE. The fourth pipe tap transfers the already-registered word
 // into the response buffer one cycle later without a pin-to-core critical path.
+// CAS address field. A[9:0] carry column bits 0..9 (the upper ones are
+// don't-cares on a part with fewer than 10 column bits, which is why the 32 MB
+// build could drive them freely), A[10] is auto-precharge, and A[11] carries
+// the 11th column bit on a 2048-column (128 MB) part. A[12] is unused during
+// CAS on every geometry here.
+function automatic logic [12:0] cas_addr(input logic [AW:1] a, input logic ap);
+    cas_addr = {1'b0, (COL_BITS >= 11) ? a[11] : 1'b0, ap, a[10:1]};
+endfunction
+
 reg [15:0] dq_in;
 reg [3:0]  cl_pipe;
 reg [15:0] cap_buf [0:7];
@@ -394,7 +661,7 @@ always @(posedge clk) begin
         dqm <= 2'b00;
         // refresh scheduling: 8192 rows / 64ms @ 96.65MHz -> every 755 cyc
         ref_cnt <= ref_cnt + 1'd1;
-        if (ref_cnt == 10'd700) begin ref_cnt <= 0; ref_pend <= 1'b1; end
+        if (ref_cnt == REF_CYC[9:0]) begin ref_cnt <= 0; ref_pend <= 1'b1; end
 
         // Read capture after CL2 and the centred IOE register above.
         cl_pipe <= {cl_pipe[2:0], 1'b0};
@@ -411,12 +678,12 @@ always @(posedge clk) begin
         ST_IDLE: begin
             if (ref_pend && cl_pipe == 0) begin
                 cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
-                refw_cnt <= 3'd1;             // tRP >= 2 cycles before REF
+                refw_cnt <= 4'd1;             // tRP >= 2 cycles before REF
                 row_open <= 4'd0;             // PRE-all closes every bank
                 state <= ST_PRE_REF;
             end
             else if (wr_pend | read_valid) begin
-                logic [24:1] a;
+                logic [AW:1] a;
                 logic        is_write_next;
                 is_write_next = wr_pend;
                 if      (wr_pend) begin grant <= 3'd7; a = wr_addr_p;           rd_total <= 4'd1; is_write <= 1'b1; end
@@ -454,7 +721,7 @@ always @(posedge clk) begin
                 // pending-request -> priority mux -> output-DDR path.
                 if (!is_write_next && grant_row_hit)
                     state <= ST_RD;            // row already open: straight to CAS
-                else if (row_open[a[24:23]])
+                else if (row_open[a[BANK_HI:BANK_LO]])
                     state <= ST_PRE_BANK;      // wrong row open: close it first
                 else
                     state <= ST_ACT;
@@ -466,9 +733,9 @@ always @(posedge clk) begin
         // more than tRAS after its ACT, so no extra guard is needed here.
         ST_PRE_BANK: begin
             cmd      <= CMD_PRE;
-            SDRAM_BA <= xfer_addr[24:23];
+            SDRAM_BA <= xfer_addr[BANK_HI:BANK_LO];
             SDRAM_A[10] <= 1'b0;               // single bank, not all
-            row_open[xfer_addr[24:23]] <= 1'b0;
+            row_open[xfer_addr[BANK_HI:BANK_LO]] <= 1'b0;
             prew_cnt <= 2'd1;                  // tRP >= 2 cycles before ACT
             state    <= ST_PRE_WAIT;
         end
@@ -479,12 +746,12 @@ always @(posedge clk) begin
 
         ST_ACT: begin
             cmd      <= CMD_ACT;
-            SDRAM_BA <= xfer_addr[24:23];
-            SDRAM_A  <= xfer_addr[22:10];
+            SDRAM_BA <= xfer_addr[BANK_HI:BANK_LO];
+            SDRAM_A  <= 13'(xfer_addr[ROW_HI:ROW_LO]);
             // Remember what is open. A write clears this again in ST_WR,
             // because writes still auto-precharge.
-            row_open[xfer_addr[24:23]] <= 1'b1;
-            open_row[xfer_addr[24:23]] <= xfer_addr[22:10];
+            row_open[xfer_addr[BANK_HI:BANK_LO]] <= 1'b1;
+            open_row[xfer_addr[BANK_HI:BANK_LO]] <= xfer_addr[ROW_HI:ROW_LO];
             state    <= ST_RCD1;
         end
 
@@ -494,11 +761,11 @@ always @(posedge clk) begin
 
         ST_WR: begin
             cmd      <= CMD_WRITE;
-            SDRAM_BA <= xfer_addr[24:23];
-            SDRAM_A  <= {2'b00, 1'b1, xfer_addr[10:1]};  // A10 = auto-precharge
+            SDRAM_BA <= xfer_addr[BANK_HI:BANK_LO];
+            SDRAM_A  <= cas_addr(xfer_addr, 1'b1);       // A10 = auto-precharge
             // The write auto-precharges, so whatever ST_ACT just recorded for
             // this bank is no longer open.
-            row_open[xfer_addr[24:23]] <= 1'b0;
+            row_open[xfer_addr[BANK_HI:BANK_LO]] <= 1'b0;
             dq_out   <= din_r;
             dq_oe    <= 1'b1;
             dqm      <= ~be_r;
@@ -517,10 +784,10 @@ always @(posedge clk) begin
             // it can skip ACT + tRCD. ST_PRE_BANK closes it on a row conflict
             // and the refresh path closes all four.
             cmd      <= CMD_READ;
-            SDRAM_BA <= xfer_addr[24:23];
-            SDRAM_A  <= {2'b00, 1'b0, xfer_addr[10:1]};
+            SDRAM_BA <= xfer_addr[BANK_HI:BANK_LO];
+            SDRAM_A  <= cas_addr(xfer_addr, 1'b0);
             cl_pipe[0] <= 1'b1;
-            xfer_addr[10:1] <= xfer_addr[10:1] + 1'd1;
+            xfer_addr[COL_HI:1] <= xfer_addr[COL_HI:1] + 1'd1;
             rd_issued <= rd_issued + 1'd1;
             if (rd_issued + 1'd1 == rd_total) state <= ST_RDW;
         end
@@ -534,7 +801,7 @@ always @(posedge clk) begin
             if (refw_cnt == 0) begin
                 cmd      <= CMD_REF;
                 ref_pend <= 1'b0;
-                refw_cnt <= 3'd6;   // tRC(ref) >= 63ns = 7 cycles
+                refw_cnt <= TRFC_CYC[3:0];
                 state    <= ST_REFW;
             end
             else refw_cnt <= refw_cnt - 1'd1;

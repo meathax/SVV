@@ -7,6 +7,9 @@
   <year>1994</year>
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010420120004040300000F0000005C</part>
+  </rom>
   <rom index="0" zip="drifto94.zip">
     <!-- program -->
     <part name="vg003-19.u26" crc="238e5e2b"/>
@@ -57,5 +60,5 @@
     <dip bits="13" name="Sound Volume" ids="Quiet,Loud" values="0,1"/>
     <dip bits="14" name="Save Best Time" ids="No,Yes" values="0,1"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

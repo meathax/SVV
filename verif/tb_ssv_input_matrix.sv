@@ -16,12 +16,19 @@
 module tb_ssv_input_matrix;
 
 // Mirror of Arcade-SSV.sv mapping (keep in sync).
-// joy bits: 0=R 1=L 2=D 3=U 4=Fire 5=Jump 6=Test 7=Service 8=Start 9=Coin
+// joy bits: 0=R 1=L 2=D 3=U 4..9=B1..B6 10=Test 11=Service 12=Start 13=Coin
 function automatic [15:0] player_port(input [31:0] joy);
-    // MAME bits 7:0 = UP,DOWN,LEFT,RIGHT,B1,B2,B3,START. Dyna Gear has no
-    // third button: B3 is tied released and no joystick bit can reach it.
+    // MAME bits 7:0 = UP,DOWN,LEFT,RIGHT,B1,B2,B3,START. B3 is a real button
+    // now: SSV's port always carried it and Dyna Gear simply never presses it.
     player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
-                              joy[4], joy[5], 1'b0, joy[8]}};
+                              joy[4], joy[5], joy[6], joy[12]}};
+endfunction
+
+// MAME ADD_BUTTONS ($500008): P1 B4-B6 on bits 0-2, P2 B4-B6 on bits 4-6,
+// active low. Mirror of Arcade-SSV.sv extra_port.
+function automatic [15:0] extra_port(input [31:0] j1, input [31:0] j2);
+    extra_port = {8'hff, ~{1'b0, j2[9], j2[8], j2[7],
+                           1'b0, j1[9], j1[8], j1[7]}};
 endfunction
 
 // Mirror of Arcade-SSV.sv db15_to_joy (DB15 SNAC pad -> joy numbering).
@@ -32,7 +39,8 @@ function automatic [31:0] db15_to_joy(input [15:0] db);
     begin
         sel   = db[11];
         chord = sel & (db[4] | db[5]);
-        db15_to_joy = {22'd0, sel & ~chord, db[10], sel & db[5], sel & db[4],
+        db15_to_joy = {18'd0, sel & ~chord, db[10], sel & db[5], sel & db[4],
+                       3'd0, 1'b0,
                        db[5] & ~sel, db[4] & ~sel,
                        db[3], db[2], db[1], db[0]};
     end
@@ -78,13 +86,22 @@ initial begin
     expect16("P1 RIGHT", player_port(32'h1), 16'hFFEF);
     expect16("P1 FIRE", player_port(32'h10), 16'hFFF7);
     expect16("P1 JUMP", player_port(32'h20), 16'hFFFB);
-    expect16("P1 START", player_port(32'h100), 16'hFFFE);
+    expect16("P1 START", player_port(32'h1000), 16'hFFFE);
+    expect16("P1 B3", player_port(32'h40), 16'hFFFD);
 
-    // Dyna Gear has no third button. Pressing EVERY joystick bit at once must
-    // still leave B3 (P1 bit 1) released -- 0xFF02 has bit1 set and nothing
-    // else in the low byte. This is the check that the button is gone, not
-    // merely unmapped.
-    expect16("P1 NO B3", player_port(32'hFFFFFFFF), 16'hFF02);
+    // With every joystick bit pressed the whole low byte must go active
+    // (0xFF00): all four directions, B1-B3 and START. B3 used to be excluded
+    // here to prove it was tied off; it is now wired, so its absence from the
+    // result would be the bug.
+    expect16("P1 ALL", player_port(32'hFFFFFFFF), 16'hFF00);
+
+    // $500008 extra buttons. P1 B4/B5/B6 are joy[7]/[8]/[9] -> bits 0/1/2.
+    expect16("P1 B4", extra_port(32'h80, 32'd0), 16'hFFFE);
+    expect16("P1 B5", extra_port(32'h100, 32'd0), 16'hFFFD);
+    expect16("P1 B6", extra_port(32'h200, 32'd0), 16'hFFFB);
+    expect16("P2 B4", extra_port(32'd0, 32'h80), 16'hFFEF);
+    expect16("P2 B6", extra_port(32'd0, 32'h200), 16'hFFBF);
+    expect16("EXTRA IDLE", extra_port(32'd0, 32'd0), 16'hFFFF);
 
     // DB15 SNAC pad maps onto the same joy numbering.
     expect16("DB15 UP", player_port(db15_to_joy(16'h0008)), 16'hFF7F);
@@ -94,9 +111,12 @@ initial begin
     expect16("DB15 A=FIRE", player_port(db15_to_joy(16'h0010)), 16'hFFF7);
     expect16("DB15 B=JUMP", player_port(db15_to_joy(16'h0020)), 16'hFFFB);
     expect16("DB15 START", player_port(db15_to_joy(16'h0400)), 16'hFFFE);
+    // The DB15 pad has no B3, so it must not reach the new button either.
+    expect16("DB15 NO B3", player_port(db15_to_joy(16'h07FF)) & 16'h0002,
+             16'h0002);
 
-    // Buttons C..F are physically present on a six-button CHAMMA panel and
-    // must reach nothing at all -- in particular not the absent third button.
+    // Buttons C..F are physically present on a six-button CHAMMA panel but
+    // are not decoded by db15_to_joy, so they must still reach nothing.
     expect16("DB15 C IDLE", player_port(db15_to_joy(16'h0040)), 16'hFFFF);
     expect16("DB15 D IDLE", player_port(db15_to_joy(16'h0080)), 16'hFFFF);
     expect16("DB15 E IDLE", player_port(db15_to_joy(16'h0100)), 16'hFFFF);
@@ -104,13 +124,13 @@ initial begin
     if (db15_to_joy(16'h03C0) != 32'd0)
         begin $display("FAIL DB15 C-F must be inert"); fails = fails + 1; end
 
-    // Select alone = Coin (joy[9]); Select+A = Test (joy[6]); Select+B =
-    // Service (joy[7]). A chord must NOT also fire Coin, Fire or Jump.
-    if (db15_to_joy(16'h0800) != 32'h200)
+    // Select alone = Coin (joy[13]); Select+A = Test (joy[10]); Select+B =
+    // Service (joy[11]). A chord must NOT also fire Coin, Fire or Jump.
+    if (db15_to_joy(16'h0800) != 32'h2000)
         begin $display("FAIL DB15 Select->Coin"); fails = fails + 1; end
-    if (db15_to_joy(16'h0810) != 32'h40)
+    if (db15_to_joy(16'h0810) != 32'h400)
         begin $display("FAIL DB15 Select+A->Test only"); fails = fails + 1; end
-    if (db15_to_joy(16'h0820) != 32'h80)
+    if (db15_to_joy(16'h0820) != 32'h800)
         begin $display("FAIL DB15 Select+B->Service only"); fails = fails + 1; end
     // A chord must leave the game's own P1 port completely idle.
     expect16("DB15 TEST CHORD P1 IDLE",
@@ -126,7 +146,7 @@ initial begin
     // mirror above cannot make this block pass.
     //
     // scenario frame 165/250: "P1 START pressed (active-low bit0)"
-    expect16("SCENARIO START", player_port(32'h100), 16'hFFFE);
+    expect16("SCENARIO START", player_port(32'h1000), 16'hFFFE);
     // scenario frame 255/330: "P1 B1 confirm" / "P1 B1 attack"
     expect16("SCENARIO B1", player_port(32'h10), 16'hFFF7);
     // scenario frame 300: "P1 RIGHT"

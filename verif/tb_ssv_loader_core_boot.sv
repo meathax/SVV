@@ -17,10 +17,10 @@ logic [26:0] ioctl_addr;
 logic ioctl_wait;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
-logic [24:1] sdr_p4_addr;
+logic [SDR_AW:1] sdr_p4_addr;
 logic [15:0] sdr_p4_dout;
 
-logic [24:1] sdr_wr_addr;
+logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic rom_loaded;
@@ -29,13 +29,13 @@ logic [26:0] download_max_addr;
 logic core_rst, ce_cpu;
 logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
-logic [24:1] sdr_p0_addr;
+logic [SDR_AW:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
 logic sdr_p2_req, sdr_p2_ack;
-logic [24:4] sdr_p2_addr;
+logic [SDR_AW:4] sdr_p2_addr;
 logic [127:0] sdr_p2_dout;
 logic core_wr_req, core_wr_ack;
-logic [24:1] core_wr_addr;
+logic [SDR_AW:1] core_wr_addr;
 logic [15:0] core_wr_din;
 logic [1:0] core_wr_be;
 logic [23:0] rgb;
@@ -67,6 +67,7 @@ ssv_rom_loader loader (
 );
 
 ssv_core core (
+    .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk), .rst(core_rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
@@ -113,7 +114,7 @@ always_ff @(posedge clk) begin
 end
 
 logic p0_pending;
-logic [24:1] p0_latched;
+logic [SDR_AW:1] p0_latched;
 always_ff @(posedge clk) begin
     sdr_p0_ack <= 1'b0;
     if (core_rst) begin
@@ -176,6 +177,29 @@ task automatic send_byte(input [26:0] addr, input [7:0] data);
     tick();
 endtask
 
+// The loader requires an MRA <rom index="1"> configuration block before it
+// will accept index-0 bytes -- without it cfg_valid stays low, index 0 is
+// discarded and rom_loaded never asserts (which is exactly how this bench
+// caught the new requirement). Send the Dyna Gear record first.
+task automatic send_cfg;
+    logic [7:0] b [0:15];
+    logic [7:0] sum;
+    int i;
+    begin
+        b[0]=8'h53; b[1]=8'd1;  b[2]=8'd1;  b[3]=8'd16;
+        b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'b11_10_01_00;
+        b[8]=8'b0000_0100;      b[9]=8'd0;  b[10]=8'd1; b[11]=8'd0;
+        b[12]=8'd0; b[13]=8'd0; b[14]=8'd0;
+        sum = 8'd0;
+        for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
+        b[15] = -sum;
+        ioctl_index = 8'd1;
+        for (i = 0; i < 16; i = i + 1) send_byte(27'(i), b[i]);
+        ioctl_index = 8'd0;
+        tick();
+    end
+endtask
+
 logic saw_fetch;
 logic [31:0] first_pc;
 integer cycles;
@@ -196,6 +220,7 @@ initial begin
     rst_loader = 0;
     mem_ready = 1;
     ioctl_download = 1;
+    send_cfg();
 
     // Packed program image at stream base (loader writes SDR words).
     send_byte(27'h000000, 8'hcd); // NOP

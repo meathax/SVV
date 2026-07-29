@@ -79,6 +79,12 @@ module emu (
     input         OSD_STATUS
 );
 
+// SDR_AW: the SDRAM word-address width shared by the loader, the core and the
+// controller. Taking it from the package rather than restating 24 here is the
+// point -- the widths on this boundary are exactly where a silent truncation
+// turns into "wrong ROM load offset" and a fake renderer bug.
+import ssv_pkg::SDR_AW;
+
 `ifndef BUILD_DATE
 `define BUILD_DATE "SSV"
 `endif
@@ -107,7 +113,9 @@ localparam CONF_STR = {
     "O[42:41],DB15 Devices,Off,P1 only,P2 only,P1 & P2;",
     "-;",
     "R[0],Reset;",
-    "J1,Fire,Jump,Test,Service,Start,Coin;",
+    // Six game buttons: SSV's P1/P2 ports carry B1-B3 and the
+    // $500008 window carries B4-B6. Survival Arts uses all six.
+    "J1,Fire,Jump,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin;",
     "V,v",`BUILD_DATE
 };
 
@@ -289,11 +297,21 @@ wire core_reset = video_reset | ioctl_download | ~rom_loaded |
 assign LED_USER = ~rom_loaded;
 
 wire ld_wr_req, ld_wr_ack;
-wire [24:1] ld_wr_addr;
+wire [SDR_AW:1] ld_wr_addr;
 wire [15:0] ld_wr_din;
 wire [1:0] ld_wr_be;
 
+// Per-game configuration, parsed by the loader from the MRA's
+// <rom index="1"> block. game_cfg is what the core actually runs on; there is
+// no fallback to a compiled-in default, because a silent fallback turns a
+// packaging mistake into a corrupt-graphics bug hunt. game_cfg_valid gates
+// rom_loaded inside the loader, so a missing block shows up as LED_USER
+// staying lit rather than as a broken picture.
+ssv_pkg::ssv_cfg_t game_cfg;
+wire               game_cfg_valid;
+
 ssv_rom_loader loader (
+    .cfg(game_cfg), .cfg_valid(game_cfg_valid),
     .clk(clk_sys), .rst(loader_reset), .mem_ready(sdram_ready_sys),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
@@ -305,12 +323,12 @@ ssv_rom_loader loader (
 );
 
 wire core_p0_req;
-wire [24:1] core_p0_addr;
+wire [SDR_AW:1] core_p0_addr;
 wire p0_ack;
 wire [15:0] p0_dout;
 wire p0_req  = probe_active ? probe_req  : core_p0_req;
-wire [24:1] p0_addr = probe_active ?
-    (probe_step[0] ? 24'(25'h1F3D0 >> 1) : 24'(25'h0 >> 1)) :
+wire [SDR_AW:1] p0_addr = probe_active ?
+    (probe_step[0] ? SDR_AW'(27'h1F3D0 >> 1) : SDR_AW'(27'h0 >> 1)) :
     core_p0_addr;
 
 always_ff @(posedge clk_sys) begin
@@ -351,18 +369,18 @@ end
 // the natural home for a future ES5506 sample line cache, whose worst-case
 // latency is better served by a 13-cycle transaction than p2's 17.
 wire p2_req, p2_ack;
-wire [24:4] p2_addr;
+wire [SDR_AW:4] p2_addr;
 wire [127:0] p2_dout;
 wire p4_req, p4_ack;
-wire [24:1] p4_addr;
+wire [SDR_AW:1] p4_addr;
 wire [15:0] p4_dout;
 
 wire core_wr_req, core_wr_ack;
-wire [24:1] core_wr_addr;
+wire [SDR_AW:1] core_wr_addr;
 wire [15:0] core_wr_din;
 wire [1:0] core_wr_be;
 wire sw_req, sw_ack;
-wire [24:1] sw_addr;
+wire [SDR_AW:1] sw_addr;
 wire [15:0] sw_din;
 wire [1:0] sw_be;
 wire loader_owns_write = ld_wr_req;
@@ -374,7 +392,17 @@ assign sw_be   = loader_owns_write ? ld_wr_be   : core_wr_be;
 assign ld_wr_ack   = loader_owns_write ? sw_ack : 1'b0;
 assign core_wr_ack = loader_owns_write ? 1'b0 : sw_ack;
 
-sdram sdram (
+// 128 MB module fitted on this board: 64M x 16, i.e.
+// 4 banks x 8192 rows x 2048 columns. COL_BITS 11 makes the controller's word
+// address 26 bits, matching ssv_pkg::SDR_AW.
+//
+// TRFC_CYC is deliberately conservative until the fitted part's datasheet is
+// read: a tRFC violation is silent bit rot, not a hang, so the safe direction
+// is to wait too long rather than too little. 11 cycles = ~114 ns costs ~1.6%
+// of the bus at one refresh per 700 cycles.
+sdram #(
+    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11), .TRFC_CYC(11)
+) sdram (
     .clk(clk_ram), .init(~pll_locked), .ready(sdram_ready),
     .SDRAM_DQ(SDRAM_DQ), .SDRAM_A(SDRAM_A), .SDRAM_BA(SDRAM_BA),
     .SDRAM_DQML(SDRAM_DQML), .SDRAM_DQMH(SDRAM_DQMH),
@@ -390,7 +418,8 @@ sdram sdram (
     .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
 );
 
-// MiSTer J1 order: Fire,Jump,Test,Service,Start,Coin → joy[4]..joy[9]
+// MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Test,Service,Start,Coin
+//                  joy[4]..joy[13]
 // (the MRA's <buttons names=...> list must stay in this same order).
 //
 // Map a DB15 pad onto that same numbering so everything downstream is written
@@ -410,11 +439,15 @@ function automatic [31:0] db15_to_joy(input [15:0] db);
     begin
         sel   = db[11];
         chord = sel & (db[4] | db[5]);
-        db15_to_joy = {22'd0,
-                       sel & ~chord,  // joy[9]  Coin    <- Select alone
-                       db[10],        // joy[8]  Start   <- Start
-                       sel & db[5],   // joy[7]  Service <- Select+B
-                       sel & db[4],   // joy[6]  Test    <- Select+A
+        // The DB15 pad has two face buttons, so B3-B6 are unreachable
+        // from it and stay low; only the HPS/USB path can press them.
+        db15_to_joy = {18'd0,
+                       sel & ~chord,  // joy[13] Coin    <- Select alone
+                       db[10],        // joy[12] Start   <- Start
+                       sel & db[5],   // joy[11] Service <- Select+B
+                       sel & db[4],   // joy[10] Test    <- Select+A
+                       3'd0,          // joy[9:7]  B6,B5,B4 - not on a DB15 pad
+                       1'b0,          // joy[6]    B3      - not on a DB15 pad
                        db[5] & ~sel,  // joy[5]  Jump    <- B
                        db[4] & ~sel,  // joy[4]  Fire    <- A
                        db[3], db[2], db[1], db[0]};  // Up, Down, Left, Right
@@ -427,17 +460,28 @@ wire [31:0] joy_p1 = db15_sel[0] ? db15_to_joy(db15_p1_raw) : joystick_0;
 wire [31:0] joy_p2 = db15_sel[1] ? db15_to_joy(db15_p2_raw) : joystick_1;
 
 // MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START.
-// Dyna Gear has no third button, so B3 is tied released and no input can
-// reach it.
+// P1/P2 port bits: U D L R B1 B2 B3 START, active low. B3 is a real
+// button now rather than a tied constant -- SSV's port always had it, and
+// Dyna Gear simply never presses it.
 function automatic [15:0] player_port(input [31:0] joy);
     player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
-                              joy[4], joy[5], 1'b0, joy[8]}};
+                              joy[4], joy[5], joy[6], joy[12]}};
 endfunction
 
-wire test_button = status[6] | joy_p1[6] | joy_p2[6];
-wire service_button = joy_p1[7] | joy_p2[7];
-wire coin1_button = joy_p1[9];
-wire coin2_button = joy_p2[9];
+// MAME ADD_BUTTONS ($500008): P1 B4-B6 on bits 0-2, P2 B4-B6 on bits 4-6,
+// active low, and ONLY survarts_map decodes the window. Gate it on the config
+// so every other title reads the idle 16'hffff it read before -- an ungated
+// port would change what those games see at an address their program may still
+// probe.
+function automatic [15:0] extra_port(input [31:0] j1, input [31:0] j2);
+    extra_port = {8'hff, ~{1'b0, j2[9], j2[8], j2[7],
+                           1'b0, j1[9], j1[8], j1[7]}};
+endfunction
+
+wire test_button = status[6] | joy_p1[10] | joy_p2[10];
+wire service_button = joy_p1[11] | joy_p2[11];
+wire coin1_button = joy_p1[13];
+wire coin2_button = joy_p2[13];
 // MAME SYSTEM ($21000c): COIN1, COIN2, SERVICE1, TILT, TEST
 wire [15:0] system_port = {8'hff,
     ~{3'b000, test_button, 1'b0, service_button,
@@ -481,6 +525,7 @@ wire [31:0] debug_pc;
 wire [23:0] debug_status;
 
 ssv_core core (
+    .cfg(game_cfg),
     .clk_sys(clk_sys), .rst(core_reset), .ce_cpu(ce_cpu),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack && !probe_active),
@@ -493,10 +538,12 @@ ssv_core core (
     .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
     .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
-    .in_system(system_port), .in_extra(16'hffff),
+    .in_system(system_port),
+    .in_extra(game_cfg.has_add_buttons ? extra_port(joy_p1, joy_p2)
+                                       : 16'hffff),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
-    .rgb(core_rgb), .ce_pixel(core_ce),
+    .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
@@ -561,6 +608,7 @@ wire av_vs = core_vs;
 wire av_hb = core_hb;
 wire av_vb = core_vb;
 wire av_ce = core_ce;
+wire ce_pix_x2;
 
 // ---------------------------------------------------------------------------
 // Video output.
@@ -591,30 +639,15 @@ wire av_ce = core_ce;
 wire sd_on = forced_scandoubler | (|status[5:3]);
 
 // The doubler needs an enable at exactly twice the pixel rate and in phase
-// with it. ssv_video_timing makes ce_pixel by adding PIXEL_INC to a 16-bit
-// accumulator every clk_sys; doubling the increment doubles the rate exactly,
-// with no rounding to drift. Restarted on the same line reference the core
-// uses so the two cannot walk apart across a frame.
-localparam logic [15:0] PIXEL_INC = 16'd9710;   // keep in step with
-                                                // rtl/ssv_video_timing.sv
-logic av_hs_d2;
-always_ff @(posedge clk_sys) if (av_ce) av_hs_d2 <= av_hs;
-wire av_line_start = av_ce && (av_hs & ~av_hs_d2);
-
-logic [15:0] ce2_acc;
-logic        ce_pix_x2;
-always_ff @(posedge clk_sys) begin
-    logic [16:0] sum;
-    if (av_line_start) begin
-        ce2_acc   <= 16'd0;
-        ce_pix_x2 <= 1'b0;
-    end
-    else begin
-        sum       = {1'b0, ce2_acc} + {1'b0, PIXEL_INC << 1};
-        ce2_acc   <= sum[15:0];
-        ce_pix_x2 <= sum[16];
-    end
-end
+// with it. That now comes from ssv_video_timing, which runs ONE accumulator at
+// twice the pixel increment and takes ce_pixel as every second carry, so the
+// 2:1 ratio holds by construction.
+//
+// It used to be generated here by a SECOND accumulator restarted on the line
+// reference, while the core's free-runs. verif/tb_ssv_scandoubler.sv measured
+// that at a constant 907 ticks per line where exact doubling of a 454-pixel
+// line needs 908 -- every doubled line was one pixel short. Do not reintroduce
+// a local generator; the two accumulators cannot be kept in step.
 
 wire [23:0] sd_rgb;
 wire        sd_hs, sd_vs, sd_hb, sd_vb;

@@ -7,6 +7,9 @@
   <year>1993</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010118100103000404010F00000067</part>
+  </rom>
   <rom index="0" zip="survartsj.zip|survarts.zip">
     <!-- program -->
     <interleave output="16">
@@ -49,5 +52,5 @@
     <dip bits="12,13" name="Difficulty" ids="Easy,Normal,Hard,Hardest" values="1,3,2,0"/>
     <dip bits="14,15" name="Fatal Damage" ids="Light,Normal,Heavy,Heaviest" values="1,3,2,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

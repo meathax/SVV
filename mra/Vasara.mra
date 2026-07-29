@@ -8,6 +8,9 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
+  <rom index="1">
+    <part>53010420120004040300020F0000005A</part>
+  </rom>
   <rom index="0" zip="vasara.zip">
     <!-- program -->
     <part name="data.u34" crc="7704cc7e"/>
@@ -47,5 +50,5 @@
     <dip bits="14" name="Game Voice" ids="Off,On" values="0,1"/>
     <dip bits="15" name="English Subtitles" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

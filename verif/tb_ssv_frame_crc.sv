@@ -12,21 +12,28 @@
 module tb_ssv_frame_crc;
 `include "ssv_tb_crc32.svh"
 
+// The behavioural SDRAM model below decodes the same regions the RTL does.
+// Import the layout instead of restating it: five benches used to carry their
+// own copies of 0x0100000/0x1100000/0x1160000, and a divergence between them
+// and ssv_pkg is exactly the "wrong ROM load offset" fake bug CLAUDE.md warns
+// about.
+import ssv_pkg::*;
+
 logic clk_sys = 1'b0;
 always #5 clk_sys = ~clk_sys;
 
 logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
-logic [24:1] sdr_p0_addr;
+logic [SDR_AW:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
 logic sdr_p2_req, sdr_p2_ack;
-logic [24:4] sdr_p2_addr;
+logic [SDR_AW:4] sdr_p2_addr;
 logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
-logic [24:1] sdr_p4_addr;
+logic [SDR_AW:1] sdr_p4_addr;
 logic [15:0] sdr_p4_dout;
-logic [24:1] sdr_wr_addr;
+logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 
@@ -60,7 +67,13 @@ logic        sdram_ready;
 logic clk_ram = 1'b0;
 always #2.5 clk_ram = ~clk_ram;
 
-ssv_sdram_harness u_sdram (
+// Must match Arcade-SSV.sv's controller geometry, or +REAL_SDRAM measures a
+// part the board does not have. AW then derives to 26 = ssv_pkg::SDR_AW, so
+// the port widths line up with the core's without truncation -- and this build
+// suppresses WIDTH warnings, so a mismatch here would be silent.
+ssv_sdram_harness #(
+    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11), .TRFC_CYC(11)
+) u_sdram (
     .clk_ram(clk_ram), .init(rst), .ready(sdram_ready),
     .wr_req(sdr_wr_req), .wr_addr(sdr_wr_addr), .wr_din(sdr_wr_din),
     .wr_be(sdr_wr_be), .wr_ack(real_wr_ack),
@@ -113,7 +126,7 @@ logic [14:0] idx15;
 integer px_count;
 logic p0_seen, p1_seen, wr_seen, p4_seen;
 logic [3:0] p0_hold, p1_hold, wr_hold, p4_hold;
-logic [24:0] p0_byte_addr, p1_byte_addr;
+logic [SDR_AW:0] p0_byte_addr, p1_byte_addr;
 integer ext_index, sprite_index, packed_code, packed_row;
 integer raw_q0_index, raw_q1_index, raw_q2_index;
 integer stuck, last_pc_i;
@@ -163,6 +176,7 @@ ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 wire core_rst = rst | (use_real_sdram & ~sdram_ready);
 
 ssv_core dut (
+    .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(core_rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
@@ -180,6 +194,177 @@ ssv_core dut (
     .audio_l(audio_l), .audio_r(audio_r),
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
+
+// ---------------------------------------------------------------------------
+// Phase 0 instrumentation (C3 line occupancy, C4 dropped start, C5 bg-vs-obj
+// overlap, C6 no_rw_check proofs, C7 ES5506 bank/compression use).
+//
+// All of it is observation only; nothing here drives the DUT, so every existing
+// gate and the golden frame CRC are untouched.
+// ---------------------------------------------------------------------------
+
+// --- C3: full per-scanline descriptor occupancy distribution ---------------
+//
+// obj_max_line_entries already records the peak, but a single peak cannot say
+// whether 96 slots are comfortable or one busy scene away from dropping
+// sprites. LINE_SLOTS is 96 and a line that reaches it has ALREADY silently
+// dropped its 97th descriptor, so `occ_at_cap` is the number that decides
+// whether raising it to 128 is warranted. Sampled when the vblank build
+// finishes, which is the only point the table is complete and stable.
+localparam int OCC_BINS = 160;
+integer occ_hist [0:OCC_BINS-1];
+integer occ_max, occ_max_frame, occ_at_cap, occ_lines_sampled;
+integer occ_i, occ_v;
+logic   obj_cache_busy_d;
+
+// --- C4: `start` pulses arriving while the renderer is not in IDLE --------
+//
+// `start` is a one-cycle pulse sampled only in IDLE, so one missed pulse costs
+// the NEXT scanline all of its objects. Counting it settles whether the
+// latch is a real fix or dead code for this title.
+integer start_dropped, start_total;
+
+// --- C5: background renderer started while the object renderer is busy ----
+//
+// Distinct from bg_ack_while_obj_owns above: that catches a completed
+// transaction, this catches the START, which is the condition that lets the bg
+// renderer latch the object renderer's tile code (ssv_core.sv:352-358).
+integer bg_start_while_obj_busy;
+
+// --- C7: ES5506 voices outside the implemented subset ---------------------
+integer es_nonbank2_slots, es_compressed_slots;
+logic [4:0] es_voice_d;
+
+initial begin
+    for (occ_i = 0; occ_i < OCC_BINS; occ_i = occ_i + 1) occ_hist[occ_i] = 0;
+    occ_max = 0; occ_max_frame = 0; occ_at_cap = 0; occ_lines_sampled = 0;
+    start_dropped = 0; start_total = 0;
+    bg_start_while_obj_busy = 0;
+    es_nonbank2_slots = 0; es_compressed_slots = 0;
+end
+
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        obj_cache_busy_d <= 1'b0;
+        es_voice_d       <= 5'd0;
+    end else begin
+        obj_cache_busy_d <= dut.obj_cache_busy;
+        es_voice_d       <= dut.sound_voices.eng_voice;
+
+        // C3 -- the build has just completed; the bucket table is final.
+        if (obj_cache_busy_d && !dut.obj_cache_busy) begin
+            for (occ_i = 0; occ_i < 240; occ_i = occ_i + 1) begin
+                occ_v = int'(dut.sprite_renderer.line_counts[occ_i]);
+                if (occ_v >= 0 && occ_v < OCC_BINS)
+                    occ_hist[occ_v] = occ_hist[occ_v] + 1;
+                occ_lines_sampled = occ_lines_sampled + 1;
+                if (occ_v >= int'(dut.sprite_renderer.LINE_SLOTS))
+                    occ_at_cap = occ_at_cap + 1;
+                if (occ_v > occ_max) begin
+                    occ_max = occ_v;
+                    occ_max_frame = post_ve_frames;
+                end
+            end
+        end
+
+        // C4 -- count every start pulse and the ones that cannot be taken.
+        if (dut.renderer_line_start) begin
+            start_total <= start_total + 1;
+            if (dut.sprite_renderer.state != 6'd0)   // not IDLE
+                start_dropped <= start_dropped + 1;
+        end
+
+        // C5
+        if (dut.renderer_line_start && dut.obj_busy)
+            bg_start_while_obj_busy <= bg_start_while_obj_busy + 1;
+
+        // C7 -- sample each voice once, as the engine advances to it.
+        //
+        // Only RUNNING voices count. A halted voice has CR_STOP (16'h0003) set
+        // and would be silent on real hardware too, so counting those would
+        // report a five-figure "bug" that is really just idle voices -- the
+        // question is whether a voice that should be HEARD is being muted by
+        // the bank-2-only and uncompressed-only restrictions.
+        if (dut.sound_voices.eng_voice != es_voice_d &&
+            dut.sound_voices.eng_cr_valid &&
+            !(|(dut.sound_voices.eng_cr & 16'h0003))) begin      // CR_STOP
+            if (|(dut.sound_voices.eng_cr & 16'h2000))           // CR_CMPD
+                es_compressed_slots <= es_compressed_slots + 1;
+            else if (dut.sound_voices.eng_cr[15:14] != 2'b10)
+                es_nonbank2_slots <= es_nonbank2_slots + 1;
+        end
+    end
+end
+
+// --- C6: the three `no_rw_check` arrays --------------------------------------
+//
+// These should be silent BY CONSTRUCTION, and saying why is the point.
+// `state` is a single register, writes to descriptor_cache happen only in
+// BUILD_STORE and to line_entries only in BUILD_BUCKET_WRITE, while the reads
+// happen only in RENDER_* states -- so build and render can never collide.
+// line_page_starts is different: its read at ssv_cached_sprite_renderer.sv:680
+// is unconditional and DOES collide on every build cycle, by design; it is safe
+// only because its single consumer (RENDER_COUNT_WAIT) is reachable only from
+// RENDER_COUNT_READ, which never writes.
+//
+// docs/DYNAGEAR_HW_RENDER_FIX_PLAN.md:72-80 flags all three as unproven. These
+// assertions convert that argument into a measurement. If any fires, the
+// structural reasoning above is wrong and the attribute must come off.
+integer c6_desc_hits, c6_entry_hits, c6_page_consume_hits;
+initial begin
+    c6_desc_hits = 0; c6_entry_hits = 0; c6_page_consume_hits = 0;
+end
+
+// State encodings taken from the state_t enum in
+// rtl/video/ssv_cached_sprite_renderer.sv:92-112 (IDLE is 0), matching the
+// existing `6'd30 // TILE_PREP` idiom already used in this file.
+localparam logic [5:0] ST_BUILD_STORE        = 6'd13;
+localparam logic [5:0] ST_BUILD_BUCKET_WRITE = 6'd15;
+localparam logic [5:0] ST_RENDER_COUNT_READ  = 6'd17;
+localparam logic [5:0] ST_RENDER_COUNT_WAIT  = 6'd18;
+localparam logic [5:0] ST_RENDER_LINE_READ   = 6'd19;
+localparam logic [5:0] ST_RENDER_READ        = 6'd20;
+localparam logic [5:0] ST_RENDER_DECODE      = 6'd21;
+localparam logic [5:0] ST_RENDER_PREP        = 6'd22;
+
+// Reconstruct the exact enable conditions from the RAM process at
+// ssv_cached_sprite_renderer.sv:697-710, so these track the design rather than
+// a paraphrase of it.
+wire c6_entry_rd = (dut.sprite_renderer.state == ST_RENDER_LINE_READ) ||
+                   (dut.sprite_renderer.state == ST_RENDER_DECODE)    ||
+                   (dut.sprite_renderer.state == ST_RENDER_PREP);
+wire c6_entry_wr = (dut.sprite_renderer.state == ST_BUILD_BUCKET_WRITE);
+wire c6_desc_rd  = (dut.sprite_renderer.state == ST_RENDER_READ) ||
+                   (dut.sprite_renderer.state == ST_RENDER_PREP);
+wire c6_desc_wr  = dut.sprite_renderer.cache_we;   // implies BUILD_STORE
+
+always_ff @(posedge clk_sys) if (!rst) begin
+    // C6a / C6b: a read and a write of the same array in the same cycle. Both
+    // must be impossible because `state` is one register and the writes live in
+    // BUILD_* while the reads live in RENDER_*.
+    if (c6_desc_wr && c6_desc_rd) begin
+        c6_desc_hits <= c6_desc_hits + 1;
+        $display("C6a descriptor_cache read-during-write state=%0d cyc=%0d",
+                 dut.sprite_renderer.state, cycle_count);
+    end
+    if (c6_entry_wr && c6_entry_rd) begin
+        c6_entry_hits <= c6_entry_hits + 1;
+        $display("C6b line_entries read-during-write state=%0d cyc=%0d",
+                 dut.sprite_renderer.state, cycle_count);
+    end
+
+    // C6c: line_page_q / line_count_q are read unconditionally and DO collide
+    // with the build writes by design. They are safe only because their single
+    // consumer, RENDER_COUNT_WAIT, is reachable only from RENDER_COUNT_READ --
+    // which never writes. Assert exactly that.
+    if (dut.sprite_renderer.state == ST_RENDER_COUNT_WAIT &&
+        tm_state_d != ST_RENDER_COUNT_READ &&
+        tm_state_d != ST_RENDER_COUNT_WAIT) begin
+        c6_page_consume_hits <= c6_page_consume_hits + 1;
+        $display("C6c RENDER_COUNT_WAIT entered from state %0d cyc=%0d",
+                 tm_state_d, cycle_count);
+    end
+end
 
 // ---------------------------------------------------------------------------
 // SDRAM port model.
@@ -292,10 +477,10 @@ always_ff @(posedge clk_sys) begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1'b1;
             p0_byte_addr = {sdr_p0_addr, 1'b0};
-            if (p0_byte_addr < 25'h0100000)
+            if (p0_byte_addr < SDR_GFX_BASE)
                 beh_p0_dout <= {main_rom[p0_byte_addr+1], main_rom[p0_byte_addr]};
-            else if (p0_byte_addr >= 25'h1100000 && p0_byte_addr < 25'h1160000) begin
-                ext_index = (p0_byte_addr - 25'h1100000) >> 1;
+            else if (p0_byte_addr >= SDR_XRAM_BASE && p0_byte_addr < SDR_SAMPLES_BASE) begin
+                ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
                 beh_p0_dout <= external_ram[ext_index];
             end else
                 beh_p0_dout <= 16'hffff;
@@ -314,7 +499,7 @@ always_ff @(posedge clk_sys) begin
             // This must agree byte for byte with ssv_pkg::gfx_plane_addr, with
             // ssv_rom_loader, and with the +REAL_SDRAM chip preload below.
             p1_byte_addr = {sdr_p2_addr, 4'b0000};
-            sprite_index = p1_byte_addr - 25'h0100000;   // SDR_GFX_BASE
+            sprite_index = p1_byte_addr - SDR_GFX_BASE;
             if (sprite_index >= 0 && sprite_index < 16777216) begin
                 packed_code = sprite_index >> 7;         // 0..0x1ffff
                 packed_row = (sprite_index >> 4) & 7;
@@ -349,9 +534,9 @@ always_ff @(posedge clk_sys) begin
 
         if (sdr_wr_req && !wr_seen) begin
             wr_seen <= 1'b1;
-            if ({sdr_wr_addr, 1'b0} >= 25'h1100000 &&
-                {sdr_wr_addr, 1'b0} < 25'h1160000) begin
-                ext_index = ({sdr_wr_addr, 1'b0} - 25'h1100000) >> 1;
+            if ({sdr_wr_addr, 1'b0} >= SDR_XRAM_BASE &&
+                {sdr_wr_addr, 1'b0} < SDR_SAMPLES_BASE) begin
+                ext_index = ({sdr_wr_addr, 1'b0} - SDR_XRAM_BASE) >> 1;
                 if (sdr_wr_be[0])
                     external_ram[ext_index][7:0] <= sdr_wr_din[7:0];
                 if (sdr_wr_be[1])
@@ -1034,7 +1219,7 @@ initial begin
             automatic integer src       = (quarter == 3)
                                             ? 0
                                             : quarter * 4194304 + q0 + (in_rec & 3);
-            u_sdram.chip.mem[(25'h0100000 >> 1) + i] =
+            u_sdram.chip.mem[(SDR_GFX_BASE >> 1) + i] =
                 (quarter == 3) ? 16'h0000
                                : {sprite_rom[src+1], sprite_rom[src]};
         end
@@ -1049,7 +1234,7 @@ initial begin
             // SDR_SAMPLES_BASE moved to 0x1160000 (above XRAM and CPU RAM)
             // when the graphics region grew to 16 MB.
             for (i = 0; i < 2097152; i = i + 1)
-                u_sdram.chip.mem[(25'h1160000 >> 1) + i] =
+                u_sdram.chip.mem[(SDR_SAMPLES_BASE >> 1) + i] =
                     {sample_rom[i*2+1], sample_rom[i*2]};
             $display("REAL_SDRAM samples preloaded");
         end
@@ -1114,6 +1299,27 @@ initial begin
     if (bg_ack_while_obj_owns != 0)
         $fatal(1, "background renderer latched %0d acks it did not own",
                bg_ack_while_obj_owns);
+    // Phase 0 report. Gated on the existing +DUMP_RENDERER_BUDGET so every
+    // current gate keeps byte-identical output when it is not requested.
+    if (dump_renderer_budget) begin
+        $display("=== PHASE0 C3 line occupancy (LINE_SLOTS=%0d) ===",
+                 dut.sprite_renderer.LINE_SLOTS);
+        $display("C3_OCC max=%0d frame=%0d at_cap=%0d lines=%0d",
+                 occ_max, occ_max_frame, occ_at_cap, occ_lines_sampled);
+        for (diag_i = 0; diag_i < OCC_BINS; diag_i = diag_i + 1)
+            if (occ_hist[diag_i] != 0)
+                $display("C3_HIST %0d %0d", diag_i, occ_hist[diag_i]);
+        $display("C4_START total=%0d dropped=%0d", start_total, start_dropped);
+        $display("C5_BGSTART bg_start_while_obj_busy=%0d bg_ack_while_obj_owns=%0d",
+                 bg_start_while_obj_busy, bg_ack_while_obj_owns);
+        $display("C6_NORWCHECK desc=%0d entries=%0d page_consume=%0d",
+                 c6_desc_hits, c6_entry_hits, c6_page_consume_hits);
+        $display("C7_ES5506 nonbank2_slots=%0d compressed_slots=%0d",
+                 es_nonbank2_slots, es_compressed_slots);
+        if (use_real_sdram)
+            u_sdram.controller.sdram_dump_stats("frame_crc");
+    end
+
     $display("PASS tb_ssv_frame_crc scenario=%s frames=%0d nonblack=%0d pc=%08x crc=%s overruns bg=%0d obj=%0d max_line_entries=%0d",
              scenario, post_ve_frames, post_ve_nonblack, debug_pc, crc_path,
              bg_overruns, obj_overruns, obj_max_line_entries);

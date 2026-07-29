@@ -6,9 +6,11 @@
 //  reproduces CAS latency and command decode exactly, but it does NOT enforce
 //  refresh intervals, tRAS, tRC or tWR as errors.
 //
-//  Geometry (as implied by the controller's address decomposition):
-//      4 banks x 8192 rows x 512 columns x 16 bit = 32 MB
-//      linear word address = { ba[1:0], row[12:0], col[8:0] }
+//  Geometry is parameterised (BANK_BITS/ROW_BITS/COL_BITS), default 32 MB:
+//      COL_BITS  9 : 4 banks x 8192 rows x  512 cols x 16 =  32 MB
+//      COL_BITS 10 : 4 banks x 8192 rows x 1024 cols x 16 =  64 MB
+//      COL_BITS 11 : 4 banks x 8192 rows x 2048 cols x 16 = 128 MB
+//      linear word address = { ba, row[ROW_BITS-1:0], col[COL_BITS-1:0] }
 //
 //  which is exactly the controller's xfer_addr[24:1]:
 //      ACT    drives SDRAM_BA <= xfer_addr[24:23]      (bank)
@@ -89,7 +91,13 @@ module ssv_sdram_chip #(
     // tRCD >= 21 ns; at 96.6 MHz (10.352 ns) that is 3 clocks, which is what
     // the controller inserts (ST_ACT -> ST_RCD1 -> ST_RCD2 -> ST_RD).
     parameter int TRCD_CYCLES   = 3,
-    parameter bit VERBOSE       = 1'b0
+    parameter bit VERBOSE       = 1'b0,
+    // Device geometry. Parameterised so a bench can build a 32/64/128 MB part
+    // AND so the controller can be checked against a MISMATCHED one -- see the
+    // note at the localparams below.
+    parameter int BANK_BITS     = 2,
+    parameter int ROW_BITS      = 13,
+    parameter int COL_BITS      = 9
 ) (
     // Pin names mirror the controller's (rtl/mem/sdram.sv) so the model drops
     // straight onto it, here or in verif/ssv_sdram_harness.sv.
@@ -116,10 +124,16 @@ wire        dqmh = SDRAM_DQMH;
 // ---------------------------------------------------------------------------
 // geometry
 // ---------------------------------------------------------------------------
-localparam int BANK_BITS = 2;
-localparam int ROW_BITS  = 13;
-localparam int COL_BITS  = 9;
-localparam int ADDR_BITS = BANK_BITS + ROW_BITS + COL_BITS;   // 24 -> 16M words
+// Geometry now arrives as parameters (see the port list). Building the model
+// with a DIFFERENT geometry from the controller is a deliberate test: a
+// controller configured for 2048 columns talking to a 512-column part drives
+// real column bits onto pins that part treats as don't-cares, so addresses
+// alias 4:1 with no error raised anywhere. If this model cannot reproduce
+// that, the 128 MB verification story is vacuous.
+//
+// mem[] is 2**ADDR_BITS words, so ADDR_BITS 26 costs 128 MB of HOST memory per
+// instance. Keep full-core benches at the smallest geometry their layout needs.
+localparam int ADDR_BITS = BANK_BITS + ROW_BITS + COL_BITS;
 
 // ---------------------------------------------------------------------------
 // commands {nCS,nRAS,nCAS,nWE}
@@ -224,9 +238,15 @@ end
 
 assign SDRAM_DQ = dq_drv ? dq_reg : 16'hzzzz;
 
-// column: A[8:0].  A[9] is a don't-care on a 9-column-bit part (the
-// controller happens to drive xfer_addr[10], the row LSB, there).
-wire [COL_BITS-1:0] col_in   = addr[COL_BITS-1:0];
+// Column decode.
+//
+// The controller drives A[9:0] from word-address bits [10:1], A[10] with
+// auto-precharge, and -- only on a 2048-column part -- A[11] with the 11th
+// column bit. So a <=10-column part takes the low COL_BITS of A directly,
+// while an 11-column part splices A[11] on ABOVE A[9], skipping the AP pin.
+wire [COL_BITS-1:0] col_in   = (COL_BITS == 11)
+                             ? {addr[11], addr[9:0]}
+                             : addr[COL_BITS-1:0];
 wire                auto_pre = addr[10];
 
 // Linear word address of the cell this cycle's RD/WR command selects:

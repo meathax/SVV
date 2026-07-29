@@ -31,7 +31,16 @@
 
 `timescale 1ns/1ps
 
-module tb_ssv_sdram_loopback;
+module tb_ssv_sdram_loopback #(
+    // Geometry sweep. CTL_* configures the controller, CHIP_* the part.
+    // Setting them DIFFERENTLY is the aliasing negative test: a controller
+    // driving 11 column bits into a 9-column part puts real address bits on
+    // pins the part ignores, so distinct addresses collide. That test must
+    // FAIL; a self-test that cannot fail proves nothing.
+    parameter int CTL_COL_BITS  = 9,
+    parameter int CHIP_COL_BITS = CTL_COL_BITS,
+    parameter int AW            = 2 + 13 + CTL_COL_BITS
+) ;
 
 // 96.6 MHz clk_ram -> 10.352 ns period
 localparam real HALF_PERIOD = 5.176;
@@ -52,13 +61,13 @@ wire        SDRAM_CKE;
 
 // ---- port wiring ----------------------------------------------------------
 logic        wr_req  = 1'b0;
-logic [24:1] wr_addr = '0;
+logic [AW:1] wr_addr = '0;
 logic [15:0] wr_din  = '0;
 logic  [1:0] wr_be   = 2'b11;
 wire         wr_ack;
 
 logic        p0_req  = 1'b0;
-logic [24:1] p0_addr = '0;
+logic [AW:1] p0_addr = '0;
 wire  [15:0] p0_dout;
 wire         p0_ack;
 
@@ -68,17 +77,17 @@ wire  [63:0] p1_dout;
 wire         p1_ack;
 
 logic         p2_req  = 1'b0;
-logic  [24:4] p2_addr = '0;
+logic  [AW:4] p2_addr = '0;
 wire  [127:0] p2_dout;
 wire          p2_ack;
 
 logic        p3_req  = 1'b0;
-logic [24:1] p3_addr = '0;
+logic [AW:1] p3_addr = '0;
 wire  [15:0] p3_dout;
 wire         p3_ack;
 
 logic        p4_req  = 1'b0;
-logic [24:1] p4_addr = '0;
+logic [AW:1] p4_addr = '0;
 wire  [15:0] p4_dout;
 wire         p4_ack;
 
@@ -88,7 +97,9 @@ wire  [63:0] p5_dout;
 wire         p5_ack;
 
 // ---------------------------------------------------------------------------
-sdram u_ctl (
+sdram #(
+    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(CTL_COL_BITS)
+) u_ctl (
     .clk        (clk),
     .init       (init),
     .ready      (ready),
@@ -114,6 +125,7 @@ sdram u_ctl (
 );
 
 ssv_sdram_chip #(
+    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(CHIP_COL_BITS),
     .CHECK_OPEN_ROW (1'b1),     // on here: the controller must never RD/WR a
     .TRCD_CYCLES    (3),        // closed bank, and must honour tRCD
     .VERBOSE        (1'b0)

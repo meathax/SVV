@@ -46,5 +46,5 @@
     <dip bits="12,13" name="Lives" ids="1,2,3,4" values="2,3,1,0"/>
     <dip bits="14,15" name="Extend" ids="70000 / every 90000,every 70000,50000 / every 70000,every 50000" values="0,1,2,3"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

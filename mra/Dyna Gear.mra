@@ -7,6 +7,9 @@
   <year>1993</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>5301011011000300040401000000007E</part>
+  </rom>
   <rom index="0" zip="dynagear.zip">
     <!-- program -->
     <interleave output="16">
@@ -46,5 +49,5 @@
     <dip bits="14" name="Free Play" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Health" ids="3 Hearts,4 Hearts" values="0,1"/>
   </switches>
-  <buttons names="Fire,Jump,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Fire,Jump,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

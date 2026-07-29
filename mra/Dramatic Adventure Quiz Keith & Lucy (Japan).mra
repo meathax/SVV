@@ -7,6 +7,9 @@
   <year>1993</year>
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010208100004000100000F0000007E</part>
+  </rom>
   <rom index="0" zip="keithlcy.zip">
     <!-- program -->
     <part name="vg002-07.u28" crc="57f80ff5"/>
@@ -39,5 +42,5 @@
     <dip bits="10,11" name="Lives" ids="2,3,4,5" values="2,3,1,0"/>
     <dip bits="12,13" name="Bonus Life" ids="Every 100k,Every 150k,100k &amp; Every 200K,Every 200k" values="3,2,1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

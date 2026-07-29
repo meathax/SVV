@@ -8,6 +8,9 @@
   <year>1999</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
+  <rom index="1">
+    <part>53010220120003140701000F0000004A</part>
+  </rom>
   <rom index="0" zip="sxyreac2.zip">
     <!-- program -->
     <part name="ac1714e00.u32" crc="78075d70"/>
@@ -40,5 +43,5 @@
     <dip bits="13" name="Free Play" ids="Off,On" values="1,0"/>
     <dip bits="14" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

@@ -25,10 +25,13 @@ module ssv_rom_loader (
     input        [7:0] ioctl_dout,
     output             ioctl_wait,
     output logic       sdr_wr_req,
-    output logic [24:1] sdr_wr_addr,
+    output logic [ssv_pkg::SDR_AW:1] sdr_wr_addr,
     output logic [15:0] sdr_wr_din,
     output logic [1:0] sdr_wr_be,
     input              sdr_wr_ack,
+    // Per-game configuration, parsed from MRA <rom index="1">.
+    output ssv_pkg::ssv_cfg_t cfg,
+    output logic       cfg_valid,
     output logic       rom_loaded,
     // Highest index-0 stream address accepted during the active download.
     // Used by the diagnostic overlay; does not affect load behavior.
@@ -41,7 +44,50 @@ logic [7:0] byte_lo;
 logic       busy;
 logic       index0_seen;
 
-function automatic logic [24:0] stream_byte_address(
+// ---------------------------------------------------------------------------
+// Per-game configuration, MRA <rom index="1">, 16 bytes little-endian.
+//
+//   0  magic 'S' (0x53)      8  bank_valid
+//   1  version (1)           9  flags0: b0 tile_code_identity
+//   2  prog_mb                        b1 irq_level1_line0
+//   3  gfx_mb                         b2 has_add_buttons
+//   4  gfx_code_k           10  wdog_mode
+//   5  gfx_code_mul3        11  game_id
+//   6  gfx_quarters         12..14 reserved (0)
+//   7  bank_map             15  checksum: bytes 0..14 summed, negated
+//
+// The block MUST precede <rom index="0"> in the MRA, because index-0 bytes
+// cannot be placed without knowing the layout. A mis-ordered or malformed
+// block leaves cfg_valid low, index 0 is then discarded, rom_loaded never
+// asserts and LED_USER stays lit.
+//
+// There is deliberately NO silent fallback to Dyna Gear defaults. A fallback
+// turns a packaging mistake into a corrupt-graphics bug hunt, which is exactly
+// the class of fake bug this core has spent effort avoiding elsewhere.
+// ---------------------------------------------------------------------------
+localparam int CFG_BYTES = 16;
+logic [7:0] cfg_raw [0:CFG_BYTES-1];
+logic [7:0] cfg_sum;
+logic       cfg_seen_last;
+
+function automatic ssv_pkg::ssv_cfg_t cfg_decode();
+    cfg_decode = '{
+        game_id:            cfg_raw[11][3:0],
+        prog_mb:            cfg_raw[2][2:0],
+        gfx_mb:             cfg_raw[3][5:0],
+        gfx_code_k:         cfg_raw[4][4:0],
+        gfx_code_mul3:      cfg_raw[5][0],
+        gfx_quarters:       cfg_raw[6][2:0],
+        bank_map:           cfg_raw[7],
+        bank_valid:         cfg_raw[8][3:0],
+        tile_code_identity: cfg_raw[9][0],
+        irq_level1_line0:   cfg_raw[9][1],
+        has_add_buttons:    cfg_raw[9][2],
+        wdog_mode:          cfg_raw[10][1:0]
+    };
+endfunction
+
+function automatic logic [SDR_AW:0] stream_byte_address(
     input logic [26:0] stream_addr
 );
     logic [23:0] gfx_offset;     // 0 .. 0xBFFFFF within the graphics stream
@@ -83,15 +129,15 @@ function automatic logic [24:0] stream_byte_address(
             // The sample region no longer sits at its stream offset: the
             // graphics records displaced it above XRAM and CPU RAM.
             stream_byte_address = SDR_SAMPLES_BASE +
-                                  (stream_addr[24:0] - STREAM_SAMPLES[24:0]);
+                                  (stream_addr[SDR_AW:0] - STREAM_SAMPLES[SDR_AW:0]);
         end
         else begin
-            stream_byte_address = stream_addr[24:0];  // V60 program, identity
+            stream_byte_address = stream_addr[SDR_AW:0];  // V60 program, identity
         end
     end
 endfunction
 
-wire [24:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
+wire [SDR_AW:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
 
 assign ioctl_wait = busy | ~mem_ready;
 
@@ -100,6 +146,9 @@ always_ff @(posedge clk) begin
         byte_lo     <= 8'h00;
         busy        <= 1'b0;
         index0_seen <= 1'b0;
+        cfg_valid   <= 1'b0;
+        cfg_seen_last <= 1'b0;
+        cfg         <= '0;
         sdr_wr_req  <= 1'b0;
         sdr_wr_addr <= '0;
         sdr_wr_din  <= '0;
@@ -113,7 +162,25 @@ always_ff @(posedge clk) begin
             busy       <= 1'b0;
         end
 
-        if (mem_ready && ioctl_download && ioctl_wr && !busy &&
+        // --- index 1: capture the configuration block ---
+        if (ioctl_download && ioctl_wr && ioctl_index == 8'd1 &&
+            ioctl_addr < CFG_BYTES) begin
+            cfg_raw[ioctl_addr[3:0]] <= ioctl_dout;
+            cfg_seen_last <= (ioctl_addr == CFG_BYTES - 1);
+        end
+
+        // Validate one cycle after the last byte lands, so cfg_raw is settled.
+        if (cfg_seen_last) begin
+            cfg_seen_last <= 1'b0;
+            cfg_sum = 8'd0;
+            for (int i = 0; i < CFG_BYTES - 1; i++)
+                cfg_sum = cfg_sum + cfg_raw[i];
+            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd1) &&
+                         (cfg_raw[CFG_BYTES-1] == (-cfg_sum));
+            cfg <= cfg_decode();
+        end
+
+        if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&
             ioctl_index == 8'd0 && ioctl_addr < STREAM_END) begin
             if (ioctl_addr > download_max_addr)
                 download_max_addr <= ioctl_addr;
@@ -121,14 +188,14 @@ always_ff @(posedge clk) begin
                 byte_lo <= ioctl_dout;
             else begin
                 sdr_wr_req  <= 1'b1;
-                sdr_wr_addr <= mapped_ioctl_addr[24:1];
+                sdr_wr_addr <= mapped_ioctl_addr[SDR_AW:1];
                 sdr_wr_din  <= {ioctl_dout, byte_lo};
                 sdr_wr_be   <= 2'b11;
                 busy        <= 1'b1;
             end
         end
 
-        if (mem_ready && ioctl_download && ioctl_wr &&
+        if (mem_ready && ioctl_download && ioctl_wr && cfg_valid &&
             ioctl_index == 8'd0 && ioctl_addr == 27'd0) begin
             rom_loaded  <= 1'b0;
             index0_seen <= 1'b1;

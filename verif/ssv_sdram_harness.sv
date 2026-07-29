@@ -24,21 +24,33 @@
 // number this harness exists to produce.
 `timescale 1ns/1ps
 
-module ssv_sdram_harness (
+module ssv_sdram_harness #(
+    // Geometry, passed to BOTH the controller and the part so they cannot
+    // drift apart by accident. Overriding only one of them on purpose is the
+    // mismatch/aliasing negative test.
+    parameter int BANK_BITS      = 2,
+    parameter int ROW_BITS       = 13,
+    parameter int COL_BITS       = 9,
+    parameter int CHIP_COL_BITS  = COL_BITS,
+    parameter int TRFC_CYC       = 6,
+    // Word-address width the harness ports carry. Derived, so a bench that
+    // overrides COL_BITS gets matching port widths for free.
+    parameter int AW             = BANK_BITS + ROW_BITS + COL_BITS
+) (
     input  logic        clk_ram,
     input  logic        init,
     output logic        ready,
 
     // ROM download / CPU writes
     input  logic        wr_req,
-    input  logic [24:1] wr_addr,
+    input  logic [AW:1] wr_addr,
     input  logic [15:0] wr_din,
     input  logic  [1:0] wr_be,
     output logic        wr_ack,
 
     // p0: V60 fetch/data
     input  logic        p0_req,
-    input  logic [24:1] p0_addr,
+    input  logic [AW:1] p0_addr,
     output logic [15:0] p0_dout,
     output logic        p0_ack,
 
@@ -47,13 +59,13 @@ module ssv_sdram_harness (
     // tile row into one aligned 16-byte record -- see
     // docs/SDRAM_GFX_REPACK_DESIGN.md.
     input  logic         p2_req,
-    input  logic  [24:4] p2_addr,
+    input  logic  [AW:4] p2_addr,
     output logic [127:0] p2_dout,
     output logic         p2_ack,
 
     // p4: ES5506 sample fetch (16-bit)
     input  logic        p4_req,
-    input  logic [24:1] p4_addr,
+    input  logic [AW:1] p4_addr,
     output logic [15:0] p4_dout,
     output logic        p4_ack
 );
@@ -64,7 +76,10 @@ wire  [1:0] SDRAM_BA;
 wire        SDRAM_DQML, SDRAM_DQMH;
 wire        SDRAM_nCS, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nWE, SDRAM_CKE;
 
-sdram controller (
+sdram #(
+    .BANK_BITS(BANK_BITS), .ROW_BITS(ROW_BITS), .COL_BITS(COL_BITS),
+    .TRFC_CYC(TRFC_CYC)
+) controller (
     .clk(clk_ram),
     .init(init),
     .ready(ready),
@@ -99,7 +114,9 @@ sdram controller (
     .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
 );
 
-ssv_sdram_chip chip (
+ssv_sdram_chip #(
+    .BANK_BITS(BANK_BITS), .ROW_BITS(ROW_BITS), .COL_BITS(CHIP_COL_BITS)
+) chip (
     .clk(clk_ram),
     .SDRAM_DQ(SDRAM_DQ),
     .SDRAM_A(SDRAM_A),

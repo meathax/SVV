@@ -39,5 +39,5 @@
     <dip bits="10,11" name="Difficulty" ids="Easy,Normal,Hard,Hardest" values="2,3,1,0"/>
     <dip bits="12,13" name="Rounds (Vs Mode)" ids="1,2,3,4" values="0,3,2,1"/>
   </switches>
-  <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
+  <buttons names="Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
 </misterromdescription>

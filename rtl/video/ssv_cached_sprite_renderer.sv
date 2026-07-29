@@ -15,6 +15,7 @@ module ssv_cached_sprite_renderer #(
 ) (
     input  logic         clk,
     input  logic         rst,
+    input  ssv_pkg::ssv_cfg_t cfg,
     input  logic         cache_start,
     // Asserted once the raster reaches the lines where the first display rows
     // must be prepared. The vblank descriptor build must give up by then --
@@ -41,7 +42,7 @@ module ssv_cached_sprite_renderer #(
     input  logic  [15:0] spr_data_next,
 
     output logic         rom_req,
-    output logic  [24:4] rom_addr,
+    output logic  [ssv_pkg::SDR_AW:4] rom_addr,
     input  logic [127:0] rom_data,
     input  logic         rom_ack,
 
@@ -341,11 +342,18 @@ function automatic logic signed [8:0] signed8(input logic [15:0] value);
     signed8 = $signed({value[7], value[7:0]});
 endfunction
 
+// MAME's init_ssv builds m_tile_code[i] = bitswap<4>(i,0,1,2,3) << 16, which
+// is attr[13:10] REVERSED. cairblad uses init_ssv_tilescram, whose table is the
+// identity (m_tile_code[i] = i << 16), so the high nibble passes through in
+// natural order. One config bit selects between them.
 function automatic logic [19:0] expand_code(
+    input ssv_pkg::ssv_cfg_t cfg,
     input logic [15:0] low,
     input logic [15:0] attr
 );
-    expand_code = {{attr[10], attr[11], attr[12], attr[13]}, low};
+    expand_code = cfg.tile_code_identity
+                ? {attr[13:10], low}
+                : {{attr[10], attr[11], attr[12], attr[13]}, low};
 endfunction
 
 function automatic logic [15:0] offset_word(
@@ -516,7 +524,7 @@ always_comb begin
                       {{6{global_y_base_s[10]}}, global_y_base_s} +
                       {1'b0, global_y_adjust} + 17'd2;
 
-    calc_code = expand_code(cached_l0, cached_l1);
+    calc_code = expand_code(cfg, cached_l0, cached_l1);
     if ((calc_xnum == 4'd2) && (calc_ynum == 4'd4))
         calc_code = calc_code & 20'hffff8;
 
@@ -711,7 +719,7 @@ always_ff @(posedge clk) begin
 end
 
 ssv_gfx_row_fetch fetch (
-    .clk(clk), .rst(rst), .start(fetch_start),
+    .clk(clk), .rst(rst), .cfg(cfg), .start(fetch_start),
     .tile_code(fetch_code), .tile_row(fetch_row),
     .rom_req(rom_req), .rom_addr(rom_addr),
     .rom_data(rom_data), .rom_ack(rom_ack),
@@ -909,10 +917,10 @@ always_ff @(posedge clk) begin
                                                           :  tile_map_y[2:0];
                     if (tile_pf_flip_y_next ? !tile_map_y[3] : tile_map_y[3])
                         tile_pf_fetch_code <=
-                            expand_code(tile_pf_code_low, tile_pf_attr) + 1'd1;
+                            expand_code(cfg, tile_pf_code_low, tile_pf_attr) + 1'd1;
                     else
                         tile_pf_fetch_code <=
-                            expand_code(tile_pf_code_low, tile_pf_attr);
+                            expand_code(cfg, tile_pf_code_low, tile_pf_attr);
                     tile_pf_valid <= 1'b1;
                     tile_pf_stage <= 2'd0;
                 end
@@ -1340,10 +1348,10 @@ always_ff @(posedge clk) begin
                 fetch_row <= tile_flip_y ? ~tile_map_y[2:0] :
                                            tile_map_y[2:0];
                 if (tile_flip_y ? !tile_map_y[3] : tile_map_y[3])
-                    fetch_code <= expand_code(tile_code_low, tile_attr) +
+                    fetch_code <= expand_code(cfg, tile_code_low, tile_attr) +
                                   1'd1;
                 else
-                    fetch_code <= expand_code(tile_code_low, tile_attr);
+                    fetch_code <= expand_code(cfg, tile_code_low, tile_attr);
                 state <= FETCH_START;
             end
 

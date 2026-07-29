@@ -21,6 +21,9 @@ import re
 import sys
 import os
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ssv_cfg_block as cfgblk
+
 # Every set in the driver, discovered from the GAME() lines rather than
 # hardcoded, so a MAME update that adds an SSV title is picked up by re-running
 # this instead of by remembering to edit a list.
@@ -29,10 +32,16 @@ SETS = None
 # The core's CONF_STR J1 list is fixed at six entries, so an MRA cannot add a
 # button the core does not expose. Games with more buttons than this are noted
 # in <about> rather than silently mapped to nothing.
-BUTTONS_DEFAULT = ('Button 1,Button 2,Test,Service,Start,Coin',
-                   'A,B,R,L,Start,Select')
-BUTTONS = {'dynagear': ('Fire,Jump,Test,Service,Start,Coin',
-                        'A,B,R,L,Start,Select')}
+# The core's J1 list is now ten entries: six game buttons then
+# Test/Service/Start/Coin. SSV's P1/P2 ports carry B1-B3 and the $500008
+# window carries B4-B6 (Survival Arts uses all six). Test and Service reuse
+# R and L, which is what they mapped to before the widening.
+BUTTONS_DEFAULT = ('Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,'
+                   'Test,Service,Start,Coin',
+                   'A,B,X,Y,L,R,R,L,Start,Select')
+BUTTONS = {'dynagear': ('Fire,Jump,Button 3,Button 4,Button 5,Button 6,'
+                        'Test,Service,Start,Coin',
+                        'A,B,X,Y,L,R,R,L,Start,Select')}
 
 # SSV_COINAGE_* expansions, from the macro definitions in ssv.cpp.
 COINAGE = {
@@ -288,19 +297,64 @@ def dips_to_mra(dips):
             lines, skipped)
 
 
+
+def ensoniq_banks(regions):
+    """(bank_valid, bank_map) for the four ES5506 CR banks.
+
+    MAME declares ensoniq.0..3. A bank with its own ROM_LOADs reads its own
+    stream slot; a bank declared with ROM_COPY is an ADDRESS ALIAS onto another
+    bank, not extra data, so it is marked valid but mapped to the source slot.
+    That is what lets twineag2/ultrax work without duplicating 8 MB of samples
+    in SDRAM.
+    """
+    by_name = {}
+    for r in regions:
+        if r['name'].startswith('ensoniq'):
+            idx = r['name'].split('.')[-1]
+            by_name[int(idx) if idx.isdigit() else 0] = r
+    valid = 0
+    bmap = 0
+    slot = {}
+    nxt = 0
+    for b in sorted(by_name):
+        if by_name[b]['loads']:
+            slot[b] = nxt
+            nxt += 1
+    for b in sorted(by_name):
+        r = by_name[b]
+        if r['loads']:
+            src = slot[b]
+        elif r.get('copies'):
+            cn = r['copies'][0].split('.')[-1]
+            src = slot.get(int(cn) if cn.isdigit() else 0, 0)
+        else:
+            continue
+        valid |= (1 << b)
+        bmap |= (src & 3) << (2 * b)
+    return valid, bmap
+
+
+# Sets the core can currently run. Order fixes game_id.
+SUPPORTED = ['dynagear']
+
 def main():
     src_path, out_dir = sys.argv[1], sys.argv[2]
     src = open(src_path, encoding='utf-8', errors='replace').read()
     os.makedirs(out_dir, exist_ok=True)
 
     games = {}
-    for m in re.finditer(r'^GAME\(\s*(\d+\??)\s*,\s*(\w+)\s*,\s*(\w+)\s*,'
-                         r'\s*(\w+)\s*,\s*(\w+)\s*,.*?(ROT\d+)\s*,\s*"([^"]*)"'
-                         r'\s*,\s*"((?:[^"\\]|\\.)*)"', src, re.M | re.S):
+    # Groups: 1 year, 2 set, 3 parent, 4 machine config, 5 input ports,
+    # 6 state class, 7 init function.
+    game_re = (r'^GAME\(\s*(\d+\??)\s*,\s*(\w+)\s*,\s*(\w+)\s*,'
+               r'\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,'
+               r'.*?(ROT\d+)\s*,\s*"([^"]*)"'
+               r'\s*,\s*"((?:[^"\\]|\\.)*)"')
+    for m in re.finditer(game_re, src, re.M | re.S):
         games[m.group(2)] = {'year': m.group(1).rstrip('?'),
-                             'parent': m.group(3), 'ports': m.group(5),
-                             'rot': m.group(6), 'maker': m.group(7),
-                             'desc': m.group(8)}
+                             'parent': m.group(3), 'machine': m.group(4),
+                             'ports': m.group(5), 'init': m.group(7),
+                             'rot': m.group(8), 'maker': m.group(9),
+                             'desc': m.group(10)}
 
     order = [m.group(1) for m in
              re.finditer(r'^GAME\(\s*\d+\??\s*,\s*(\w+)', src, re.M)]
@@ -341,7 +395,7 @@ def main():
             parse_dips(src, g['ports']))
         names, defaults = BUTTONS.get(setname, BUTTONS_DEFAULT)
 
-        supported = setname == 'dynagear'
+        supported = setname in SUPPORTED
         about = ('Runs on the SSV core.' if supported else
                  'NOT YET SUPPORTED by the SSV core: rtl/mem/ssv_rom_loader.sv '
                  'takes a fixed Dyna Gear stream (1 MB program, graphics as '
@@ -371,6 +425,31 @@ def main():
         zips = setname + '.zip'
         if g['parent'] != '0':
             zips = '%s.zip|%s.zip' % (setname, zipname)
+        # Per-game configuration block. MUST precede <rom index="0">: the
+        # loader cannot place index-0 bytes without knowing the layout, and it
+        # discards them until this block validates (rtl/mem/ssv_rom_loader.sv).
+        cfg_bytes = None
+        try:
+            gfx_region = gfx[0]['size'] if gfx else 0
+            gfx_loaded = sum(l['size'] for r in gfx for l in r['loads'])
+            prog_size = prog[0]['size'] if prog else 0
+            ens_valid, ens_map = ensoniq_banks(regions)
+            flags = cfgblk.resolve_init(src, g['init'])
+            amap = cfgblk.resolve_addrmap(src, g['machine'])
+            flags['has_add_buttons'] = (
+                cfgblk.has_add_buttons(src, amap) if amap else False)
+            wdog = cfgblk.watchdog_mode(src, amap) if amap else 0
+            cfg_bytes = cfgblk.build_cfg_bytes(
+                SUPPORTED.index(setname) if setname in SUPPORTED else 15,
+                prog_size, gfx_region, gfx_loaded,
+                ens_valid, ens_map, flags, wdog)
+        except Exception as exc:
+            # A set whose geometry this core cannot describe gets no config
+            # block, so the loader refuses it outright rather than running on
+            # silently wrong numbers.
+            print('  no config for %s: %s' % (setname, exc))
+        if cfg_bytes:
+            out.extend(cfgblk.cfg_rom_block(cfg_bytes))
         out.append('  <rom index="0" zip="%s">' % zips)
         out.extend(body)
         out.append('  </rom>')
