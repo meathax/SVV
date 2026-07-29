@@ -20,8 +20,8 @@ module ssv_sprite_renderer (
     input  logic  [15:0] spr_data,
 
     output logic         rom_req,
-    output logic  [24:3] rom_addr,
-    input  logic  [63:0] rom_data,
+    output logic  [24:4] rom_addr,
+    input  logic [127:0] rom_data,
     input  logic         rom_ack,
 
     output logic         plot_we,

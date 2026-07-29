@@ -377,12 +377,14 @@ always_ff @(posedge clk) begin
                         logic signed [17:0] p3, p4;
                         unique case (cr[9:8])
                             2'b00: begin
-                                p3 = hp(proc_p2, k2, o3n1, o2n2);
-                                p4 = hp(p3, k2, o4n1, o3n2);
+                                // prev must be this pole's INPUT one
+                                // sample ago (pole 2's output), not two.
+                                p3 = hp(proc_p2, k2, o3n1, o2n1);
+                                p4 = hp(p3, k2, o4n1, o3n1);
                             end
                             2'b01: begin
                                 p3 = lp(proc_p2, k1, o3n1);
-                                p4 = hp(p3, k2, o4n1, o3n2);
+                                p4 = hp(p3, k2, o4n1, o3n1);
                             end
                             2'b10: begin
                                 p3 = lp(proc_p2, k2, o3n1);
@@ -424,8 +426,12 @@ always_ff @(posedge clk) begin
                         gR = vol_gain(rvol);
                         aL = $signed(proc_p4[17:2]) * $signed({1'b0, gL});
                         aR = $signed(proc_p4[17:2]) * $signed({1'b0, gR});
-                        mix_l <= mix_l + 24'(aL >>> 11);
-                        mix_r <= mix_r + 24'(aR >>> 11);
+                        // >>>13, not >>>11: MAME normalises the 20-bit
+                        // accumulator to full scale, and this path ran 4x
+                        // hot, hard-clipping every voice at a quarter of
+                        // the usable range.
+                        mix_l <= mix_l + 24'(aL >>> 13);
+                        mix_r <= mix_r + 24'(aR >>> 13);
 
                         eng_wr_accum <= 1'b1;
                         eng_accum_w  <= proc_accn;

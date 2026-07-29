@@ -8,9 +8,9 @@ logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
-logic sdr_p1_req, sdr_p1_ack;
-logic [24:3] sdr_p1_addr;
-logic [63:0] sdr_p1_dout;
+logic sdr_p2_req, sdr_p2_ack;
+logic [24:4] sdr_p2_addr;
+logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
 logic [24:1] sdr_p4_addr;
@@ -58,6 +58,7 @@ integer packed_code;
 integer packed_row;
 integer raw_q0_index;
 integer raw_q1_index;
+integer raw_q2_index;
 integer nonzero_global_words;
 integer nonzero_palette_entries;
 integer first_nonzero_global;
@@ -68,8 +69,8 @@ ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
-    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
-    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
+    .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
+    .sdr_p2_dout(sdr_p2_dout), .sdr_p2_ack(sdr_p2_ack),
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
@@ -85,7 +86,7 @@ ssv_core dut (
 
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 1'b0;
-    sdr_p1_ack <= 1'b0;
+    sdr_p2_ack <= 1'b0;
     sdr_wr_ack <= 1'b0;
     sdr_p4_ack <= 1'b0;
 
@@ -124,19 +125,26 @@ always_ff @(posedge clk_sys) begin
         end else if (!sdr_p0_req)
             p0_seen <= 1'b0;
 
-        if (sdr_p1_req && !p1_seen) begin
+        if (sdr_p2_req && !p1_seen) begin
             p1_seen <= 1'b1;
-            p1_byte_addr = {sdr_p1_addr, 3'b000};
+            // Hardware repacks a whole 16-pixel tile row into one aligned
+            // 16-byte record: Q0 | Q1 | Q2 | unwritten Q3. Reconstruct that
+            // SDRAM view from MAME's raw 4 MiB quarter layout. Must agree
+            // with ssv_pkg::gfx_plane_addr and ssv_rom_loader.
+            p1_byte_addr = {sdr_p2_addr, 4'b0000};
             sprite_index = p1_byte_addr - 25'h0100000;
-            if (sprite_index >= 0 && sprite_index < 8388608) begin
-                // Hardware download interleaves corresponding Q0/Q1 rows
-                // into one 64-bit beat. Reconstruct that packed SDRAM view
-                // from MAME's raw 4 MiB quarter layout.
-                packed_code = sprite_index >> 6;
-                packed_row = (sprite_index >> 3) & 7;
+            if (sprite_index >= 0 && sprite_index < 16777216) begin
+                packed_code = sprite_index >> 7;
+                packed_row = (sprite_index >> 4) & 7;
                 raw_q0_index = packed_code * 32 + packed_row * 4;
                 raw_q1_index = 4194304 + raw_q0_index;
-                sdr_p1_dout <= {
+                raw_q2_index = 8388608 + raw_q0_index;
+                sdr_p2_dout <= {
+                    32'h0,
+                    sprite_rom[raw_q2_index + 3],
+                    sprite_rom[raw_q2_index + 2],
+                    sprite_rom[raw_q2_index + 1],
+                    sprite_rom[raw_q2_index],
                     sprite_rom[raw_q1_index + 3],
                     sprite_rom[raw_q1_index + 2],
                     sprite_rom[raw_q1_index + 1],
@@ -147,29 +155,16 @@ always_ff @(posedge clk_sys) begin
                     sprite_rom[raw_q0_index]
                 };
             end
-            else if (sprite_index >= 0 &&
-                     sprite_index + 7 < 12582912) begin
-                sdr_p1_dout <= {
-                    sprite_rom[sprite_index + 7],
-                    sprite_rom[sprite_index + 6],
-                    sprite_rom[sprite_index + 5],
-                    sprite_rom[sprite_index + 4],
-                    sprite_rom[sprite_index + 3],
-                    sprite_rom[sprite_index + 2],
-                    sprite_rom[sprite_index + 1],
-                    sprite_rom[sprite_index]
-                };
-            end
             else begin
-                sdr_p1_dout <= 64'd0;
+                sdr_p2_dout <= 128'd0;
             end
             p1_ack_hold <= 4'd2;
             p1_transactions <= p1_transactions + 1;
         end
         if (p1_ack_hold != 0) begin
             p1_ack_hold <= p1_ack_hold - 1'd1;
-            sdr_p1_ack <= 1'b1;
-        end else if (!sdr_p1_req)
+            sdr_p2_ack <= 1'b1;
+        end else if (!sdr_p2_req)
             p1_seen <= 1'b0;
 
         if (sdr_wr_req && !wr_seen) begin

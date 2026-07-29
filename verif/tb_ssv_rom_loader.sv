@@ -11,6 +11,7 @@ logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic [26:0] download_max_addr;
+logic [24:1] q0_addr, q1_addr, q2_addr;
 
 ssv_rom_loader dut (.*);
 
@@ -42,42 +43,55 @@ initial begin
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
-    // Code 2, row 3 in MAME's Q0 and Q1 quarters must become the
-    // low/high halves of one aligned 64-bit SDRAM word.
+    // Code 2, row 3 of MAME's three populated quarters must land in ONE
+    // aligned 16-byte record at 0x0100130..0x010013f:
+    //   Q0 -> +0, Q1 -> +4, Q2 -> +8, and +12 is the unwritten quarter 3.
+    // That single record is what lets ssv_gfx_row_fetch read a whole tile row
+    // with one 128-bit p2 burst instead of two 64-bit p1 bursts.
     send_byte(27'h010004c, 8'h11);
     send_byte(27'h010004d, 8'h22);
     if (!sdr_wr_req ||
-        sdr_wr_addr !== (25'h0100098 >> 1) ||
+        sdr_wr_addr !== (25'h0100130 >> 1) ||
         sdr_wr_din !== 16'h2211)
-        $fatal(1, "Q0 packed-row address mismatch");
+        $fatal(1, "Q0 record address mismatch got %h", sdr_wr_addr);
+    q0_addr = sdr_wr_addr;
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
     send_byte(27'h050004c, 8'h33);
     send_byte(27'h050004d, 8'h44);
     if (!sdr_wr_req ||
-        sdr_wr_addr !== (25'h010009c >> 1) ||
+        sdr_wr_addr !== (25'h0100134 >> 1) ||
         sdr_wr_din !== 16'h4433)
-        $fatal(1, "Q1 packed-row address mismatch");
+        $fatal(1, "Q1 record address mismatch got %h", sdr_wr_addr);
+    q1_addr = sdr_wr_addr;
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
-    // Q2 remains in place so its two adjacent 32-bit rows share a second
-    // aligned 64-bit read without increasing the 12 MiB graphics footprint.
     send_byte(27'h090004c, 8'h55);
     send_byte(27'h090004d, 8'h66);
     if (!sdr_wr_req ||
-        sdr_wr_addr !== (25'h090004c >> 1) ||
+        sdr_wr_addr !== (25'h0100138 >> 1) ||
         sdr_wr_din !== 16'h6655)
-        $fatal(1, "Q2 native-row address mismatch");
+        $fatal(1, "Q2 record address mismatch got %h", sdr_wr_addr);
+    q2_addr = sdr_wr_addr;
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
+    // The point of the repack, asserted directly: all three quarters of one
+    // tile row share a single 16-byte record, i.e. one p2 burst address.
+    if (q0_addr[24:4] !== q1_addr[24:4] || q0_addr[24:4] !== q2_addr[24:4])
+        $fatal(1,
+               "quarters did not share one 16-byte record: %h %h %h",
+               q0_addr, q1_addr, q2_addr);
+
+    // The sample region no longer sits at its stream offset: the 16 MB
+    // graphics region displaced it to SDR_SAMPLES_BASE = 0x1160000.
     send_byte(27'h0d00000, 8'hcd);
     send_byte(27'h0d00001, 8'hab);
-    if (!sdr_wr_req || sdr_wr_addr !== (25'h0d00000 >> 1) ||
+    if (!sdr_wr_req || sdr_wr_addr !== (25'h1160000 >> 1) ||
         sdr_wr_din !== 16'habcd)
-        $fatal(1, "sample-region write mismatch");
+        $fatal(1, "sample-region write mismatch got %h", sdr_wr_addr);
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 

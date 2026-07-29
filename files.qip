@@ -20,6 +20,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_mlab32_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_debug_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv

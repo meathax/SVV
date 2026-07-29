@@ -102,6 +102,13 @@ localparam CONF_STR = {
     "O[19:16],Coin A,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
     "O[23:20],Coin B,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
     "-;",
+    // On-screen renderer diagnostics (rtl/ssv_debug_overlay.sv). Off is a
+    // bit-exact no-op. Overrun Marks flags every scanline that missed its
+    // deadline; Load Bars / Fetch Wait show how close each line ran and how
+    // much of that was spent waiting on SDRAM; Hide Objects / Hide Background
+    // suppress one layer's pixel writes without changing renderer timing.
+    "O[26:24],Debug Overlay,Off,Overrun Marks,Load Bars,Fetch Wait,Hide Objects,Hide Background;",
+    "-;",
     "R[0],Reset;",
     "J1,B1,B2,B3,Start,Coin,Test,Service;",
     "V,v",`BUILD_DATE
@@ -276,9 +283,13 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
-wire p1_req, p1_ack;
-wire [24:3] p1_addr;
-wire [63:0] p1_dout;
+// Graphics row fetch: one 128-bit p2 burst per 16-pixel tile row. p1 (64-bit,
+// 4-word burst) is now unused by this core and is left tied off below -- it is
+// the natural home for a future ES5506 sample line cache, whose worst-case
+// latency is better served by a 13-cycle transaction than p2's 17.
+wire p2_req, p2_ack;
+wire [24:4] p2_addr;
+wire [127:0] p2_dout;
 wire p4_req, p4_ack;
 wire [24:1] p4_addr;
 wire [15:0] p4_dout;
@@ -309,8 +320,8 @@ sdram sdram (
     .wr_req(sw_req), .wr_addr(sw_addr), .wr_din(sw_din),
     .wr_be(sw_be), .wr_ack(sw_ack),
     .p0_req(p0_req), .p0_addr(p0_addr), .p0_dout(p0_dout), .p0_ack(p0_ack),
-    .p1_req(p1_req), .p1_addr(p1_addr), .p1_dout(p1_dout), .p1_ack(p1_ack),
-    .p2_req(1'b0), .p2_addr('0), .p2_dout(), .p2_ack(),
+    .p1_req(1'b0), .p1_addr('0), .p1_dout(), .p1_ack(),
+    .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
     .p3_req(1'b0), .p3_addr('0), .p3_dout(), .p3_ack(),
     .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack),
     .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
@@ -389,8 +400,8 @@ ssv_core core (
     .clk_sys(clk_sys), .rst(core_reset), .ce_cpu(ce_cpu),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack && !probe_active),
-    .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr),
-    .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
+    .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr),
+    .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
     .sdr_wr_din(core_wr_din), .sdr_wr_be(core_wr_be),
     .sdr_wr_ack(core_wr_ack),
@@ -399,6 +410,7 @@ ssv_core core (
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
     .in_p1(player_port(joystick_0)), .in_p2(player_port(joystick_1)),
     .in_system(system_port), .in_extra(16'hffff),
+    .dbg_overlay_mode(status[26:24]),
     .rgb(core_rgb), .ce_pixel(core_ce),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),

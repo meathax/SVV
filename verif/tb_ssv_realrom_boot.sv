@@ -7,9 +7,9 @@ logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
-logic sdr_p1_req, sdr_p1_ack;
-logic [24:3] sdr_p1_addr;
-logic [63:0] sdr_p1_dout;
+logic sdr_p2_req, sdr_p2_ack;
+logic [24:4] sdr_p2_addr;
+logic [127:0] sdr_p2_dout;
 
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
@@ -57,8 +57,8 @@ ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
-    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
-    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
+    .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
+    .sdr_p2_dout(sdr_p2_dout), .sdr_p2_ack(sdr_p2_ack),
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
@@ -92,8 +92,8 @@ ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= 0;
-    sdr_p1_ack <= 0;
-    sdr_p1_dout <= 64'd0;
+    sdr_p2_ack <= 0;
+    sdr_p2_dout <= 128'd0;
     sdr_wr_ack <= 0;
     sdr_p4_ack <= 0;
     if (rst) begin
@@ -147,17 +147,17 @@ always_ff @(posedge clk_sys) begin
         end else if (!sdr_wr_req)
             wr_seen <= 0;
 
-        if (sdr_p1_req)
-            sdr_p1_ack <= 1;
+        if (sdr_p2_req)
+            sdr_p2_ack <= 1;
         if (sdr_p4_req && !p4_seen) begin
             p4_seen <= 1;
             // ES5506 samples live at SDR_SAMPLES_BASE in the download image.
             p0_byte_addr = {sdr_p4_addr, 1'b0};
-            if (p0_byte_addr >= 25'h0d00000 &&
-                p0_byte_addr < 25'h1100000)
+            if (p0_byte_addr >= 25'h1160000 &&
+                p0_byte_addr < 25'h1560000)
                 sdr_p4_dout <= {
-                    sample_bytes[p0_byte_addr - 25'h0d00000 + 1],
-                    sample_bytes[p0_byte_addr - 25'h0d00000]
+                    sample_bytes[p0_byte_addr - 25'h1160000 + 1],
+                    sample_bytes[p0_byte_addr - 25'h1160000]
                 };
             else
                 sdr_p4_dout <= 16'd0;

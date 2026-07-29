@@ -19,9 +19,9 @@ logic rst, ce_cpu;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
-logic sdr_p1_req, sdr_p1_ack;
-logic [24:3] sdr_p1_addr;
-logic [63:0] sdr_p1_dout;
+logic sdr_p2_req, sdr_p2_ack;
+logic [24:4] sdr_p2_addr;
+logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic sdr_p4_req, sdr_p4_ack;
 logic [24:1] sdr_p4_addr;
@@ -29,6 +29,56 @@ logic [15:0] sdr_p4_dout;
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
+
+// ---------------------------------------------------------------------------
+// Two SDRAM models, selected at run time by +REAL_SDRAM.
+//
+// beh_*  the original one-cycle-per-port behavioural model. Every existing gate
+//        and the golden frame CRC were produced against it, so it stays the
+//        default and its behaviour is untouched.
+// real_* rtl/mem/sdram.sv driving a chip model, at the true clk_ram = 2 x
+//        clk_sys ratio. This is the only configuration in which a scanline can
+//        actually miss its deadline, which is the precondition for the
+//        hardware-only corruption this core shows on real silicon.
+//
+// Both models see every request; only the responses are muxed.
+// ---------------------------------------------------------------------------
+// Defaults to the behavioural model from time zero: the muxes and core_rst
+// read this before the plusargs are parsed.
+logic        use_real_sdram = 1'b0;
+logic        beh_p0_ack, beh_p2_ack, beh_wr_ack, beh_p4_ack;
+logic [15:0] beh_p0_dout, beh_p4_dout;
+logic [127:0] beh_p2_dout;
+logic        real_p0_ack, real_p2_ack, real_wr_ack, real_p4_ack;
+logic [15:0] real_p0_dout, real_p4_dout;
+logic [127:0] real_p2_dout;
+logic        sdram_ready;
+
+// clk_ram is exactly twice clk_sys on hardware (96.6 / 48.3 MHz). Getting this
+// ratio wrong would silently change every bandwidth number this harness exists
+// to produce.
+logic clk_ram = 1'b0;
+always #2.5 clk_ram = ~clk_ram;
+
+ssv_sdram_harness u_sdram (
+    .clk_ram(clk_ram), .init(rst), .ready(sdram_ready),
+    .wr_req(sdr_wr_req), .wr_addr(sdr_wr_addr), .wr_din(sdr_wr_din),
+    .wr_be(sdr_wr_be), .wr_ack(real_wr_ack),
+    .p0_req(sdr_p0_req), .p0_addr(sdr_p0_addr),
+    .p0_dout(real_p0_dout), .p0_ack(real_p0_ack),
+    .p2_req(sdr_p2_req), .p2_addr(sdr_p2_addr),
+    .p2_dout(real_p2_dout), .p2_ack(real_p2_ack),
+    .p4_req(sdr_p4_req), .p4_addr(sdr_p4_addr),
+    .p4_dout(real_p4_dout), .p4_ack(real_p4_ack)
+);
+
+assign sdr_p0_ack  = use_real_sdram ? real_p0_ack  : beh_p0_ack;
+assign sdr_p2_ack  = use_real_sdram ? real_p2_ack  : beh_p2_ack;
+assign sdr_wr_ack  = use_real_sdram ? real_wr_ack  : beh_wr_ack;
+assign sdr_p4_ack  = use_real_sdram ? real_p4_ack  : beh_p4_ack;
+assign sdr_p0_dout = use_real_sdram ? real_p0_dout : beh_p0_dout;
+assign sdr_p2_dout = use_real_sdram ? real_p2_dout : beh_p2_dout;
+assign sdr_p4_dout = use_real_sdram ? real_p4_dout : beh_p4_dout;
 logic [23:0] rgb;
 logic ce_pixel, hs, vs, hb, vb;
 logic signed [15:0] audio_l, audio_r;
@@ -39,6 +89,9 @@ logic [15:0] in_p1, in_p2, in_system, in_extra, in_dsw1, in_dsw2;
 
 byte main_rom [0:1048575];
 byte sprite_rom [0:12582911];
+byte sample_rom [0:4194303];
+integer sample_fd, sample_count;
+string sample_path;
 logic [15:0] external_ram [0:196607];
 
 string main_path, sprite_path, crc_path, state_path, scenario;
@@ -62,7 +115,7 @@ logic p0_seen, p1_seen, wr_seen, p4_seen;
 logic [3:0] p0_hold, p1_hold, wr_hold, p4_hold;
 logic [24:0] p0_byte_addr, p1_byte_addr;
 integer ext_index, sprite_index, packed_code, packed_row;
-integer raw_q0_index, raw_q1_index;
+integer raw_q0_index, raw_q1_index, raw_q2_index;
 integer stuck, last_pc_i;
 logic [31:0] last_pc;
 integer bg_overruns, obj_overruns;
@@ -95,12 +148,17 @@ logic [31:0] list_crc, scroll_crc, spr8k_crc, pal_crc;
 
 ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
+// With the real controller the core must stay in reset until the chip has
+// finished its init sequence, exactly as Arcade-SSV.sv does on hardware.
+// Identical to `rst` when the behavioural model is selected.
+wire core_rst = rst | (use_real_sdram & ~sdram_ready);
+
 ssv_core dut (
-    .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
+    .clk_sys(clk_sys), .rst(core_rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
-    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
-    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
+    .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
+    .sdr_p2_dout(sdr_p2_dout), .sdr_p2_ack(sdr_p2_ack),
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
@@ -161,10 +219,10 @@ int cache_peak, cache_peak_frame;
 
 // Sticky multi-cycle ack (covers CE gaps from fractional enable).
 always_ff @(posedge clk_sys) begin
-    sdr_p0_ack <= 1'b0;
-    sdr_p1_ack <= 1'b0;
-    sdr_wr_ack <= 1'b0;
-    sdr_p4_ack <= 1'b0;
+    beh_p0_ack <= 1'b0;
+    beh_p2_ack <= 1'b0;
+    beh_wr_ack <= 1'b0;
+    beh_p4_ack <= 1'b0;
     if (rst) begin
         p0_seen <= 1'b0; p1_seen <= 1'b0;
         wr_seen <= 1'b0; p4_seen <= 1'b0;
@@ -226,44 +284,45 @@ always_ff @(posedge clk_sys) begin
             p0_seen <= 1'b1;
             p0_byte_addr = {sdr_p0_addr, 1'b0};
             if (p0_byte_addr < 25'h0100000)
-                sdr_p0_dout <= {main_rom[p0_byte_addr+1], main_rom[p0_byte_addr]};
+                beh_p0_dout <= {main_rom[p0_byte_addr+1], main_rom[p0_byte_addr]};
             else if (p0_byte_addr >= 25'h1100000 && p0_byte_addr < 25'h1160000) begin
                 ext_index = (p0_byte_addr - 25'h1100000) >> 1;
-                sdr_p0_dout <= external_ram[ext_index];
+                beh_p0_dout <= external_ram[ext_index];
             end else
-                sdr_p0_dout <= 16'hffff;
+                beh_p0_dout <= 16'hffff;
             p0_hold <= 4'd2;
         end
         if (p0_hold != 0) begin
-            sdr_p0_ack <= 1'b1;
+            beh_p0_ack <= 1'b1;
             p0_hold <= p0_hold - 1'd1;
         end else if (!sdr_p0_req)
             p0_seen <= 1'b0;
 
-        if (sdr_p1_req && !p1_seen) begin
+        if (sdr_p2_req && !p1_seen) begin
             p1_seen <= 1'b1;
-            p1_byte_addr = {sdr_p1_addr, 3'b000};
-            sprite_index = p1_byte_addr - 25'h0100000;
-            if (sprite_index >= 0 && sprite_index < 8388608) begin
-                packed_code = sprite_index >> 6;
-                packed_row = (sprite_index >> 3) & 7;
+            // One aligned 16-byte record per 16-pixel tile row:
+            //   [31:0]=Q0  [63:32]=Q1  [95:64]=Q2  [127:96]=Q3 (never loaded).
+            // This must agree byte for byte with ssv_pkg::gfx_plane_addr, with
+            // ssv_rom_loader, and with the +REAL_SDRAM chip preload below.
+            p1_byte_addr = {sdr_p2_addr, 4'b0000};
+            sprite_index = p1_byte_addr - 25'h0100000;   // SDR_GFX_BASE
+            if (sprite_index >= 0 && sprite_index < 16777216) begin
+                packed_code = sprite_index >> 7;         // 0..0x1ffff
+                packed_row = (sprite_index >> 4) & 7;
                 raw_q0_index = packed_code * 32 + packed_row * 4;
                 raw_q1_index = 4194304 + raw_q0_index;
-                sdr_p1_dout <= {
+                raw_q2_index = 8388608 + raw_q0_index;
+                beh_p2_dout <= {
+                    32'h0,                               // Q3 slot: never loaded
+                    sprite_rom[raw_q2_index+3], sprite_rom[raw_q2_index+2],
+                    sprite_rom[raw_q2_index+1], sprite_rom[raw_q2_index],
                     sprite_rom[raw_q1_index+3], sprite_rom[raw_q1_index+2],
                     sprite_rom[raw_q1_index+1], sprite_rom[raw_q1_index],
                     sprite_rom[raw_q0_index+3], sprite_rom[raw_q0_index+2],
                     sprite_rom[raw_q0_index+1], sprite_rom[raw_q0_index]
                 };
-            end else if (sprite_index >= 0 && sprite_index + 7 < 12582912) begin
-                sdr_p1_dout <= {
-                    sprite_rom[sprite_index+7], sprite_rom[sprite_index+6],
-                    sprite_rom[sprite_index+5], sprite_rom[sprite_index+4],
-                    sprite_rom[sprite_index+3], sprite_rom[sprite_index+2],
-                    sprite_rom[sprite_index+1], sprite_rom[sprite_index]
-                };
             end else
-                sdr_p1_dout <= 64'd0;
+                beh_p2_dout <= 128'd0;
             // Hold the ack off for the configured extra latency first.
             p1_delay <= p1_latency;
             if (p1_latency == 0) p1_hold <= 4'd2;
@@ -274,9 +333,9 @@ always_ff @(posedge clk_sys) begin
             if (p1_delay == 1) p1_hold <= 4'd2;
         end
         if (p1_hold != 0) begin
-            sdr_p1_ack <= 1'b1;
+            beh_p2_ack <= 1'b1;
             p1_hold <= p1_hold - 1'd1;
-        end else if (!sdr_p1_req && p1_delay == 0)
+        end else if (!sdr_p2_req && p1_delay == 0)
             p1_seen <= 1'b0;
 
         if (sdr_wr_req && !wr_seen) begin
@@ -292,18 +351,18 @@ always_ff @(posedge clk_sys) begin
             wr_hold <= 4'd2;
         end
         if (wr_hold != 0) begin
-            sdr_wr_ack <= 1'b1;
+            beh_wr_ack <= 1'b1;
             wr_hold <= wr_hold - 1'd1;
         end else if (!sdr_wr_req)
             wr_seen <= 1'b0;
 
         if (sdr_p4_req && !p4_seen) begin
             p4_seen <= 1'b1;
-            sdr_p4_dout <= 16'd0;
+            beh_p4_dout <= 16'd0;
             p4_hold <= 4'd2;
         end
         if (p4_hold != 0) begin
-            sdr_p4_ack <= 1'b1;
+            beh_p4_ack <= 1'b1;
             p4_hold <= p4_hold - 1'd1;
         end else if (!sdr_p4_req)
             p4_seen <= 1'b0;
@@ -350,7 +409,8 @@ task automatic apply_inputs(input integer f);
     in_system = 16'hffff;
     if (scenario == "coin_start_p1" ||
         scenario == "coin_start_p1_gameplay" ||
-        scenario == "coin_start_p1_long") begin
+        scenario == "coin_start_p1_long" ||
+        scenario == "coin_start_p1_runright") begin
         if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
         // Wait for "PUSH START" after coin, then enter select.
         if (f >= 165 && f < 170) in_p1[0] = 1'b0;   // START
@@ -362,7 +422,8 @@ task automatic apply_inputs(input integer f);
         if (f >= 330 && f < 360) in_p1[3] = 1'b0;   // B1
         if (f >= 360 && f < 390) in_p1[7] = 1'b0;   // UP
         if (scenario == "coin_start_p1_gameplay" ||
-            scenario == "coin_start_p1_long") begin
+            scenario == "coin_start_p1_long" ||
+            scenario == "coin_start_p1_runright") begin
             // Skip the two long story beats, then dismiss the map transition.
             if (f >= 420 && f < 425) in_p1[3] = 1'b0; // B1
             if (f >= 480 && f < 485) in_p1[0] = 1'b0; // START
@@ -400,6 +461,25 @@ task automatic apply_inputs(input integer f);
             if (((f - 950) % 1800) < 5) in_p1[0] = 1'b0;  // START
             // Re-coin every 60 s so a continue is always affordable.
             if (((f - 950) % 3600) < 4) in_system[0] = 1'b0; // COIN1
+        end
+        // -------------------------------------------------------------
+        // coin_start_p1_runright: identical to coin_start_p1_gameplay up to
+        // post-VE frame 950, then holds RIGHT continuously instead of the
+        // 240-frame mixed cycle.  coin_start_p1_long only presses RIGHT for
+        // 140 of every 240 frames and spends 20 of the rest walking back
+        // LEFT, so the stage advances slowly; the reported symptom needs the
+        // camera to travel several screens.  Attack and jump are still
+        // exercised, because the camera does not advance past enemies and
+        // obstacles on their own.
+        // -------------------------------------------------------------
+        if (scenario == "coin_start_p1_runright" && f >= 950) begin : run_right
+            automatic integer c;
+            c = (f - 950) % 240;
+            in_p1[4] = 1'b0;                                  // RIGHT, always
+            if ((c % 12) < 6)           in_p1[3] = 1'b0;      // B1 attack
+            if ((c % 60) < 6)           in_p1[2] = 1'b0;      // B2 jump
+            if (((f - 950) % 1800) < 5) in_p1[0] = 1'b0;      // START
+            if (((f - 950) % 3600) < 4) in_system[0] = 1'b0;  // COIN1
         end
     end
 endtask
@@ -688,7 +768,7 @@ always_ff @(posedge clk_sys) begin
                          obj_line_cycles, obj_line_descriptors,
                          obj_line_fetches, obj_line_tilemap_fetches,
                          obj_line_plot_cycles, obj_rom_wait_cycles,
-                         dut.obj_rom_req, sdr_p1_ack);
+                         dut.obj_rom_req, sdr_p2_ack);
             if (stop_on_renderer_overrun) begin
                 $display("FIRST_OBJ_LATE f=%0d y=%0d cycles=%0d desc=%0d fetch=%0d tilefetch=%0d",
                          post_ve_frames, dut.renderer_target_y,
@@ -742,10 +822,8 @@ always_ff @(posedge clk_sys) begin
                         dut.sprite_renderer.bucket_y *
                         dut.sprite_renderer.LINE_SLOTS + overflow_i]
                 };
-                overflow_desc = {
-                    dut.sprite_renderer.descriptor_cache_hi[overflow_entry],
-                    dut.sprite_renderer.descriptor_cache_lo[overflow_entry]
-                };
+                overflow_desc =
+                    dut.sprite_renderer.descriptor_cache[overflow_entry];
                 if ((overflow_desc[63:48] <= 16'd7) &&
                     (overflow_desc[47:32] == 16'd0) &&
                     ((dut.scroll[59][14] ? overflow_desc[27:26] :
@@ -845,6 +923,10 @@ initial begin
     stop_on_renderer_overrun =
         $test$plusargs("STOP_ON_RENDERER_OVERRUN");
     ignore_overrun = $test$plusargs("IGNORE_OVERRUN");
+    use_real_sdram = $test$plusargs("REAL_SDRAM");
+    if (!$value$plusargs("SMPROM=%s", sample_path))
+        sample_path = "sim_output/rom/samples.bin";
+    sample_fd = $fopen(sample_path, "rb");
     require_play = $test$plusargs("REQUIRE_PLAY");
     require_gameplay = $test$plusargs("REQUIRE_GAMEPLAY");
     // Single-shot legacy: +DUMP_PPM=path +DUMP_PPM_FRAME=N
@@ -905,6 +987,64 @@ initial begin
     if (main_count != 1048576 || sprite_count != 12582912)
         $fatal(1, "short ROM read main=%0d sprite=%0d", main_count, sprite_count);
 
+    // With the real controller the ROM loader is bypassed exactly as it is for
+    // the behavioural model, so the chip has to be preloaded with the same
+    // image the behavioural model synthesises on the fly. The layouts must
+    // agree bit for bit, otherwise the two runs would differ for reasons that
+    // have nothing to do with memory timing -- and the whole point of this
+    // harness is that frame CRCs stay identical while only timing changes.
+    if (use_real_sdram) begin
+        $display("REAL_SDRAM preloading chip image");
+        // V60 program, 1 MB at SDR_MAINCPU_BASE = 0.
+        for (i = 0; i < 524288; i = i + 1)
+            u_sdram.chip.mem[i] =
+                {main_rom[i*2+1], main_rom[i*2]};
+        // Graphics, 16 MB at SDR_GFX_BASE = 0x0100000. One aligned 16-byte
+        // record per 16-pixel tile row: Q0 | Q1 | Q2 | pad. This mirrors the
+        // behavioural p2 model above and ssv_pkg::gfx_plane_addr; a divergence
+        // between the three is exactly the fake-bug generator the design doc
+        // warns about, so the arithmetic below is deliberately the same shape.
+        //
+        // The quarter-3 slot is written as zero rather than left X. The loader
+        // never writes it on hardware and ssv_gfx_row_fetch forces plane67 to
+        // zero, so its value is unobservable -- zeroing it just keeps X out of
+        // the waveform.
+        for (i = 0; i < 8388608; i = i + 1) begin : preload_packed
+            automatic integer byte_off  = i * 2;
+            automatic integer pk_code   = byte_off >> 7;
+            automatic integer pk_row    = (byte_off >> 4) & 7;
+            automatic integer q0        = pk_code * 32 + pk_row * 4;
+            automatic integer in_rec    = byte_off & 15;
+            automatic integer quarter   = in_rec >> 2;
+            // Quarter 3 has no source bytes at all, so the index must not be
+            // formed: sprite_rom only holds three quarters.
+            automatic integer src       = (quarter == 3)
+                                            ? 0
+                                            : quarter * 4194304 + q0 + (in_rec & 3);
+            u_sdram.chip.mem[(25'h0100000 >> 1) + i] =
+                (quarter == 3) ? 16'h0000
+                               : {sprite_rom[src+1], sprite_rom[src]};
+        end
+        // ES5506 samples. Without these the sample engine fetches zeroes, which
+        // is what every full-core run in this project has done so far -- so the
+        // audio path has never actually been exercised in simulation.
+        if (sample_fd != 0) begin
+            sample_count = $fread(sample_rom, sample_fd);
+            $fclose(sample_fd);
+            if (sample_count != 4194304)
+                $fatal(1, "short sample ROM read %0d", sample_count);
+            // SDR_SAMPLES_BASE moved to 0x1160000 (above XRAM and CPU RAM)
+            // when the graphics region grew to 16 MB.
+            for (i = 0; i < 2097152; i = i + 1)
+                u_sdram.chip.mem[(25'h1160000 >> 1) + i] =
+                    {sample_rom[i*2+1], sample_rom[i*2]};
+            $display("REAL_SDRAM samples preloaded");
+        end
+        else
+            $display("REAL_SDRAM no sample image (+SMPROM=) - audio path unexercised");
+        $display("REAL_SDRAM preload done");
+    end
+
     crc_fd = $fopen(crc_path, "w");
     if (crc_fd == 0)
         $fatal(1, "cannot open FRAME_CRC path %s", crc_path);
@@ -952,6 +1092,9 @@ initial begin
              cache_build_max, cache_build_max_frame, cache_deadline_hits);
     $display("P1_LATENCY=%0d bg_ack_while_obj_owns=%0d",
              p1_latency, bg_ack_while_obj_owns);
+    // Direct measurement of the repack's claim: one 128-bit transaction per
+    // 16-pixel tile row instead of two 64-bit ones.
+    $display("GFX_TRANSACTIONS=%0d", p1_transactions);
     $display("EXTRA_PORT $500008 reads=%0d", extra_reads);
     $display("CACHE_PEAK=%0d of %0d entries (frame %0d)",
              cache_peak, dut.sprite_renderer.CACHE_ENTRIES, cache_peak_frame);

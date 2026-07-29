@@ -20,10 +20,10 @@ module ssv_bg_renderer (
     output logic [16:0] spr_addr,
     input  logic [15:0] spr_data,
 
-    output logic        rom_req,
-    output logic [24:3] rom_addr,
-    input  logic [63:0] rom_data,
-    input  logic        rom_ack,
+    output logic         rom_req,
+    output logic  [24:4] rom_addr,
+    input  logic [127:0] rom_data,
+    input  logic         rom_ack,
 
     output logic  [3:0] plot_we,
     output logic [35:0] plot_x,
@@ -102,7 +102,12 @@ function automatic logic [16:0] tile_address(
         size_shift = 4'd8 + {1'b0, mode[15:13]};
         size_mask = (17'd1 << size_shift) - 17'd1;
         page = (x_base & 17'h07fff) >> size_shift;
-        base = page << (size_shift + 2'd2);
+        // The shift amount must be computed at more than 4 bits. As
+        // `size_shift + 2'd2` it is self-determined to 4 bits and wraps for
+        // size_shift 14/15 (mode[15:13] == 6 or 7), shifting by 0/1 instead of
+        // 16/17. Latent for Dyna Gear because those maps are wider than the
+        // screen so `page` is 0 and `base` is 0 either way, but wrong.
+        base = page << ({1'b0, size_shift} + 5'd2);
         column = (x & (size_mask & 17'h1fff0)) << 2;
         row = (y & 17'h001f0) >> 3;
         tile_address = base + column + row;
@@ -225,11 +230,26 @@ always_ff @(posedge clk) begin
 
             ROW_ADDR: state <= ROW_WAIT;
             ROW_WAIT: begin
+                // The row-scroll offset moves the running position only. MAME
+                // fixes `page` from the raw scroll register before adding it
+                // (ssv_v.cpp:684 vs :702), so the origin passed here must stay
+                // `scroll_x`. Adding the offset first lets a row-scroll word of
+                // 0xffff -- a one-pixel step back -- carry a whole scanline
+                // onto the neighbouring tilemap.
                 map_x <= {1'b0, scroll_x} + {1'b0, spr_data};
-                map_x0 <= {1'b0, scroll_x} + {1'b0, spr_data};
+                map_x0 <= {1'b0, scroll_x};
+                // The horizontal origin must include the row-scroll offset:
+                // MAME sx1 = 0 - (tilemap_scrollx & 0xf) *after* the offset is
+                // added (ssv_v.cpp:702 then :706). WAIT_CLEAR set this from
+                // scroll_x alone, which misplaced the whole layer by up to 15
+                // pixels on any line whose offset was not a multiple of 16 --
+                // and the real background layer uses 0xffff, a one-pixel step
+                // back. ssv_cached_sprite_renderer already did this correctly.
+                screen_x <= -$signed({7'd0,
+                                      scroll_x[3:0] + spr_data[3:0]});
                 tile_word_addr <= tile_address(
                     {1'b0, scroll_x} + {1'b0, spr_data},
-                    {1'b0, scroll_x} + {1'b0, spr_data},
+                    {1'b0, scroll_x},
                     map_y, scroll_mode
                 );
                 state <= TILE_CODE_ADDR;

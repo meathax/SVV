@@ -24,8 +24,8 @@ logic shadow_4bit;
 logic [16:0] spr_addr;
 logic [15:0] spr_data;
 logic rom_req;
-logic [24:3] rom_addr;
-logic [63:0] rom_data;
+logic [24:4] rom_addr;
+logic [127:0] rom_data;
 logic rom_ack;
 logic [3:0] plot_we;
 logic [35:0] plot_x;
@@ -53,10 +53,9 @@ always_ff @(posedge clk) begin
     if (rom_delay > 0) begin
         rom_delay <= rom_delay - 1;
         if (rom_delay == 1) begin
-            rom_data <= (rom_quarter == 0) ? 64'h0000000000000080
-                                           : 64'd0;
+            rom_data <= 128'h80;
             rom_ack <= 1'b1;
-            rom_quarter <= (rom_quarter + 1) & 1;
+            rom_quarter <= rom_quarter + 1;
         end
     end
 end
@@ -145,7 +144,7 @@ initial begin
     tilemap_scrolls = 512'd0;
     shadow_4bit = 1'b0;
     spr_data = 16'd0;
-    rom_data = 64'd0;
+    rom_data = 128'd0;
     rom_ack = 1'b0;
     rom_req_d = 1'b0;
     rom_delay = 0;
@@ -176,7 +175,7 @@ initial begin
     @(posedge clk);
     if (plots != 1 || first_x != 10)
         $fatal(1, "plot coverage count=%0d first=%0d", plots, first_x);
-    if (rom_addr < 22'h20000)
+    if (rom_addr < 21'h10000)
         $fatal(1, "graphics ROM address outside sprite region: %h", rom_addr);
     // An unbucketed line must complete through the synchronous count read
     // without issuing pixels from a stale line entry.

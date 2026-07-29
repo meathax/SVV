@@ -12,10 +12,14 @@ module ssv_core (
     input       [15:0] sdr_p0_dout,
     input              sdr_p0_ack,
 
-    output logic       sdr_p1_req,
-    output logic [24:3] sdr_p1_addr,
-    input       [63:0] sdr_p1_dout,
-    input              sdr_p1_ack,
+    // Graphics row fetch. Moved from the controller's 64-bit p1 to its 128-bit
+    // p2 (rd_total=8) when the loader was changed to pack a whole 16-pixel tile
+    // row into one aligned 16-byte record -- see
+    // docs/SDRAM_GFX_REPACK_DESIGN.md. p1 is now free.
+    output logic       sdr_p2_req,
+    output logic [24:4] sdr_p2_addr,
+    input      [127:0] sdr_p2_dout,
+    input              sdr_p2_ack,
 
     output logic       sdr_wr_req,
     output logic [24:1] sdr_wr_addr,
@@ -35,6 +39,11 @@ module ssv_core (
     input       [15:0] in_p2,
     input       [15:0] in_system,
     input       [15:0] in_extra,
+
+    // On-screen renderer diagnostics (rtl/ssv_debug_overlay.sv). 0 = off and
+    // bit-exact: the overlay passes rgb through and nothing else changes. The
+    // testbenches leave this unconnected, which Verilator ties low.
+    input        [2:0] dbg_overlay_mode,
 
     output logic [23:0] rgb,
     output logic       ce_pixel,
@@ -265,13 +274,14 @@ wire [35:0] obj_plot_x;
 wire [59:0] obj_plot_color;
 wire [31:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
-wire [24:3] bg_rom_addr, obj_rom_addr;
+wire [24:4] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
 wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
+wire dbg_hide_obj, dbg_hide_bg;
 
 assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
-// p1 is one shared SDRAM port with two clients. obj_busy picks who drives
+// p2 is one shared SDRAM port with two clients. obj_busy picks who drives
 // req/addr -- but the ack has to be steered as well. Both fetchers are level
 // sensitive on rom_ack, so handing the raw ack to the renderer that does NOT
 // own the port makes it latch the other renderer's tile data as its own.
@@ -283,13 +293,25 @@ assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_
 // hits it because the behavioural SDRAM is fast enough that lines never
 // overrun; on hardware it paints large parts of the background with sprite
 // tile data until the scene thins out.
-wire p1_owner_obj = obj_busy;
-wire bg_rom_ack   = sdr_p1_ack && !p1_owner_obj;
-wire obj_rom_ack  = sdr_p1_ack &&  p1_owner_obj;
+wire p2_owner_obj = obj_busy;
+wire bg_rom_ack   = sdr_p2_ack && !p2_owner_obj;
+wire obj_rom_ack  = sdr_p2_ack &&  p2_owner_obj;
 
-assign sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req;
-assign sdr_p1_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
-assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
+assign sdr_p2_req = obj_busy ? obj_rom_req : bg_rom_req;
+assign sdr_p2_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
+
+// verif/ssv_tilemap_page_check.sv binds into this module and still names the
+// graphics port p1. These aliases keep that (shared, not-mine-to-edit) checker
+// compiling while the port itself moves to the controller's 128-bit p2.
+// Simulation-only: they must never reach Quartus as dangling nets.
+//
+// Debug overlay modes 4/5 mask the line buffer's write enables here and
+// nowhere else: the renderer that is hidden still walks its state machine and
+// still issues every p2 fetch, so the line's timing and load are unchanged and
+// only the layer being drawn differs. Folded into the existing owner mux so it
+// costs no extra logic level (5 inputs per bit still fits one 6-LUT).
+assign renderer_plot_we = obj_busy ? (obj_plot_we & {4{~dbg_hide_obj}})
+                                   : (bg_plot_we  & {4{~dbg_hide_bg}});
 assign renderer_plot_x = obj_busy ? obj_plot_x : bg_plot_x;
 assign renderer_plot_color = obj_busy ? obj_plot_color : bg_plot_color;
 assign renderer_plot_shadow = obj_busy ? obj_plot_shadow : bg_plot_shadow;
@@ -315,7 +337,7 @@ ssv_bg_renderer background_renderer (
     .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
     .spr_addr(bg_spr_addr), .spr_data(spr_video_q),
     .rom_req(bg_rom_req), .rom_addr(bg_rom_addr),
-    .rom_data(sdr_p1_dout), .rom_ack(bg_rom_ack),
+    .rom_data(sdr_p2_dout), .rom_ack(bg_rom_ack),
     .plot_we(bg_plot_we), .plot_x(bg_plot_x),
     .plot_color(bg_plot_color),
     .plot_shadow(bg_plot_shadow), .plot_pen(bg_plot_pen),
@@ -336,7 +358,7 @@ ssv_cached_sprite_renderer sprite_renderer (
     .tilemap_scrolls(tilemap_scrolls),
     .spr_addr(obj_spr_addr), .spr_data(spr_video_q),
     .rom_req(obj_rom_req), .rom_addr(obj_rom_addr),
-    .rom_data(sdr_p1_dout), .rom_ack(obj_rom_ack),
+    .rom_data(sdr_p2_dout), .rom_ack(obj_rom_ack),
     .plot_we(obj_plot_we), .plot_x(obj_plot_x),
     .plot_color(obj_plot_color),
     .plot_shadow(obj_plot_shadow), .plot_pen(obj_plot_pen),
@@ -379,10 +401,45 @@ always_ff @(posedge clk_sys) begin
 end
 
 // Line-buffer indices resolve through the live xRGB888 palette.
-always_comb begin
-    rgb = (!video_enable || hb || vb) ? 24'h000000 :
-          palette_video_rgb;
-end
+wire        video_active = video_enable && !hb && !vb;
+wire [23:0] core_pixel   = video_active ? palette_video_rgb : 24'h000000;
+
+// ---------------------------------------------------------------------------
+// On-screen renderer diagnostics.
+//
+// Selected from the OSD (Arcade-SSV.sv status[26:24]). Mode 0 is a bit-exact
+// no-op: rgb_out is rgb_in and both hide strobes are low, so nothing in the
+// render path or the pixel path changes. Verified by frame CRC.
+//
+// gfx_wait is the p2 graphics fetch holding a request that has not been
+// acknowledged -- read-only, taken from the same nets the SDRAM arbiter sees.
+// ---------------------------------------------------------------------------
+`ifdef SIMULATION
+// Simulation-only mode override. Every testbench leaves dbg_overlay_mode
+// unconnected, so without this hook there is no way to exercise the overlay
+// under simulation at all. Defaults to 0, i.e. the CRC runs are unaffected.
+// Guarded on the project's own SIMULATION define so it never reaches Quartus.
+logic [2:0] dbg_mode_force;
+initial if (!$value$plusargs("OVERLAY=%d", dbg_mode_force))
+    dbg_mode_force = 3'd0;
+wire [2:0] dbg_mode_eff = (dbg_mode_force != 3'd0) ? dbg_mode_force
+                                                   : dbg_overlay_mode;
+`else
+wire [2:0] dbg_mode_eff = dbg_overlay_mode;
+`endif
+
+ssv_debug_overlay debug_overlay (
+    .clk(clk_sys), .rst(rst),
+    .mode(dbg_mode_eff),
+    .hcnt(hcnt), .vcnt(vcnt), .active(video_active),
+    .renderer_target_y(renderer_target_y),
+    .line_commit(line_buffer_start),
+    .renderer_busy(renderer_busy),
+    .gfx_wait(sdr_p2_req && !sdr_p2_ack),
+    .overrun_sticky(renderer_overrun),
+    .rgb_in(core_pixel), .rgb_out(rgb),
+    .hide_obj(dbg_hide_obj), .hide_bg(dbg_hide_bg)
+);
 
 function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
     if (cpu_addr >= 24'h400000)

@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Fixed Dyna Gear index-0 stream:
-//   0x000000..0x0fffff  V60 program (16-bit interleaved by the MRA)
-//   0x100000..0xcfffff  sprite graphics; Q0/Q1 are interleaved by row
-//                       during download so one 64-bit read supplies four
-//                       bitplanes. Q2 stays at 0x900000..0xcfffff.
-//   0xd00000..0x10fffff ES5506 sample ROM
+// Fixed Dyna Gear index-0 stream (the MRA is unchanged by the repack):
+//   0x0000000..0x00fffff  V60 program (16-bit interleaved by the MRA)
+//   0x0100000..0x0cfffff  graphics, 3 x 4 MB MAME quarters
+//   0x0d00000..0x10fffff  ES5506 sample ROM
+//
+// SDRAM destinations (ssv_pkg):
+//   program  -> 0x0000000 identity
+//   graphics -> 0x0100000, repacked into one aligned 16-byte record per
+//               16-pixel tile row (Q0|Q1|Q2|pad), so ssv_gfx_row_fetch reads
+//               a whole row with one 128-bit p2 burst. 16 MB.
+//   samples  -> SDR_SAMPLES_BASE = 0x1160000, above XRAM and CPU RAM. The
+//               graphics region grew into the gap the samples vacated.
 
 module ssv_rom_loader (
     input              clk,
@@ -36,35 +42,49 @@ logic       index0_seen;
 function automatic logic [24:0] stream_byte_address(
     input logic [26:0] stream_addr
 );
-    logic [23:0] sprite_offset;
-    logic [21:0] within_quarter;
+    logic [23:0] gfx_offset;     // 0 .. 0xBFFFFF within the graphics stream
+    logic [21:0] within_quarter; // byte offset inside one 4 MiB quarter
+    logic  [1:0] quarter;        // 0=Q0 1=Q1 2=Q2  (Q3 absent on dynagear)
     begin
-        sprite_offset = stream_addr - STREAM_SPRITES;
-        within_quarter = sprite_offset[21:0];
+        gfx_offset     = stream_addr[23:0] - STREAM_SPRITES[23:0];
+        within_quarter = gfx_offset[21:0];
+        quarter        = gfx_offset[23:22];
+
         if ((stream_addr >= STREAM_SPRITES) &&
-            (stream_addr < STREAM_SPRITES + 27'h0800000)) begin
-            // MAME layout Q0/Q1 are separate 4 MiB quarters. Pack their
-            // corresponding 32-bit rows into one aligned 64-bit beat:
-            // [31:0]=Q0, [63:32]=Q1.
+            (stream_addr <  STREAM_SPRITES + STREAM_GFX_SIZE)) begin
+            // All THREE populated quarters collapse into one aligned 16-byte
+            // record per 16-pixel tile row, so the row fetcher gets a whole
+            // row from a single 128-bit p2 burst. Bytes 12..15 of every record
+            // are the absent quarter 3 and are deliberately never written --
+            // ssv_gfx_row_fetch forces plane67 to zero. If a family title ever
+            // populates Q3, this function already places it and only the
+            // fetcher's constant has to go.
             //
             // The "quarters" model is supported by the physical board: a
             // SAM-5127 carries four graphics banks A/B/C/D of four `16M-MASK`
             // sockets each, and Dyna Gear populates six of the sixteen (photos,
             // 28 Jul 2026 — docs/hardware/SSV_BOARD_HARDWARE.md). What is *not*
-            // established is which physical bank feeds which quarter here. This
-            // interleave is known-good only in the sense that Dyna Gear's
-            // graphics decode CRC-exact with it; the bank-to-quarter assignment
-            // has never been checked against the board. If a second SSV title
-            // ever decodes with scrambled graphics under this same loader, this
-            // function is the first thing to suspect.
-            stream_byte_address = SDR_SPRITES_BASE +
-                {2'd0, within_quarter[21:5], 6'd0} +
-                {19'd0, within_quarter[4:2], 3'd0} +
-                {22'd0, sprite_offset[22], 2'd0} +
-                {23'd0, within_quarter[1:0]};
+            // established -- and is UNCHANGED by the repack -- is which
+            // physical bank feeds which quarter here. The mapping is known-good
+            // only in the sense that Dyna Gear's graphics decode CRC-exact with
+            // it. If a second SSV title ever decodes with scrambled graphics
+            // under this same loader, this function is the first thing to
+            // suspect.
+            stream_byte_address = gfx_plane_addr(
+                within_quarter[21:5],   // tile code
+                within_quarter[4:2],    // row within the tile
+                quarter,
+                within_quarter[1:0]     // byte within the 32-bit row
+            );
+        end
+        else if (stream_addr >= STREAM_SAMPLES) begin
+            // The sample region no longer sits at its stream offset: the
+            // graphics records displaced it above XRAM and CPU RAM.
+            stream_byte_address = SDR_SAMPLES_BASE +
+                                  (stream_addr[24:0] - STREAM_SAMPLES[24:0]);
         end
         else begin
-            stream_byte_address = stream_addr[24:0];
+            stream_byte_address = stream_addr[24:0];  // V60 program, identity
         end
     end
 endfunction

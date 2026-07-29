@@ -30,7 +30,7 @@ CORE_FILES=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
-  rtl/ssv_core.sv
+  rtl/ssv_debug_overlay.sv rtl/ssv_core.sv
 )
 
 # Core without the ioctl loader (pure ssv_core benches).
@@ -49,7 +49,7 @@ SSV_CORE_FILES=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
-  rtl/ssv_core.sv
+  rtl/ssv_debug_overlay.sv rtl/ssv_core.sv
 )
 
 run_one() {

@@ -31,9 +31,9 @@ logic [1:0] ce_div;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
-logic sdr_p1_req, sdr_p1_ack;
-logic [24:3] sdr_p1_addr;
-logic [63:0] sdr_p1_dout;
+logic sdr_p2_req, sdr_p2_ack;
+logic [24:4] sdr_p2_addr;
+logic [127:0] sdr_p2_dout;
 logic core_wr_req, core_wr_ack;
 logic [24:1] core_wr_addr;
 logic [15:0] core_wr_din;
@@ -70,8 +70,8 @@ ssv_core core (
     .clk_sys(clk), .rst(core_rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
-    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
-    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
+    .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
+    .sdr_p2_dout(sdr_p2_dout), .sdr_p2_ack(sdr_p2_ack),
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
     .sdr_wr_din(core_wr_din), .sdr_wr_be(core_wr_be),
     .sdr_wr_ack(core_wr_ack),
@@ -132,16 +132,22 @@ always_ff @(posedge clk) begin
 end
 
 always_ff @(posedge clk) begin
-    sdr_p1_ack <= 1'b0;
-    sdr_p1_dout <= 64'd0;
-    if (sdr_p1_req) begin
-        sdr_p1_dout <= {
-            mem_rd({sdr_p1_addr, 2'd3}),
-            mem_rd({sdr_p1_addr, 2'd2}),
-            mem_rd({sdr_p1_addr, 2'd1}),
-            mem_rd({sdr_p1_addr, 2'd0})
+    sdr_p2_ack <= 1'b0;
+    sdr_p2_dout <= 128'd0;
+    if (sdr_p2_req) begin
+        // p2 is a 16-byte burst: eight 16-bit words, lowest address in the
+        // low bits (sdram.sv assembles p2_dout little-endian).
+        sdr_p2_dout <= {
+            mem_rd({sdr_p2_addr, 3'd7}),
+            mem_rd({sdr_p2_addr, 3'd6}),
+            mem_rd({sdr_p2_addr, 3'd5}),
+            mem_rd({sdr_p2_addr, 3'd4}),
+            mem_rd({sdr_p2_addr, 3'd3}),
+            mem_rd({sdr_p2_addr, 3'd2}),
+            mem_rd({sdr_p2_addr, 3'd1}),
+            mem_rd({sdr_p2_addr, 3'd0})
         };
-        sdr_p1_ack <= 1'b1;
+        sdr_p2_ack <= 1'b1;
     end
 end
 

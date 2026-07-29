@@ -16,9 +16,9 @@ logic ce_cpu = 1;
 logic sdr_p0_req, sdr_p0_ack;
 logic [24:1] sdr_p0_addr;
 logic [15:0] sdr_p0_dout;
-logic sdr_p1_req, sdr_p1_ack;
-logic [24:3] sdr_p1_addr;
-logic [63:0] sdr_p1_dout;
+logic sdr_p2_req, sdr_p2_ack;
+logic [24:4] sdr_p2_addr;
+logic [127:0] sdr_p2_dout;
 logic sdr_wr_req, sdr_wr_ack;
 logic [24:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
@@ -38,8 +38,8 @@ ssv_core dut (
     .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
-    .sdr_p1_req(sdr_p1_req), .sdr_p1_addr(sdr_p1_addr),
-    .sdr_p1_dout(sdr_p1_dout), .sdr_p1_ack(sdr_p1_ack),
+    .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
+    .sdr_p2_dout(sdr_p2_dout), .sdr_p2_ack(sdr_p2_ack),
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
@@ -56,11 +56,11 @@ ssv_core dut (
 
 always_ff @(posedge clk_sys) begin
     sdr_p0_ack <= sdr_p0_req;
-    sdr_p1_ack <= sdr_p1_req;
+    sdr_p2_ack <= sdr_p2_req;
     sdr_wr_ack <= sdr_wr_req;
     sdr_p4_ack <= sdr_p4_req;
     sdr_p0_dout <= 16'hffff;
-    sdr_p1_dout <= 64'd0;
+    sdr_p2_dout <= 128'd0;
     sdr_p4_dout <= 16'd0;
 end
 

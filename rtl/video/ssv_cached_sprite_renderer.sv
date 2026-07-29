@@ -29,8 +29,8 @@ module ssv_cached_sprite_renderer #(
     input  logic  [15:0] spr_data,
 
     output logic         rom_req,
-    output logic  [24:3] rom_addr,
-    input  logic  [63:0] rom_data,
+    output logic  [24:4] rom_addr,
+    input  logic [127:0] rom_data,
     input  logic         rom_ack,
 
     output logic   [3:0] plot_we,
@@ -114,18 +114,14 @@ logic [127:0] cache_decode_q;
 logic cache_pending;
 // After storing the last cache slot, finish its line buckets then stop.
 logic cache_stop_after_bucket;
-// Split in two to steer M10K packing, not to change what is stored. As one
-// 1536 x 128 array Quartus packed the 106 live bits as 11 slices of 1024 x 10
-// = 22 blocks. Two halves of 53 live bits each should take 3 slices of
-// 512 x 20 over 3 depth rows = 9 blocks apiece, i.e. 18 for the pair. The
-// split point is 53, not the natural 64, because bits 106..127 are dead: a
-// 64/64 split would leave all the slack bunched in the upper half and save
-// almost nothing. Contents, addresses and timing are identical either way --
-// confirm the packing in the Fitter RAM Summary rather than assuming it.
+// One array, not two. The 128-bit form was measured at 22 M10K; splitting it
+// into 53/75-bit halves to steer packing was predicted to give 18 but the
+// Fitter RAM Summary reports 16 + 14 = 30 -- eight blocks WORSE than the
+// single array it replaced. Block RAM is the binding resource on this part
+// (530 of 553), so the measurement wins over the prediction. Do not re-split
+// without a fit report showing a real reduction.
 (* ramstyle = "M10K, no_rw_check" *)
-logic [52:0]  descriptor_cache_lo [0:CACHE_ENTRIES-1];
-(* ramstyle = "M10K, no_rw_check" *)
-logic [127:53] descriptor_cache_hi [0:CACHE_ENTRIES-1];
+logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
 
 (* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
@@ -375,7 +371,9 @@ function automatic logic [16:0] tile_address(
         size_shift = 4'd8 + {1'b0, mode[15:13]};
         size_mask = (17'd1 << size_shift) - 17'd1;
         page = (x_base & 17'h07fff) >> size_shift;
-        base = page << (size_shift + 2'd2);
+        // See the matching note in ssv_bg_renderer.sv: computed at 4 bits this
+        // wraps for size_shift 14/15 and shifts by 0/1 instead of 16/17.
+        base = page << ({1'b0, size_shift} + 5'd2);
         column = (x & (size_mask & 17'h1fff0)) << 2;
         row = (y & 17'h001f0) >> 3;
         tile_address = base + column + row;
@@ -648,14 +646,10 @@ always_ff @(posedge clk) begin
     if ((state == RENDER_READ) ||
         ((state == RENDER_PREP) &&
          (render_line_slot + 1'd1 < render_line_count)))
-        cache_q <= {descriptor_cache_hi[line_entry_descriptor],
-                    descriptor_cache_lo[line_entry_descriptor]};
-    if (cache_we) begin
-        descriptor_cache_lo[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
-            <= cache_write_data_q[52:0];
-        descriptor_cache_hi[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
-            <= cache_write_data_q[127:53];
-    end
+        cache_q <= descriptor_cache[line_entry_descriptor];
+    if (cache_we)
+        descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
+            <= cache_write_data_q;
 end
 
 ssv_gfx_row_fetch fetch (
@@ -1176,14 +1170,20 @@ always_ff @(posedge clk) begin
 
             TILE_ROW_ADDR: state <= TILE_ROW_WAIT;
             TILE_ROW_WAIT: begin
+                // The row-scroll offset moves the running position only. MAME
+                // fixes `page` from the raw scroll register before adding it
+                // (ssv_v.cpp:684 vs :702), so the origin passed here must stay
+                // `tile_scroll_x`. Adding the offset first lets a row-scroll
+                // word of 0xffff -- a one-pixel step back -- carry a whole
+                // scanline onto the neighbouring tilemap.
                 tile_map_x <= tile_scroll_x + {1'b0, spr_data};
-                tile_map_x0 <= tile_scroll_x + {1'b0, spr_data};
+                tile_map_x0 <= tile_scroll_x;
                 tile_screen_x <=
                     -$signed({7'd0,
                               tile_scroll_x[3:0] + spr_data[3:0]});
                 tile_word_addr <= tile_address(
                     tile_scroll_x + {1'b0, spr_data},
-                    tile_scroll_x + {1'b0, spr_data},
+                    tile_scroll_x,
                     tile_map_y, tile_mode
                 );
                 state <= TILE_CODE_ADDR;
