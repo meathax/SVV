@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // MiSTer top-level for the Sammy/Seta/Visco SSV core (Dyna Gear target).
 
+`timescale 1ns/1ps
+
 module emu (
     input         CLK_50M,
     input         RESET,
@@ -102,20 +104,25 @@ localparam CONF_STR = {
     "O[19:16],Coin A,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
     "O[23:20],Coin B,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
     "-;",
-    // On-screen renderer diagnostics (rtl/ssv_debug_overlay.sv). Off is a
-    // bit-exact no-op. Overrun Marks flags every scanline that missed its
-    // deadline; Load Bars / Fetch Wait show how close each line ran and how
-    // much of that was spent waiting on SDRAM; Hide Objects / Hide Background
-    // suppress one layer's pixel writes without changing renderer timing.
-    "O[26:24],Debug Overlay,Off,Overrun Marks,Load Bars,Fetch Wait,Hide Objects,Hide Background;",
+    // CRT Adjust (rtl/crt_adjust.sv). Off is a pure passthrough; the three
+    // amounts are hidden until it is On (status_menumask bit 1 below).
+    "P1,CRT Adjust;",
+    "P1-;",
+    "P1O[24],CRT Adjust,Off,On;",
+    "H1P1O[29:25],H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "H1P1O[35:30],H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "H1P1O[40:36],V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "-;",
+    // Direct arcade controls through the User I/O port (Antonio Villena DB15
+    // SNAC splitter). Off leaves both players on the HPS/USB joysticks.
+    "O[42:41],DB15 Devices,Off,P1 only,P2 only,P1 & P2;",
     "-;",
     "R[0],Reset;",
-    "J1,B1,B2,B3,Start,Coin,Test,Service;",
+    "J1,Fire,Jump,Test,Service,Start,Coin;",
     "V,v",`BUILD_DATE
 };
 
 assign ADC_BUS = 'Z;
-assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 3'b000;
 assign {SD_SCK, SD_MOSI, SD_CS} = 3'bZZZ;
 assign VGA_F1 = 1'b0;
@@ -161,8 +168,32 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .ioctl_download(ioctl_download), .ioctl_wr(ioctl_wr),
     .ioctl_addr(ioctl_addr), .ioctl_dout(ioctl_dout),
     .ioctl_index(ioctl_index), .ioctl_wait(ioctl_wait),
+    // H1 hides the three CRT Adjust amounts while CRT Adjust is Off.
+    .status_menumask({14'd0, ~status[24], 1'b0}),
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
+
+// ---------------------------------------------------------------------------
+// DB15 SNAC controls on the User I/O port.
+//
+// USER_OUT[0] = LOAD, USER_OUT[1] = CLK, USER_IN[5] = DATA. sys_top drives the
+// USER_IO pins open-drain (`!user_out[n] ? 1'b0 : 1'bZ`), so the unused lines
+// must stay high or they pull the adapter's pins down.
+// ---------------------------------------------------------------------------
+wire db15_clk, db15_load;
+wire [15:0] db15_p1_raw, db15_p2_raw;
+
+ssv_joy_db15 joy_db15 (
+    .clk(clk_sys),
+    .joy_clk(db15_clk), .joy_load(db15_load), .joy_data(USER_IN[5]),
+    .joystick1(db15_p1_raw), .joystick2(db15_p2_raw)
+);
+
+// Only drive the adapter while DB15 is actually selected. sys_top's open-drain
+// wrapper turns a 1 into high-Z, so with the option Off the port is released
+// entirely and whatever else the user has on User I/O is left alone.
+assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
+                                   : 7'b1111111;
 
 // V60 clock enable.
 //
@@ -327,17 +358,54 @@ sdram sdram (
     .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
 );
 
-// MiSTer J1 order: B1,B2,B3,Start,Coin,Test,Service → joy[4]..joy[10]
-// MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START
-function automatic [15:0] player_port(input [31:0] joy);
-    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
-                              joy[4], joy[5], joy[6], joy[7]}};
+// MiSTer J1 order: Fire,Jump,Test,Service,Start,Coin → joy[4]..joy[9]
+// (the MRA's <buttons names=...> list must stay in this same order).
+//
+// Map a DB15 pad onto that same numbering so everything downstream is written
+// once. DB15 bit order is 11 Select, 10 Start, 9 F, 8 E, 7 D, 6 C, 5 B, 4 A,
+// 3 Up, 2 Down, 1 Left, 0 Right.
+//
+//   A = Fire, B = Jump, Start = Start, Select = Coin
+//   Select+A = Test, Select+B = Service
+//
+// Test and Service are chords, not buttons of their own, because a CHAMMA
+// cabinet harness carries six buttons per player: putting Service on a plain
+// button means a stray press during play drops the board into the service
+// menu. The chord convention is the one Arcade-TNKIII uses. Coin is suppressed
+// while a chord is held so entering test mode does not also insert a credit.
+function automatic [31:0] db15_to_joy(input [15:0] db);
+    logic sel, chord;
+    begin
+        sel   = db[11];
+        chord = sel & (db[4] | db[5]);
+        db15_to_joy = {22'd0,
+                       sel & ~chord,  // joy[9]  Coin    <- Select alone
+                       db[10],        // joy[8]  Start   <- Start
+                       sel & db[5],   // joy[7]  Service <- Select+B
+                       sel & db[4],   // joy[6]  Test    <- Select+A
+                       db[5] & ~sel,  // joy[5]  Jump    <- B
+                       db[4] & ~sel,  // joy[4]  Fire    <- A
+                       db[3], db[2], db[1], db[0]};  // Up, Down, Left, Right
+    end
 endfunction
 
-wire test_button = status[6] | joystick_0[9] | joystick_1[9];
-wire service_button = joystick_0[10] | joystick_1[10];
-wire coin1_button = joystick_0[8];
-wire coin2_button = joystick_1[8];
+// status[42:41]: 0 = Off, 1 = P1 only, 2 = P2 only, 3 = both.
+wire [1:0] db15_sel = status[42:41];
+wire [31:0] joy_p1 = db15_sel[0] ? db15_to_joy(db15_p1_raw) : joystick_0;
+wire [31:0] joy_p2 = db15_sel[1] ? db15_to_joy(db15_p2_raw) : joystick_1;
+
+// MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START.
+// Dyna Gear has no third button, so B3 is tied released and no input can
+// reach it.
+function automatic [15:0] player_port(input [31:0] joy);
+    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
+                              joy[4], joy[5], 1'b0, joy[8]}};
+endfunction
+
+wire test_button = status[6] | joy_p1[6] | joy_p2[6];
+wire service_button = joy_p1[7] | joy_p2[7];
+wire coin1_button = joy_p1[9];
+wire coin2_button = joy_p2[9];
 // MAME SYSTEM ($21000c): COIN1, COIN2, SERVICE1, TILT, TEST
 wire [15:0] system_port = {8'hff,
     ~{3'b000, test_button, 1'b0, service_button,
@@ -408,9 +476,8 @@ ssv_core core (
     .sdr_p4_req(p4_req), .sdr_p4_addr(p4_addr),
     .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
-    .in_p1(player_port(joystick_0)), .in_p2(player_port(joystick_1)),
+    .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
     .in_system(system_port), .in_extra(16'hffff),
-    .dbg_overlay_mode(status[26:24]),
     .rgb(core_rgb), .ce_pixel(core_ce),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
@@ -494,13 +561,145 @@ endgenerate
 // Bring-up states 0-7/A/B keep the independent diag raster. Once the game
 // enables video (state 8), drive HDMI from the core's own timing so pixels
 // and sync share one phase.
-assign CE_PIXEL = use_core_video ? core_ce : diag_ce;
-assign VGA_R = use_core_video ? core_rgb[23:16] : diag_rgb[23:16];
-assign VGA_G = use_core_video ? core_rgb[15:8]  : diag_rgb[15:8];
-assign VGA_B = use_core_video ? core_rgb[7:0]   : diag_rgb[7:0];
-assign VGA_HS = use_core_video ? core_hs : diag_hs;
-assign VGA_VS = use_core_video ? core_vs : diag_vs;
-assign VGA_DE = use_core_video ? ~(core_hb | core_vb) : ~(diag_hb | diag_vb);
+wire [7:0] av_r = use_core_video ? core_rgb[23:16] : diag_rgb[23:16];
+wire [7:0] av_g = use_core_video ? core_rgb[15:8]  : diag_rgb[15:8];
+wire [7:0] av_b = use_core_video ? core_rgb[7:0]   : diag_rgb[7:0];
+wire av_hs = use_core_video ? core_hs : diag_hs;
+wire av_vs = use_core_video ? core_vs : diag_vs;
+wire av_hb = use_core_video ? core_hb : diag_hb;
+wire av_vb = use_core_video ? core_vb : diag_vb;
+wire av_ce = use_core_video ? core_ce : diag_ce;
+
+// ---------------------------------------------------------------------------
+// CRT Adjust (rtl/crt_adjust.sv, rmonic79) -- core-side integration.
+//
+// Everything the picture is resized and repositioned by happens inside a line
+// buffer whose engine restarts on the module's own line reference, so the sync
+// never moves out of phase with the content and a real 15 kHz CRT keeps its
+// lock while the controls are moved live. sys/ is untouched, which is the whole
+// point of choosing the core-side variant over crt_adjust_sys.sv.
+//
+// Deviations from the upstream reference glue, both forced by this core:
+//
+//  1. Read-rate units are SIXTEENTHS of a clk_sys cycle, not quarters. The
+//     reference assumes an integer clk/pixel ratio (96/6 = 16 cycles = 64
+//     quarters). SSV's pixel clock is a fractional accumulator: 9710/65536 of
+//     48.3185 MHz = 7.159091 MHz, i.e. 6.74933 clk per pixel, which is not an
+//     integer and cannot be. 6.74933 x 16 = 107.99, so the base period is 108
+//     sixteenths -- 0.01% slow at H-Size 0, which is 0.05 pixel across a
+//     454-pixel line and is reset every line anyway. It also makes each H-Size
+//     step 1/108 = 0.93%, finer than the reference's 1.5%.
+//
+//  2. H-Position is a signed 6-bit OSD field (-32..+31 px) rather than the
+//     reference's 7-bit wrap encoding of +-48. The wrap encoding needs a
+//     128-entry OSD list to place -48 at index 79; plain two's complement puts
+//     0 at index 0 with a 64-entry list and no dead entries. The module's
+//     hoffset input is unchanged (signed 9-bit); only the range offered is.
+//
+// HPOS_MODE = CONTENTSHIFT: 336 active pixels on a 454-pixel line, and the
+// write pointer resets at hcnt 400, leaving 54 samples of margin before the
+// active region and 122 after it inside the 512-entry bank -- so +-32 of
+// content shift cannot run the picture out of the buffer window.
+// ---------------------------------------------------------------------------
+localparam int CRT_HTOTAL = 454;
+localparam int CRT_VTOTAL = 262;
+
+reg crt_on;
+always_ff @(posedge clk_sys) if (av_ce) crt_on <= status[24];
+
+reg signed [4:0] crt_hsize;
+always_ff @(posedge clk_sys) if (av_ce) crt_hsize <= $signed(status[29:25]);
+
+reg signed [5:0] crt_hpos;
+always_ff @(posedge clk_sys) if (av_ce) crt_hpos <= $signed(status[35:30]);
+wire signed [8:0] crt_hoffset = 9'($signed(crt_hpos));
+
+reg signed [5:0] crt_vshift;
+always_ff @(posedge clk_sys) if (av_ce) crt_vshift <= 6'($signed(status[40:36]));
+
+// Read clock enable, stepped in sixteenths of clk_sys and restarted on the
+// module's hs_ref_out -- never on the raw HSync, or the read rate and the
+// module's read counter drift apart and the picture desyncs when shrinking.
+wire crt_hs_ref;
+reg  crt_hs_ref_d;
+always_ff @(posedge clk_sys) crt_hs_ref_d <= crt_hs_ref;
+wire crt_hs_ref_rise = crt_hs_ref & ~crt_hs_ref_d;
+
+wire [7:0] crt_rd_period = 8'd108 + {{3{crt_hsize[4]}}, crt_hsize}; // 92..123
+reg  [7:0] crt_rd_acc;
+wire       crt_rd_tick = (crt_rd_acc + 8'd16) >= crt_rd_period;
+always_ff @(posedge clk_sys) begin
+    if      (crt_hs_ref_rise) crt_rd_acc <= 8'd0;
+    else if (crt_rd_tick)     crt_rd_acc <= crt_rd_acc + 8'd16 - crt_rd_period;
+    else                      crt_rd_acc <= crt_rd_acc + 8'd16;
+end
+wire crt_rd_ce = crt_on ? crt_rd_tick : av_ce;
+
+wire [7:0] crt_r, crt_g, crt_b;
+wire crt_hs, crt_vs, crt_hb, crt_vb;
+
+crt_adjust #(
+    .VTOTAL   (CRT_VTOTAL),
+    .HTOTAL   (CRT_HTOTAL),
+    // 1 = HPOS_CONTENTSHIFT. Spelled as a literal rather than the module's
+    // `HPOS_CONTENTSHIFT macro because this file is compiled before rtl/ in
+    // files.qip, so the macro is not defined yet at this point.
+    .HPOS_MODE(1)
+) u_crt_adjust (
+    .clk      (clk_sys),
+    .pxl_cen  (av_ce),
+    .pxl2_cen (crt_rd_ce),
+    .active   (crt_on),
+    .hsize    (crt_hsize),
+    .hoffset  (crt_hoffset),
+    .voffset  (crt_vshift),
+    .r_in     (av_r), .g_in(av_g), .b_in(av_b),
+    .hs_in    (av_hs), .vs_in(av_vs),
+    .hb_in    (av_hb | av_vb), .vb_in(av_vb),
+    .r_out    (crt_r), .g_out(crt_g), .b_out(crt_b),
+    .hs_out   (crt_hs), .vs_out(crt_vs),
+    .hb_out   (crt_hb), .vb_out(crt_vb),
+    .hs_ref_out(crt_hs_ref)
+);
+
+// The OSD centres itself on the rising edge of VGA_DE. Left following the
+// module's blank it would slide with the picture whenever H-Position moves, so
+// build a DE window that rises with the NATIVE active region and falls with the
+// adjusted one: the image moves, the OSD stays put on the physical screen.
+//
+// The native HSync rise is once per line, which is the cadence the reference
+// glue gets from a hcnt == HTOTAL-1 tick; sampling VBlank on it also delivers
+// the one-line delay the read side needs (it is emitting the previous line).
+reg av_hs_d;
+always_ff @(posedge clk_sys) if (av_ce) av_hs_d <= av_hs;
+wire av_hs_rise = av_ce && (av_hs & ~av_hs_d);
+
+reg crt_vb_1l;
+always_ff @(posedge clk_sys) if (av_hs_rise) crt_vb_1l <= av_vb;
+
+wire crt_native_active = ~(av_hb | crt_vb_1l);
+reg  crt_native_active_d;
+always_ff @(posedge clk_sys) if (av_ce) crt_native_active_d <= crt_native_active;
+wire crt_native_rise = crt_native_active & ~crt_native_active_d;
+
+wire crt_adj_active = ~crt_hb;
+reg  crt_adj_active_d;
+always_ff @(posedge clk_sys) if (crt_rd_ce) crt_adj_active_d <= crt_adj_active;
+wire crt_adj_fall = crt_adj_active_d & ~crt_adj_active;
+
+reg crt_de_osd;
+always_ff @(posedge clk_sys) begin
+    if      (crt_native_rise) crt_de_osd <= 1'b1;
+    else if (crt_adj_fall)    crt_de_osd <= 1'b0;
+end
+
+assign CE_PIXEL = crt_on ? crt_rd_ce : av_ce;
+assign VGA_R = crt_on ? crt_r : av_r;
+assign VGA_G = crt_on ? crt_g : av_g;
+assign VGA_B = crt_on ? crt_b : av_b;
+assign VGA_HS = crt_on ? crt_hs : av_hs;
+assign VGA_VS = crt_on ? crt_vs : av_vs;
+assign VGA_DE = crt_on ? crt_de_osd : ~(av_hb | av_vb);
 assign VGA_SL = status[4:3];
 assign AUDIO_L = status[7] ? 16'd0 : core_audio_l;
 assign AUDIO_R = status[7] ? 16'd0 : core_audio_r;

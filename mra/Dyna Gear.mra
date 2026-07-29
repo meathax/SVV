@@ -28,4 +28,8 @@
       <part name="si002-10.u6" crc="e369c177" map="21"/>
     </interleave>
   </rom>
+  <!-- Dyna Gear uses two buttons; the board's third button input is not wired
+       to anything in this game. Order must match CONF_STR "J1,..." in
+       Arcade-SSV.sv. -->
+  <buttons names="Fire,Jump,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
 </misterromdescription>

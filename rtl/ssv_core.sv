@@ -2,6 +2,8 @@
 // Dyna Gear SSV board core: V60, memory map, inputs, IRQs and scanline video.
 // ES5506 host/register file + voice PCM engine (bank-2 linear PCM for Dyna Gear).
 
+`timescale 1ns/1ps
+
 module ssv_core (
     input              clk_sys,
     input              rst,
@@ -39,11 +41,6 @@ module ssv_core (
     input       [15:0] in_p2,
     input       [15:0] in_system,
     input       [15:0] in_extra,
-
-    // On-screen renderer diagnostics (rtl/ssv_debug_overlay.sv). 0 = off and
-    // bit-exact: the overlay passes rgb through and nothing else changes. The
-    // testbenches leave this unconnected, which Verilator ties low.
-    input        [2:0] dbg_overlay_mode,
 
     output logic [23:0] rgb,
     output logic       ce_pixel,
@@ -292,6 +289,11 @@ end
 // re-arms the build it would never recover.
 wire cache_deadline = (vcnt >= SSV_VTOTAL - 2);
 
+// Declared here rather than with the rest of the renderer nets below, because
+// line_buffer_start reads obj_cache_busy. An implicit net would be inferred
+// under the older rules, but slang rejects the use-before-declaration outright.
+wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
+
 // Swap completed lines as active display enters horizontal blank. The extra
 // target_y==240 swap exposes the already-rendered final visible line; it must
 // not launch another renderer. Lines 0 and 1 are prepared at vblank's tail.
@@ -327,10 +329,7 @@ wire [31:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
 wire [24:4] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
-wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 logic renderer_overrun;
-logic overrun_deadline, overrun_cachefull;
-wire dbg_hide_obj, dbg_hide_bg;
 
 assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
 // p2 is one shared SDRAM port with two clients. obj_busy picks who drives
@@ -356,14 +355,7 @@ assign sdr_p2_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
 // graphics port p1. These aliases keep that (shared, not-mine-to-edit) checker
 // compiling while the port itself moves to the controller's 128-bit p2.
 // Simulation-only: they must never reach Quartus as dangling nets.
-//
-// Debug overlay modes 4/5 mask the line buffer's write enables here and
-// nowhere else: the renderer that is hidden still walks its state machine and
-// still issues every p2 fetch, so the line's timing and load are unchanged and
-// only the layer being drawn differs. Folded into the existing owner mux so it
-// costs no extra logic level (5 inputs per bit still fits one 6-LUT).
-assign renderer_plot_we = obj_busy ? (obj_plot_we & {4{~dbg_hide_obj}})
-                                   : (bg_plot_we  & {4{~dbg_hide_bg}});
+assign renderer_plot_we = obj_busy ? obj_plot_we : bg_plot_we;
 assign renderer_plot_x = obj_busy ? obj_plot_x : bg_plot_x;
 assign renderer_plot_color = obj_busy ? obj_plot_color : bg_plot_color;
 assign renderer_plot_shadow = obj_busy ? obj_plot_shadow : bg_plot_shadow;
@@ -424,22 +416,10 @@ ssv_cached_sprite_renderer sprite_renderer (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst) begin
+    if (rst)
         renderer_overrun <= 1'b0;
-        overrun_deadline <= 1'b0;
-        overrun_cachefull <= 1'b0;
-    end
-    else begin
-        // Split by cause. One bit could not tell a missed line deadline from a
-        // full descriptor cache, and on hardware the sticky indicator lit with
-        // no per-line marks -- which points at the cache, but could not prove
-        // it. renderer_overrun keeps its original meaning (either cause) so the
-        // LED and every existing check are unchanged.
-        if (line_buffer_start && renderer_busy) overrun_deadline <= 1'b1;
-        if (obj_cache_overflow)                 overrun_cachefull <= 1'b1;
-        if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
-            renderer_overrun <= 1'b1;
-    end
+    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
+        renderer_overrun <= 1'b1;
 end
 
 wire vector_we = m_req && m_we && sel_irqvec;
@@ -469,44 +449,7 @@ end
 wire        video_active = video_enable && !hb && !vb;
 wire [23:0] core_pixel   = video_active ? palette_video_rgb : 24'h000000;
 
-// ---------------------------------------------------------------------------
-// On-screen renderer diagnostics.
-//
-// Selected from the OSD (Arcade-SSV.sv status[26:24]). Mode 0 is a bit-exact
-// no-op: rgb_out is rgb_in and both hide strobes are low, so nothing in the
-// render path or the pixel path changes. Verified by frame CRC.
-//
-// gfx_wait is the p2 graphics fetch holding a request that has not been
-// acknowledged -- read-only, taken from the same nets the SDRAM arbiter sees.
-// ---------------------------------------------------------------------------
-`ifdef SIMULATION
-// Simulation-only mode override. Every testbench leaves dbg_overlay_mode
-// unconnected, so without this hook there is no way to exercise the overlay
-// under simulation at all. Defaults to 0, i.e. the CRC runs are unaffected.
-// Guarded on the project's own SIMULATION define so it never reaches Quartus.
-logic [2:0] dbg_mode_force;
-initial if (!$value$plusargs("OVERLAY=%d", dbg_mode_force))
-    dbg_mode_force = 3'd0;
-wire [2:0] dbg_mode_eff = (dbg_mode_force != 3'd0) ? dbg_mode_force
-                                                   : dbg_overlay_mode;
-`else
-wire [2:0] dbg_mode_eff = dbg_overlay_mode;
-`endif
-
-ssv_debug_overlay debug_overlay (
-    .clk(clk_sys), .rst(rst),
-    .mode(dbg_mode_eff),
-    .hcnt(hcnt), .vcnt(vcnt), .active(video_active),
-    .renderer_target_y(renderer_target_y),
-    .line_commit(line_buffer_start),
-    .renderer_busy(renderer_busy),
-    .gfx_wait(sdr_p2_req && !sdr_p2_ack),
-    .overrun_sticky(renderer_overrun),
-    .overrun_deadline(overrun_deadline),
-    .overrun_cachefull(overrun_cachefull),
-    .rgb_in(core_pixel), .rgb_out(rgb),
-    .hide_obj(dbg_hide_obj), .hide_bg(dbg_hide_bg)
-);
+assign rgb = core_pixel;
 
 function automatic [24:0] external_byte_addr(input [23:0] cpu_addr);
     if (cpu_addr >= 24'h400000)
