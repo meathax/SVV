@@ -27,6 +27,8 @@
 //  Bus: logical access port; unaligned/size handled by s32_v60_bus adapter.
 //============================================================================
 
+`timescale 1ns/1ps
+
 module s32_v60 #(
     parameter [31:0] START_PC = 32'hFFFFFFF0,   // V60/V70 reset PC (MAME m_start_pc; audit V60-21)
     parameter        IS_V70   = 1'b0,

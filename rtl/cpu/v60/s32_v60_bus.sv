@@ -5,6 +5,8 @@
 //  data bus).  V70 (IS_V70=1) uses 1..2 aligned 32-bit cycles.
 //============================================================================
 
+`timescale 1ns/1ps
+
 module s32_v60_bus #(
     parameter IS_V70 = 1'b0
 )(

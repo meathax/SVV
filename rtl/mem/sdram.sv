@@ -20,6 +20,8 @@
 //  to 2 clk_ram cycles so clk_sys-domain requesters sample it exactly once.
 //============================================================================
 
+`timescale 1ns/1ps
+
 module sdram (
     input             clk,          // clk_ram
     input             init,         // reset/init request
@@ -141,35 +143,6 @@ reg  [3:0] row_open;            // per bank: a row is open
 reg [12:0] open_row [0:3];      // and which one
 reg  [1:0] prew_cnt;
 
-// Row-hit is evaluated per port, in parallel with arbitration, and only the
-// single-bit result is muxed by the grant. Doing it the other way round --
-// mux the address first, then index open_row and compare 13 bits -- put a
-// lookup and a wide comparator downstream of the priority mux and cost 137 ps,
-// which this design does not have (it closes at well under 0.5 ns). Comparing
-// first and selecting after keeps the grant path a 6:1 mux of one bit.
-function automatic logic row_hit(input logic [1:0] bank, input logic [12:0] row);
-    row_hit = row_open[bank] && (open_row[bank] == row);
-endfunction
-
-wire hit_p0 = row_hit(p0_addr_p[24:23], p0_addr_p[22:10]);
-wire hit_p1 = row_hit(p1_addr_p[24:23], p1_addr_p[22:10]);
-wire hit_p2 = row_hit(p2_addr_p[24:23], p2_addr_p[22:10]);
-wire hit_p3 = row_hit(p3_addr_p[24:23], p3_addr_p[22:10]);
-wire hit_p4 = row_hit(p4_addr_p[24:23], p4_addr_p[22:10]);
-wire hit_p5 = row_hit(p5_addr_p[24:23], p5_addr_p[22:10]);
-
-logic grant_row_hit;
-always @* begin
-    case (read_grant)
-        3'd0:    grant_row_hit = hit_p0;
-        3'd1:    grant_row_hit = hit_p1;
-        3'd2:    grant_row_hit = hit_p2;
-        3'd3:    grant_row_hit = hit_p3;
-        3'd4:    grant_row_hit = hit_p4;
-        default: grant_row_hit = hit_p5;
-    endcase
-end
-
 reg [2:0]  grant;
 reg [2:0]  rr_next;
 reg [3:0]  rd_total;        // words to read (1/4/8)
@@ -218,6 +191,40 @@ always @* begin
         3'd3: if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else read_valid=0;
         3'd4: if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else read_valid=0;
         default: if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else read_valid=0;
+    endcase
+end
+
+// Row-hit is evaluated per port, in parallel with arbitration, and only the
+// single-bit result is muxed by the grant. Doing it the other way round --
+// mux the address first, then index open_row and compare 13 bits -- put a
+// lookup and a wide comparator downstream of the priority mux and cost 137 ps,
+// which this design does not have (it closes at well under 0.5 ns). Comparing
+// first and selecting after keeps the grant path a 6:1 mux of one bit.
+//
+// Placed after the request mailboxes and read_grant rather than before them,
+// which is where it used to sit: it reads both, and a use-before-declaration
+// is only legal by the implicit-net rule. Pure reordering of declarations --
+// grant_row_hit has exactly one consumer, far below, and no logic changed.
+function automatic logic row_hit(input logic [1:0] bank, input logic [12:0] row);
+    row_hit = row_open[bank] && (open_row[bank] == row);
+endfunction
+
+wire hit_p0 = row_hit(p0_addr_p[24:23], p0_addr_p[22:10]);
+wire hit_p1 = row_hit(p1_addr_p[24:23], p1_addr_p[22:10]);
+wire hit_p2 = row_hit(p2_addr_p[24:23], p2_addr_p[22:10]);
+wire hit_p3 = row_hit(p3_addr_p[24:23], p3_addr_p[22:10]);
+wire hit_p4 = row_hit(p4_addr_p[24:23], p4_addr_p[22:10]);
+wire hit_p5 = row_hit(p5_addr_p[24:23], p5_addr_p[22:10]);
+
+logic grant_row_hit;
+always @* begin
+    case (read_grant)
+        3'd0:    grant_row_hit = hit_p0;
+        3'd1:    grant_row_hit = hit_p1;
+        3'd2:    grant_row_hit = hit_p2;
+        3'd3:    grant_row_hit = hit_p3;
+        3'd4:    grant_row_hit = hit_p4;
+        default: grant_row_hit = hit_p5;
     endcase
 end
 

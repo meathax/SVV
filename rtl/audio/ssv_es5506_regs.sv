@@ -10,6 +10,8 @@
 // One shared rd_addr: engine refresh, or host byte-0 steal.  Registered MLAB
 // reads add one cycle before read_latch fills (ssv_core sound path waits 2).
 
+`timescale 1ns/1ps
+
 module ssv_es5506_regs (
     input  logic        clk,
     input  logic        rst,

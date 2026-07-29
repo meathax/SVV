@@ -7,6 +7,8 @@
 //  packing.  Simulation uses a cycle-equivalent behavioural model.
 //============================================================================
 
+`timescale 1ns/1ps
+
 module ssv_mlab32_sdp #(
     parameter integer WIDTH = 16
 ) (

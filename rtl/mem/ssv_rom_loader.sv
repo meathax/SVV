@@ -12,6 +12,8 @@
 //   samples  -> SDR_SAMPLES_BASE = 0x1160000, above XRAM and CPU RAM. The
 //               graphics region grew into the gap the samples vacated.
 
+`timescale 1ns/1ps
+
 module ssv_rom_loader (
     input              clk,
     input              rst,

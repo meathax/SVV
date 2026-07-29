@@ -8,6 +8,8 @@
 //  and does not depend on altera_mf simulation libraries.
 //============================================================================
 
+`timescale 1ns/1ps
+
 module s32_big_dpram #(
     parameter integer ADDR_WIDTH = 16,
     // Narrower banks exist to save M10K: the palette's odd word carries
