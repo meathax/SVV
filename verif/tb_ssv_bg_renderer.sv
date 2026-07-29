@@ -35,6 +35,18 @@ always_ff @(posedge clk) begin
     spr_data_next <= sprite_mem[spr_addr | 17'd1];
 end
 
+// Responder and capture state have exactly one driver each -- the always_ff
+// blocks below. The stimulus arms them with `capture_arm` rather than writing
+// them directly. A variable written from both an initial block and an always_ff
+// is the classic way to get a testbench that silently observes nothing, and
+// that is exactly what this bench used to do: `first_x`, `last_x` and
+// `first_rom_addr` are write-only here and read only from the initial block, so
+// under Verilator their writes were discarded and they sat at their initial
+// values while the assertions read them. `plots` and `requests` survived only
+// because `x <= x + n` also reads them. See the same note in
+// tb_ssv_tilemap_page.sv, which was written the right way round.
+logic capture_arm;
+
 logic rom_req_d;
 integer rom_delay;
 integer rom_quarter;
@@ -59,12 +71,26 @@ always_ff @(posedge clk) begin
             rom_quarter <= rom_quarter + 1;
         end
     end
+    // Last, so arming wins over anything above it on the same edge.
+    if (capture_arm) begin
+        rom_req_d      <= 1'b0;
+        rom_ack        <= 1'b0;
+        rom_data       <= 128'd0;
+        rom_delay      <= 0;
+        rom_quarter    <= 0;
+        requests       <= 0;
+        first_rom_addr <= '0;
+    end
 end
 
 integer plots;
 integer first_x;
 integer last_x;
 integer monitor_lane;
+// The always_ff below needs its own loop variable: sharing `monitor_lane` with
+// the always_comb makes it multidriven, which IEEE 1800-2023 9.2.2.2 forbids
+// for an always_comb output and which -Wno-MULTIDRIVEN was hiding.
+integer check_lane;
 integer batch_plot_count;
 integer batch_first_lane;
 always_comb begin
@@ -86,16 +112,22 @@ always_ff @(posedge clk) begin
             first_x <= plot_x[batch_first_lane * 9 +: 9];
         plots <= plots + batch_plot_count;
     end
-    for (monitor_lane = 0; monitor_lane < 4;
-         monitor_lane = monitor_lane + 1) begin
-        if (plot_we[monitor_lane]) begin
-            last_x <= plot_x[monitor_lane * 9 +: 9];
-            if (plot_color[monitor_lane * 15 +: 15] !== 15'd65 ||
-                plot_pen[monitor_lane * 8 +: 8] !== 8'd1 ||
+    for (check_lane = 0; check_lane < 4;
+         check_lane = check_lane + 1) begin
+        if (plot_we[check_lane]) begin
+            last_x <= plot_x[check_lane * 9 +: 9];
+            if (plot_color[check_lane * 15 +: 15] !== 15'd65 ||
+                plot_pen[check_lane * 8 +: 8] !== 8'd1 ||
                 plot_shadow || plot_shadow_4bit)
                 $fatal(1, "plot metadata mismatch lane=%0d",
-                       monitor_lane);
+                       check_lane);
         end
+    end
+    // Last, so arming wins over anything above it on the same edge.
+    if (capture_arm) begin
+        plots   <= 0;
+        first_x <= -1;
+        last_x  <= -1;
     end
 end
 
@@ -122,18 +154,15 @@ initial begin
     shadow_4bit = 1'b0;
     spr_data = 16'd0;
     spr_data_next = 16'd0;
-    rom_data = 128'd0;
-    rom_ack = 1'b0;
-    rom_req_d = 1'b0;
-    rom_delay = 0;
-    rom_quarter = 0;
-    requests = 0;
-    first_rom_addr = '0;
-    plots = 0;
-    first_x = -1;
-    last_x = -1;
+    capture_arm = 1'b0;
 
-    repeat (4) @(negedge clk);
+    // Arm the responder and the monitor; their own always_ff blocks clear them.
+    @(negedge clk);
+    capture_arm = 1'b1;
+    @(negedge clk);
+    capture_arm = 1'b0;
+
+    repeat (2) @(negedge clk);
     rst = 1'b0;
     line_start = 1'b1;
     @(negedge clk);
@@ -155,12 +184,9 @@ initial begin
     for (i = 0; i <= 20; i = i + 1)
         sprite_mem[i * 64 + 1] = 16'h4001;
     @(negedge clk);
-    requests = 0;
-    first_rom_addr = '0;
-    rom_quarter = 0;
-    plots = 0;
-    first_x = -1;
-    last_x = -1;
+    capture_arm = 1'b1;
+    @(negedge clk);
+    capture_arm = 1'b0;
     line_start = 1'b1;
     @(negedge clk);
     line_start = 1'b0;
