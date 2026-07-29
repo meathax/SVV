@@ -44,58 +44,14 @@ function automatic [15:0] system_port(
     system_port = {8'hff, ~{3'b000, test_btn, 1'b0, service, coin2, coin1}};
 endfunction
 
-function automatic [3:0] coinage_nibble(input [3:0] osd);
-    case (osd)
-        4'd0:  coinage_nibble = 4'hF;
-        4'd1:  coinage_nibble = 4'h7;
-        4'd2:  coinage_nibble = 4'h8;
-        4'd3:  coinage_nibble = 4'h9;
-        4'd4:  coinage_nibble = 4'h6;
-        4'd5:  coinage_nibble = 4'hE;
-        4'd6:  coinage_nibble = 4'hD;
-        4'd7:  coinage_nibble = 4'hC;
-        4'd8:  coinage_nibble = 4'hB;
-        4'd9:  coinage_nibble = 4'hA;
-        4'd10: coinage_nibble = 4'h5;
-        4'd11: coinage_nibble = 4'h4;
-        4'd12: coinage_nibble = 4'h3;
-        4'd13: coinage_nibble = 4'h2;
-        4'd14: coinage_nibble = 4'h1;
-        default: coinage_nibble = 4'hF;
-    endcase
+// DIP switches now come straight from the MRA on ioctl index 254; the wrapper
+// no longer translates anything, so these mirror the whole of what it does.
+function automatic [15:0] dsw1_port(input [7:0] sw0);
+    dsw1_port = {8'hff, sw0};
 endfunction
 
-function automatic [15:0] dsw1_port(input [3:0] coin_a_osd, input [3:0] coin_b_osd);
-    dsw1_port = {8'hff, coinage_nibble(coin_b_osd), coinage_nibble(coin_a_osd)};
-endfunction
-
-function automatic [15:0] dsw2_port(
-    input flip_osd, input demo_off_osd,
-    input [1:0] diff_osd, input [1:0] lives_osd,
-    input free_osd, input health_osd
-);
-    logic [1:0] dip_difficulty;
-    logic [1:0] dip_lives;
-    logic [7:0] dsw2_lo;
-    begin
-        dip_difficulty =
-            (diff_osd == 2'd0) ? 2'b11 :
-            (diff_osd == 2'd1) ? 2'b10 :
-            (diff_osd == 2'd2) ? 2'b01 : 2'b00;
-        dip_lives =
-            (lives_osd == 2'd0) ? 2'b11 :
-            (lives_osd == 2'd1) ? 2'b01 :
-            (lives_osd == 2'd2) ? 2'b10 : 2'b00;
-        dsw2_lo = {
-            ~health_osd,
-            ~free_osd,
-            dip_lives,
-            dip_difficulty,
-            demo_off_osd,
-            ~flip_osd
-        };
-        dsw2_port = {8'hff, dsw2_lo};
-    end
+function automatic [15:0] dsw2_port(input [7:0] sw1);
+    dsw2_port = {8'hff, sw1};
 endfunction
 
 integer fails;
@@ -190,14 +146,37 @@ initial begin
     expect16("SYS SERVICE", system_port(0, 0, 1, 0), 16'hFFFB);
     expect16("SYS TEST", system_port(0, 0, 0, 1), 16'hFFEF);
 
-    // DSW1 defaults (status coin OSD=0): Coin A/B 1C/1C → 0xFF
-    expect16("DSW1 default", dsw1_port(4'd0, 4'd0), 16'hFFFF);
-    expect16("DSW1 4C/1C A", dsw1_port(4'd1, 4'd0), 16'hFFF7);
-    expect16("DSW1 Multi E B", dsw1_port(4'd0, 4'd14), 16'hFF1F);
+    // ---------------------------------------------------------------------
+    // DIP switches. These constants are NOT derived from Arcade-SSV.sv -- they
+    // are the raw DSW1/DSW2 bytes MAME 0.288 puts on $210002/$210004 for
+    // dynagear, read off INPUT_PORTS_START(dynagear) and SSV_COINAGE_EXTENDED
+    // in src/mame/seta/ssv.cpp. They are also exactly what mra/Dyna Gear.mra
+    // now has to produce, so this block pins the MRA and the board together.
+    //
+    // Defaults FF / FD: Coin A and B 1C/1C, Flip Off, Demo Sounds On,
+    // Difficulty Normal, 2 lives, Free Play Off, 4 Hearts.
+    expect16("DSW1 default", dsw1_port(8'hff), 16'hFFFF);
+    expect16("DSW2 default", dsw2_port(8'hfd), 16'hFFFD);
 
-    // DSW2 defaults (status=0): Demo Sounds ON, Flip Off, Normal, 2 lives,
-    // Free Play Off, 4 Hearts → low byte 0xFD
-    expect16("DSW2 default", dsw2_port(0, 0, 2'd0, 2'd0, 0, 0), 16'hFFFD);
+    // Coin A = 4C/1C is nibble 7 (SSV_COINAGE_EXTENDED 0x0007 << 0).
+    expect16("DSW1 4C/1C A", dsw1_port(8'hf7), 16'hFFF7);
+    // Coin B = Multi E is nibble 1 in the high half (0x0001 << 4).
+    expect16("DSW1 Multi E B", dsw1_port(8'h1f), 16'hFF1F);
+    // DSW2 bit 7 clear = 3 Hearts (0x0080 selects 4 Hearts).
+    expect16("DSW2 3 Hearts", dsw2_port(8'h7d), 16'hFF7D);
+    // DSW2 bits 3:2 = 00 is Hardest (0x000c is Normal).
+    expect16("DSW2 Hardest", dsw2_port(8'hf1), 16'hFFF1);
+
+    // The wrapper must not alter the byte on its way to the game: whatever the
+    // MRA sends is what $210002/$210004 read back, high half tied to 1.
+    for (int i = 0; i < 256; i++) begin
+        if (dsw1_port(i[7:0]) !== {8'hff, i[7:0]}) begin
+            $display("FAIL DSW1 passthrough %02x", i); fails = fails + 1;
+        end
+        if (dsw2_port(i[7:0]) !== {8'hff, i[7:0]}) begin
+            $display("FAIL DSW2 passthrough %02x", i); fails = fails + 1;
+        end
+    end
 
     if (fails != 0)
         $fatal(1, "input matrix failures=%0d", fails);

@@ -42,6 +42,18 @@ module ssv_core (
     input       [15:0] in_system,
     input       [15:0] in_extra,
 
+    // High score save/load. MAME maps SSV main RAM at $000000-$00ffff
+    // (ssv.cpp: map(0x000000, 0x00ffff).ram().share(m_mainram)), which is this
+    // core's work_ram, and its second port was tied off. Handing that port out
+    // gives the hiscore module collision-free access with no arbitration
+    // against the V60 -- the reason the wrapper still pauses the CPU around an
+    // access is the game's own consistency, not a RAM hazard.
+    input       [14:0] hs_addr,
+    input       [15:0] hs_din,
+    input        [1:0] hs_be,
+    input              hs_we,
+    output      [15:0] hs_dout,
+
     output logic [23:0] rgb,
     output logic       ce_pixel,
     output logic       hs,
@@ -167,8 +179,8 @@ integer scroll_init_i;
 s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
     .clock_a(clk_sys), .address_a(wram_addr), .data_a(m_wdata),
     .byteena_a(m_be), .wren_a(m_req && m_we && sel_wram), .q_a(wram_q),
-    .clock_b(clk_sys), .address_b(15'd0), .data_b(16'd0),
-    .byteena_b(2'b00), .wren_b(1'b0), .q_b()
+    .clock_b(clk_sys), .address_b(hs_addr), .data_b(hs_din),
+    .byteena_b(hs_be), .wren_b(hs_we), .q_b(hs_dout)
 );
 
 // Sprite RAM is split by word parity, exactly as ssv_palette_ram is. Both

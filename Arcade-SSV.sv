@@ -87,22 +87,20 @@ localparam CONF_STR = {
     "SSV;;",
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-    "O[5:3],Scandoubler Fx,None,CRT 25%,CRT 50%,CRT 75%;",
+    "O[45:43],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
+    // Was labelled "Scandoubler Fx" while no scandoubler existed. HQ2x is
+    // offered because arcade_video builds its filter either way -- the line
+    // stores it needs are the scandoubler's, so refusing the option would save
+    // nothing.
+    "O[5:3],Video Fx,None,HQ2x,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
+    "O[47:46],Stereo Mix,None,25%,50%,100%;",
     "O[6],Service Mode,Off,On;",
     "O[7],Pause,Off,On;",
-    "-;",
-    // Dyna Gear DSW2 (active-low). Defaults match MAME dynagear: Flip Off,
-    // Demo Sounds On, Difficulty Normal, Lives 2, Free Play Off, 4 Hearts.
-    "O[8],Flip Screen,Off,On;",
-    "O[9],Demo Sounds,On,Off;",
-    "O[11:10],Difficulty,Normal,Easy,Hard,Hardest;",
-    "O[13:12],Lives,2,1,3,4;",
-    "O[14],Free Play,Off,On;",
-    "O[15],Health,4 Hearts,3 Hearts;",
-    // Dyna Gear DSW1: SSV_COINAGE_EXTENDED (Coin A low nibble, Coin B high).
-    // OSD index 0 = 1C/1C (DIP all Off = 0xF / 0xF).
-    "O[19:16],Coin A,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
-    "O[23:20],Coin B,1C/1C,4C/1C,3C/1C,2C/1C,2C/3C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C,Multi A,Multi B,Multi C,Multi D,Multi E;",
+    "H2O[48],Autosave Hiscores,Off,On;",
+    // Flip Screen, Demo Sounds, Difficulty, Lives, Free Play, Health and both
+    // coinage nibbles are DIP switches and now live in the MRA's <switches>
+    // block, which the framework renders as its own OSD page. status bits
+    // 8..23 are free as a result.
     "-;",
     // CRT Adjust (rtl/crt_adjust.sv). Off is a pure passthrough; the three
     // amounts are hidden until it is On (status_menumask bit 1 below).
@@ -132,7 +130,7 @@ assign HDMI_FREEZE = 1'b0;
 assign HDMI_BLACKOUT = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
 assign AUDIO_S = 1'b1;
-assign AUDIO_MIX = 2'b00;
+// AUDIO_MIX is driven from the OSD at the bottom of this file.
 assign LED_POWER = 2'b00;
 // LED_DISK is driven below from the renderer overrun status.
 assign BUTTONS = 2'b00;
@@ -161,6 +159,32 @@ wire [15:0] ioctl_index;
 wire [26:0] ioctl_addr;
 wire [7:0] ioctl_dout;
 wire [31:0] joystick_0, joystick_1;
+// Driven by hps_io, consumed by the video chain at the bottom of this file.
+wire [21:0] gamma_bus;
+wire        forced_scandoubler;
+
+// High score save/load nets. The module itself is instantiated further down,
+// next to ssv_core; these are declared here because hps_io and ssv_core both
+// sit above it and both connect to them. See that instance for the mapping.
+wire [15:0] hs_addr;
+wire  [7:0] hs_data_to_ram, hs_data_from_ram;
+wire        hs_ram_write, hs_configured;
+wire  [7:0] hs_data_to_hps;
+wire        hs_upload, hs_upload_req;
+
+// SSV main RAM is 16-bit and the hiscore module speaks bytes. The board is
+// little-endian (the loader packs LE and the golden CRC depends on it), so
+// byte address N is the low half of word N>>1 when N is even.
+wire [14:0] hs_word_addr = hs_addr[15:1];
+wire [15:0] hs_word_din  = {hs_data_to_ram, hs_data_to_ram};
+wire  [1:0] hs_word_be   = hs_addr[0] ? 2'b10 : 2'b01;
+wire        hs_ram_we    = hs_ram_write;
+wire [15:0] hs_word_dout;
+// The read side is registered inside the RAM, so the byte lane has to be
+// selected with the address that produced the data, not the current one.
+reg  hs_addr0_q;
+always_ff @(posedge clk_sys) hs_addr0_q <= hs_addr[0];
+assign hs_data_from_ram = hs_addr0_q ? hs_word_dout[15:8] : hs_word_dout[7:0];
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .clk_sys(clk_sys), .HPS_BUS(HPS_BUS),
@@ -168,8 +192,14 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .ioctl_download(ioctl_download), .ioctl_wr(ioctl_wr),
     .ioctl_addr(ioctl_addr), .ioctl_dout(ioctl_dout),
     .ioctl_index(ioctl_index), .ioctl_wait(ioctl_wait),
+    // Hiscore save path: index 4 is <MRA name>.nvm.
+    .ioctl_upload(hs_upload), .ioctl_upload_req(hs_upload_req),
+    .ioctl_upload_index(8'd4), .ioctl_din(hs_data_to_hps),
     // H1 hides the three CRT Adjust amounts while CRT Adjust is Off.
-    .status_menumask({14'd0, ~status[24], 1'b0}),
+    // H2 hides Autosave on an MRA that carries no hiscore.dat entry.
+    .status_menumask({13'd0, ~hs_configured, ~status[24], 1'b0}),
+    .forced_scandoubler(forced_scandoubler),
+    .gamma_bus(gamma_bus),
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
 
@@ -207,11 +237,24 @@ assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
 // CPU-to-raster phase would invalidate the 950-frame golden CRC that was just
 // re-baselined against MAME. Not worth trading a verified reference for 49 ppm.
 // Revisit only if the golden is being re-cut for another reason.
+//
+// Pause also stops the CPU while the OSD is open, which is what a player
+// expects from opening a menu mid-game and costs one gate. status[7] remains
+// the explicit manual pause; the renderer keeps running either way, so the
+// last frame stays on screen.
+//
+// hs_pause is the hiscore module asking for the CPU to be still while it
+// reads or writes the score table. It is a registered output over there, so
+// feeding game_pause straight back into its `paused` input is a handshake and
+// not a combinational loop.
+wire hs_pause;
+wire game_pause = status[7] | OSD_STATUS | hs_pause;
+
 logic ce_cpu;
 logic [15:0] cpu_acc;
 always_ff @(posedge clk_sys) begin
     logic [16:0] sum;
-    if (!pll_locked || status[7]) begin
+    if (!pll_locked || game_pause) begin
         ce_cpu <= 1'b0;
         if (!pll_locked) cpu_acc <= 16'd0;
     end
@@ -411,52 +454,36 @@ wire [15:0] system_port = {8'hff,
     ~{3'b000, test_button, 1'b0, service_button,
       coin2_button, coin1_button}};
 
-// Map OSD index → MAME SSV_COINAGE_EXTENDED nibble (default 0 → 0xF = 1C/1C).
-function automatic [3:0] coinage_nibble(input [3:0] osd);
-    case (osd)
-        4'd0:  coinage_nibble = 4'hF; // 1C/1C
-        4'd1:  coinage_nibble = 4'h7; // 4C/1C
-        4'd2:  coinage_nibble = 4'h8; // 3C/1C
-        4'd3:  coinage_nibble = 4'h9; // 2C/1C
-        4'd4:  coinage_nibble = 4'h6; // 2C/3C
-        4'd5:  coinage_nibble = 4'hE; // 1C/2C
-        4'd6:  coinage_nibble = 4'hD; // 1C/3C
-        4'd7:  coinage_nibble = 4'hC; // 1C/4C
-        4'd8:  coinage_nibble = 4'hB; // 1C/5C
-        4'd9:  coinage_nibble = 4'hA; // 1C/6C
-        4'd10: coinage_nibble = 4'h5; // Multi A
-        4'd11: coinage_nibble = 4'h4; // Multi B
-        4'd12: coinage_nibble = 4'h3; // Multi C
-        4'd13: coinage_nibble = 4'h2; // Multi D
-        4'd14: coinage_nibble = 4'h1; // Multi E
-        default: coinage_nibble = 4'hF;
-    endcase
-endfunction
-wire [15:0] dsw1_port = {8'hff,
-    coinage_nibble(status[23:20]), // Coin B
-    coinage_nibble(status[19:16])  // Coin A
-};
+// ---------------------------------------------------------------------------
+// DIP switches, from the MRA.
+//
+// These used to be OSD options, each one hand-mapped to a DIP bit pattern --
+// coinage in particular needed a 16-entry lookup, because the OSD list order
+// and the board's nibble values have nothing to do with each other. The MRA
+// expresses that directly (<dip ... ids=... values=...>) and the HPS sends the
+// assembled bytes on ioctl index 254, so the core can take them verbatim.
+//
+// That removes the translation layer and, with it, the class of bug where the
+// OSD says one thing and the board is told another. It also means a second SSV
+// title only needs its own MRA, not RTL changes -- these bytes ARE what the
+// game reads at $210002 and $210004.
+//
+// The reset default matches MAME's dynagear (FF / FD) so the core still comes
+// up sanely if an MRA carries no <switches> block at all.
+// ---------------------------------------------------------------------------
+logic [7:0] sw [0:1];
+initial begin
+    sw[0] = 8'hff;  // DSW1: Coin A and Coin B both 1C/1C
+    sw[1] = 8'hfd;  // DSW2: Flip Off, Demo On, Normal, 2 lives, Free Play Off,
+                    //       4 Hearts
+end
+always_ff @(posedge clk_sys) begin
+    if (ioctl_wr && (ioctl_index[7:0] == 8'd254) && !ioctl_addr[24:1])
+        sw[ioctl_addr[0]] <= ioctl_dout;
+end
 
-// Map OSD → active-low DSW2 bits (see MAME INPUT_PORTS_START(dynagear)).
-wire [1:0] dip_difficulty =
-    (status[11:10] == 2'd0) ? 2'b11 : // Normal
-    (status[11:10] == 2'd1) ? 2'b10 : // Easy
-    (status[11:10] == 2'd2) ? 2'b01 : // Hard
-                              2'b00;  // Hardest
-wire [1:0] dip_lives =
-    (status[13:12] == 2'd0) ? 2'b11 : // 2
-    (status[13:12] == 2'd1) ? 2'b01 : // 1
-    (status[13:12] == 2'd2) ? 2'b10 : // 3
-                              2'b00;  // 4
-wire [7:0] dsw2_lo = {
-    ~status[15],          // Health: 0=4 hearts default, 1=3 hearts
-    ~status[14],          // Free Play Off default
-    dip_lives,
-    dip_difficulty,
-    status[9],            // Demo Sounds: OSD On(0)->DIP 0, Off(1)->DIP 1
-    ~status[8]            // Flip Screen Off default
-};
-wire [15:0] dsw2_port = {8'hff, dsw2_lo};
+wire [15:0] dsw1_port = {8'hff, sw[0]};
+wire [15:0] dsw2_port = {8'hff, sw[1]};
 
 wire [23:0] core_rgb;
 wire core_ce, core_hs, core_vs, core_hb, core_vb;
@@ -478,6 +505,8 @@ ssv_core core (
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
     .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
     .in_system(system_port), .in_extra(16'hffff),
+    .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
+    .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
     .rgb(core_rgb), .ce_pixel(core_ce),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
@@ -485,90 +514,64 @@ ssv_core core (
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
 
-// Set ENABLE_DIAG_VIDEO=0 before a release RBF to strip the second raster
-// timing path (~200 ALUTs + routing). Keep 1 for bring-up color bars.
-localparam bit ENABLE_DIAG_VIDEO = 1'b0;
+// ---------------------------------------------------------------------------
+// High score save/load (rtl/hiscore.v, alanswx / JimmyStones).
+//
+// The MRA carries the game's hiscore.dat entry on ioctl index 3; the saved
+// dump is <MRA name>.nvm on index 4. The module walks the entry list, waits
+// for the game to have initialised its table, then restores it -- and on OSD
+// open it reads the table back and requests a save if anything changed.
+//
+// SSV main RAM is 16-bit and the module speaks bytes, so this converts. The
+// board is little-endian (the loader packs LE and the golden CRC depends on
+// it), so byte address N is the low half of word N>>1 when N is even.
+// ---------------------------------------------------------------------------
+hiscore #(
+    // 16 bits covers the whole of SSV main RAM ($0000-$ffff).
+    .HS_ADDRESSWIDTH(16),
+    // 128 bytes of dump. Dyna Gear's table is 36 (a 4-byte high score plus
+    // four 8-byte entries), so this is generous, and halving it from the
+    // default keeps the two score buffers to one M10K each.
+    .HS_SCOREWIDTH(7),
+    .CFG_ADDRESSWIDTH(4)
+) u_hiscore (
+    .clk(clk_sys),
+    .reset(core_reset),
+    .paused(game_pause),
+    .autosave(status[48]),
+    .OSD_STATUS(OSD_STATUS),
 
-wire diag_rst = ~pll_locked;
-wire cpu_halted = debug_status[23];
-wire video_enable = debug_status[22];
-wire irq_n_dbg = debug_status[21];
-wire ext_busy = debug_status[18];
-wire [7:0] irq_enabled = debug_status[7:0];
-wire [23:0] diag_rgb;
-wire diag_ce, diag_hs, diag_vs, diag_hb, diag_vb;
-wire use_core_video;
-logic [15:0] diag_frame;
-logic diag_vs_d;
+    .ioctl_upload(hs_upload),
+    .ioctl_upload_req(hs_upload_req),
+    .ioctl_download(ioctl_download),
+    .ioctl_wr(ioctl_wr),
+    .ioctl_addr(ioctl_addr[24:0]),
+    .ioctl_index(ioctl_index[7:0]),
 
-generate
-if (ENABLE_DIAG_VIDEO) begin : g_diag
-    always_ff @(posedge clk_sys) begin
-        if (diag_rst) begin
-            diag_frame <= 16'd0;
-            diag_vs_d <= 1'b1;
-        end
-        else begin
-            diag_vs_d <= diag_vs;
-            if (diag_vs_d && !diag_vs)
-                diag_frame <= diag_frame + 1'd1;
-        end
-    end
+    .data_from_hps(ioctl_dout),
+    .data_to_hps(hs_data_to_hps),
+    .data_from_ram(hs_data_from_ram),
+    .data_to_ram(hs_data_to_ram),
+    .ram_address(hs_addr),
+    .ram_write(hs_ram_write),
+    .ram_intent_read(),
+    .ram_intent_write(),
+    .pause_cpu(hs_pause),
+    .configured(hs_configured)
+);
 
-    ssv_diag_video diag_video (
-        .clk(clk_sys), .rst(diag_rst),
-        .show_core(1'b1), .core_rgb(core_rgb),
-        .pll_locked(pll_locked),
-        .ioctl_download(ioctl_download),
-        .rom_loaded(rom_loaded),
-        .sdram_ready(sdram_ready_sys),
-        .video_reset(video_reset),
-        .core_reset(core_reset),
-        .video_enable(video_enable),
-        .cpu_halted(cpu_halted),
-        .cpu_pause(status[7]),
-        .service_mode(status[6]),
-        .irq_n(irq_n_dbg),
-        .irq_enabled(irq_enabled),
-        .ext_busy(ext_busy),
-        .rom_sig_ok(rom_sig_ok),
-        .probe_done(probe_done),
-        .probe_sig0(probe_sig0),
-        .probe_sig1(probe_sig1),
-        .debug_pc(debug_pc),
-        .ioctl_addr(ioctl_addr),
-        .download_max_addr(download_max_addr),
-        .frame_count(diag_frame),
-        .rgb(diag_rgb), .ce_pixel(diag_ce),
-        .hs(diag_hs), .vs(diag_vs), .hb(diag_hb), .vb(diag_vb),
-        .use_core_video(use_core_video)
-    );
-end else begin : g_no_diag
-    assign diag_rgb = 24'd0;
-    assign diag_ce = 1'b0;
-    assign diag_hs = 1'b0;
-    assign diag_vs = 1'b0;
-    assign diag_hb = 1'b1;
-    assign diag_vb = 1'b1;
-    assign use_core_video = 1'b1;
-    always_ff @(posedge clk_sys) begin
-        diag_frame <= 16'd0;
-        diag_vs_d <= 1'b1;
-    end
-end
-endgenerate
-
-// Bring-up states 0-7/A/B keep the independent diag raster. Once the game
-// enables video (state 8), drive HDMI from the core's own timing so pixels
-// and sync share one phase.
-wire [7:0] av_r = use_core_video ? core_rgb[23:16] : diag_rgb[23:16];
-wire [7:0] av_g = use_core_video ? core_rgb[15:8]  : diag_rgb[15:8];
-wire [7:0] av_b = use_core_video ? core_rgb[7:0]   : diag_rgb[7:0];
-wire av_hs = use_core_video ? core_hs : diag_hs;
-wire av_vs = use_core_video ? core_vs : diag_vs;
-wire av_hb = use_core_video ? core_hb : diag_hb;
-wire av_vb = use_core_video ? core_vb : diag_vb;
-wire av_ce = use_core_video ? core_ce : diag_ce;
+// The core's own raster is the only video source. The independent bring-up
+// raster (ssv_diag_video) that used to sit alongside it has been removed: it
+// was permanently disabled by a hardcoded localparam, so the mux below always
+// selected the core and the second timing path was dead weight in every build.
+wire [7:0] av_r = core_rgb[23:16];
+wire [7:0] av_g = core_rgb[15:8];
+wire [7:0] av_b = core_rgb[7:0];
+wire av_hs = core_hs;
+wire av_vs = core_vs;
+wire av_hb = core_hb;
+wire av_vb = core_vb;
+wire av_ce = core_ce;
 
 // ---------------------------------------------------------------------------
 // CRT Adjust (rtl/crt_adjust.sv, rmonic79) -- core-side integration.
@@ -693,32 +696,89 @@ always_ff @(posedge clk_sys) begin
     else if (crt_adj_fall)    crt_de_osd <= 1'b0;
 end
 
-assign CE_PIXEL = crt_on ? crt_rd_ce : av_ce;
-assign VGA_R = crt_on ? crt_r : av_r;
-assign VGA_G = crt_on ? crt_g : av_g;
-assign VGA_B = crt_on ? crt_b : av_b;
-assign VGA_HS = crt_on ? crt_hs : av_hs;
-assign VGA_VS = crt_on ? crt_vs : av_vs;
-assign VGA_DE = crt_on ? crt_de_osd : ~(av_hb | av_vb);
-assign VGA_SL = status[4:3];
-assign AUDIO_L = status[7] ? 16'd0 : core_audio_l;
-assign AUDIO_R = status[7] ? 16'd0 : core_audio_r;
+// ---------------------------------------------------------------------------
+// Standard MiSTer arcade video chain: gamma, scandoubler and scanline FX.
+//
+// WIDTH is the game's active width, 336, and it is not cosmetic. arcade_video
+// passes LINE_LENGTH = WIDTH+4 to the scandoubler, which sizes the Hq2x line
+// stores; the library default of 768 would more than double their block RAM on
+// a design where M10K is the binding resource.
+//
+// This path and CRT Adjust are mutually exclusive, and that is a statement
+// about the hardware rather than a shortcut. CRT Adjust exists to hand a
+// 15 kHz analog CRT byte-exact pixels at a chosen duration; a scandoubler
+// exists to turn 15 kHz into 31 kHz for a monitor that cannot do 15 kHz. There
+// is no display for which both are wanted, and scanline FX on a real CRT that
+// already has scanlines is meaningless. So the mux below picks one whole path
+// or the other, and CRT Adjust deliberately gets no gamma: resampling nothing
+// is the entire point of it.
+// ---------------------------------------------------------------------------
+wire [7:0] mix_r, mix_g, mix_b;
+wire       mix_hs, mix_vs, mix_de, mix_ce;
+wire [1:0] mix_sl;
+
+arcade_video #(.WIDTH(336), .DW(24), .GAMMA(1)) u_arcade_video (
+    .clk_video(clk_sys), .ce_pix(av_ce),
+    .RGB_in({av_r, av_g, av_b}),
+    .HBlank(av_hb), .VBlank(av_vb), .HSync(av_hs), .VSync(av_vs),
+    // CLK_VIDEO is only a pass-through of clk_video inside the module; it is
+    // driven directly at the top of this file, so it is left unconnected here.
+    .CLK_VIDEO(), .CE_PIXEL(mix_ce),
+    .VGA_R(mix_r), .VGA_G(mix_g), .VGA_B(mix_b),
+    .VGA_HS(mix_hs), .VGA_VS(mix_vs), .VGA_DE(mix_de), .VGA_SL(mix_sl),
+    .fx(status[5:3]),
+    .forced_scandoubler(forced_scandoubler),
+    .gamma_bus(gamma_bus)
+);
+
+assign CE_PIXEL = crt_on ? crt_rd_ce : mix_ce;
+assign VGA_R  = crt_on ? crt_r  : mix_r;
+assign VGA_G  = crt_on ? crt_g  : mix_g;
+assign VGA_B  = crt_on ? crt_b  : mix_b;
+assign VGA_HS = crt_on ? crt_hs : mix_hs;
+assign VGA_VS = crt_on ? crt_vs : mix_vs;
+assign VGA_SL = crt_on ? 2'b00  : mix_sl;
+
+// video_freak owns VGA_DE and the aspect outputs. It is pure logic -- one
+// 12x12 multiplier and a few counters, no block RAM -- and it is what supplies
+// the integer-scaling modes arcade cores are expected to offer.
+wire vga_de_in = crt_on ? crt_de_osd : mix_de;
+wire [1:0] aspect = status[2:1];
+
+video_freak u_video_freak (
+    .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL), .VGA_VS(VGA_VS),
+    .HDMI_WIDTH(HDMI_WIDTH), .HDMI_HEIGHT(HDMI_HEIGHT),
+    .VGA_DE(VGA_DE), .VIDEO_ARX(VIDEO_ARX), .VIDEO_ARY(VIDEO_ARY),
+    .VGA_DE_IN(vga_de_in),
+    .ARX((aspect == 0) ? 12'd4 : {10'd0, aspect - 1'b1}),
+    .ARY((aspect == 0) ? 12'd3 : 12'd0),
+    .CROP_SIZE(12'd0), .CROP_OFF(5'd0),
+    .SCALE(status[45:43])
+);
+
+assign AUDIO_L = game_pause ? 16'd0 : core_audio_l;
+assign AUDIO_R = game_pause ? 16'd0 : core_audio_r;
+assign AUDIO_MIX = status[47:46];
 
 // The scanline renderer latches a sticky flag when it misses a line deadline
-// or truncates a descriptor/line-slot list. With ENABLE_DIAG_VIDEO=0 nothing
-// else reads debug_status, so on hardware that failure was silent -- it just
-// drops sprites. Drive the I/O board's HDD LED from it so the first board
-// bring-up can see it. {1'b1, value} is the MiSTer override encoding.
+// or truncates a descriptor/line-slot list. Nothing else reads debug_status,
+// so on hardware that failure was silent -- it just drops sprites. Drive the
+// I/O board's HDD LED from it so the first board bring-up can see it.
+// {1'b1, value} is the MiSTer override encoding.
 wire renderer_overrun = debug_status[16];
 assign LED_DISK = {1'b1, renderer_overrun};
 
-wire [1:0] aspect = status[2:1];
-assign VIDEO_ARX = (aspect == 0) ? 13'd4 : {11'd0, aspect - 1'b1};
-assign VIDEO_ARY = (aspect == 0) ? 13'd3 : 13'd0;
+// Boot diagnostics that only ssv_diag_video ever consumed. They are kept
+// because they are cheap and are what a bring-up bisect reaches for first --
+// rom_sig_ok in particular is the one bit that says the ROM landed in SDRAM
+// intact. Sunk here so removing their reader does not leave Quartus warning
+// about dangling nets.
+wire unused_debug = &{1'b0, debug_pc, debug_status, download_max_addr,
+                      probe_sig0, probe_sig1, rom_sig_ok};
 
-wire unused_inputs = &{1'b0, HDMI_WIDTH, HDMI_HEIGHT, CLK_AUDIO, SD_MISO,
+wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,
-                       OSD_STATUS, DDRAM_BUSY, DDRAM_DOUT,
+                       DDRAM_BUSY, DDRAM_DOUT,
                        DDRAM_DOUT_READY, clk_aux};
 
 endmodule

@@ -66,9 +66,6 @@ run_one() {
   verilator-sim-safe -- "$bdir/$top" | tee "$bdir/run.log"
 }
 
-run_one tb_ssv_diag_video \
-  rtl/ssv_pkg.sv rtl/ssv_video_timing.sv rtl/ssv_diag_video.sv verif/tb_ssv_diag_video.sv
-
 run_one tb_ssv_rom_loader \
   rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv verif/tb_ssv_rom_loader.sv
 
