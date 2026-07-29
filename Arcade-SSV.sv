@@ -89,27 +89,18 @@ localparam CONF_STR = {
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O[45:43],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
     // Was labelled "Scandoubler Fx" while no scandoubler existed. HQ2x is
-    // offered because arcade_video builds its filter either way -- the line
-    // stores it needs are the scandoubler's, so refusing the option would save
-    // nothing.
-    "O[5:3],Video Fx,None,HQ2x,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
+    // gone with arcade_video; the line doubler that replaced it does not
+    // filter, so the list is the scanline levels only. Any non-None setting
+    // turns the doubler on, which is the convention arcade_video used.
+    "O[5:3],Video Fx,None,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
     "O[47:46],Stereo Mix,None,25%,50%,100%;",
     "O[6],Service Mode,Off,On;",
     "O[7],Pause,Off,On;",
-    "H2O[48],Autosave Hiscores,Off,On;",
+    "H1O[48],Autosave Hiscores,Off,On;",
     // Flip Screen, Demo Sounds, Difficulty, Lives, Free Play, Health and both
     // coinage nibbles are DIP switches and now live in the MRA's <switches>
     // block, which the framework renders as its own OSD page. status bits
     // 8..23 are free as a result.
-    "-;",
-    // CRT Adjust (rtl/crt_adjust.sv). Off is a pure passthrough; the three
-    // amounts are hidden until it is On (status_menumask bit 1 below).
-    "P1,CRT Adjust;",
-    "P1-;",
-    "P1O[24],CRT Adjust,Off,On;",
-    "H1P1O[29:25],H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
-    "H1P1O[35:30],H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
-    "H1P1O[40:36],V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
     "-;",
     // Direct arcade controls through the User I/O port (Antonio Villena DB15
     // SNAC splitter). Off leaves both players on the HPS/USB joysticks.
@@ -160,7 +151,7 @@ wire [26:0] ioctl_addr;
 wire [7:0] ioctl_dout;
 wire [31:0] joystick_0, joystick_1;
 // Driven by hps_io, consumed by the video chain at the bottom of this file.
-wire [21:0] gamma_bus;
+// There is no gamma_bus: gamma_corr went with arcade_video.
 wire        forced_scandoubler;
 
 // High score save/load nets. The module itself is instantiated further down,
@@ -195,11 +186,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     // Hiscore save path: index 4 is <MRA name>.nvm.
     .ioctl_upload(hs_upload), .ioctl_upload_req(hs_upload_req),
     .ioctl_upload_index(8'd4), .ioctl_din(hs_data_to_hps),
-    // H1 hides the three CRT Adjust amounts while CRT Adjust is Off.
-    // H2 hides Autosave on an MRA that carries no hiscore.dat entry.
-    .status_menumask({13'd0, ~hs_configured, ~status[24], 1'b0}),
+    // H1 hides Autosave on an MRA that carries no hiscore.dat entry.
+    .status_menumask({14'd0, ~hs_configured, 1'b0}),
     .forced_scandoubler(forced_scandoubler),
-    .gamma_bus(gamma_bus),
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
 
@@ -574,175 +563,80 @@ wire av_vb = core_vb;
 wire av_ce = core_ce;
 
 // ---------------------------------------------------------------------------
-// CRT Adjust (rtl/crt_adjust.sv, rmonic79) -- core-side integration.
+// Video output.
 //
-// Everything the picture is resized and repositioned by happens inside a line
-// buffer whose engine restarts on the module's own line reference, so the sync
-// never moves out of phase with the content and a real 15 kHz CRT keeps its
-// lock while the controls are moved live. sys/ is untouched, which is the whole
-// point of choosing the core-side variant over crt_adjust_sys.sv.
+// The chain is deliberately small: an optional 2x line doubler, then
+// video_freak for the scaling modes and VGA_DE. What is NOT here matters as
+// much as what is.
 //
-// Deviations from the upstream reference glue, both forced by this core:
+// sys/arcade_video.v was used briefly and removed. It reaches a scandoubler
+// through video_mixer, and that scandoubler keeps its line storage inside
+// Hq2x -- two input line buffers plus an output buffer four times the pixel
+// width -- which is about nine M10K at this game's 336-pixel active width,
+// with gamma_corr adding roughly four more. This design is at its block RAM
+// ceiling and the fitter is at its memory ceiling, and neither the HQ2x filter
+// nor a gamma curve earns that on an arcade board driving a CRT. Dropping
+// arcade_video takes gamma with it, so there is no GAMMA parameter to set.
 //
-//  1. Read-rate units are SIXTEENTHS of a clk_sys cycle, not quarters. The
-//     reference assumes an integer clk/pixel ratio (96/6 = 16 cycles = 64
-//     quarters). SSV's pixel clock is a fractional accumulator: 9710/65536 of
-//     48.3185 MHz = 7.159091 MHz, i.e. 6.74933 clk per pixel, which is not an
-//     integer and cannot be. 6.74933 x 16 = 107.99, so the base period is 108
-//     sixteenths -- 0.01% slow at H-Size 0, which is 0.05 pixel across a
-//     454-pixel line and is reset every line anyway. It also makes each H-Size
-//     step 1/108 = 0.93%, finer than the reference's 1.5%.
+// CRT Adjust (rmonic79) was also here and has been removed for the same
+// reason: its line buffer is another three M10K. The analog geometry controls
+// it provided are gone; MiSTer's own framework shift is what remains.
 //
-//  2. H-Position is a signed 6-bit OSD field (-32..+31 px) rather than the
-//     reference's 7-bit wrap encoding of +-48. The wrap encoding needs a
-//     128-entry OSD list to place -48 at index 79; plain two's complement puts
-//     0 at index 0 with a 64-entry list and no dead entries. The module's
-//     hoffset input is unchanged (signed 9-bit); only the range offered is.
-//
-// HPOS_MODE = CONTENTSHIFT: 336 active pixels on a 454-pixel line, and the
-// write pointer resets at hcnt 400, leaving 54 samples of margin before the
-// active region and 122 after it inside the 512-entry bank -- so +-32 of
-// content shift cannot run the picture out of the buffer window.
+// Scanline FX are unaffected by any of this -- sys_top applies them itself
+// from VGA_SL (sys/sys_top.v: scanlines #(0) VGA_scanlines), which is why the
+// option kept working even before this core had any video chain at all.
 // ---------------------------------------------------------------------------
-localparam int CRT_HTOTAL = 454;
-localparam int CRT_VTOTAL = 262;
 
-reg crt_on;
-always_ff @(posedge clk_sys) if (av_ce) crt_on <= status[24];
+// Any Fx selection implies doubling, the same rule arcade_video used.
+wire sd_on = forced_scandoubler | (|status[5:3]);
 
-reg signed [4:0] crt_hsize;
-always_ff @(posedge clk_sys) if (av_ce) crt_hsize <= $signed(status[29:25]);
+// The doubler needs an enable at exactly twice the pixel rate and in phase
+// with it. ssv_video_timing makes ce_pixel by adding PIXEL_INC to a 16-bit
+// accumulator every clk_sys; doubling the increment doubles the rate exactly,
+// with no rounding to drift. Restarted on the same line reference the core
+// uses so the two cannot walk apart across a frame.
+localparam logic [15:0] PIXEL_INC = 16'd9710;   // keep in step with
+                                                // rtl/ssv_video_timing.sv
+logic av_hs_d2;
+always_ff @(posedge clk_sys) if (av_ce) av_hs_d2 <= av_hs;
+wire av_line_start = av_ce && (av_hs & ~av_hs_d2);
 
-reg signed [5:0] crt_hpos;
-always_ff @(posedge clk_sys) if (av_ce) crt_hpos <= $signed(status[35:30]);
-wire signed [8:0] crt_hoffset = 9'($signed(crt_hpos));
-
-reg signed [5:0] crt_vshift;
-always_ff @(posedge clk_sys) if (av_ce) crt_vshift <= 6'($signed(status[40:36]));
-
-// Read clock enable, stepped in sixteenths of clk_sys and restarted on the
-// module's hs_ref_out -- never on the raw HSync, or the read rate and the
-// module's read counter drift apart and the picture desyncs when shrinking.
-wire crt_hs_ref;
-reg  crt_hs_ref_d;
-always_ff @(posedge clk_sys) crt_hs_ref_d <= crt_hs_ref;
-wire crt_hs_ref_rise = crt_hs_ref & ~crt_hs_ref_d;
-
-wire [7:0] crt_rd_period = 8'd108 + {{3{crt_hsize[4]}}, crt_hsize}; // 92..123
-reg  [7:0] crt_rd_acc;
-wire       crt_rd_tick = (crt_rd_acc + 8'd16) >= crt_rd_period;
+logic [15:0] ce2_acc;
+logic        ce_pix_x2;
 always_ff @(posedge clk_sys) begin
-    if      (crt_hs_ref_rise) crt_rd_acc <= 8'd0;
-    else if (crt_rd_tick)     crt_rd_acc <= crt_rd_acc + 8'd16 - crt_rd_period;
-    else                      crt_rd_acc <= crt_rd_acc + 8'd16;
-end
-wire crt_rd_ce = crt_on ? crt_rd_tick : av_ce;
-
-wire [7:0] crt_r, crt_g, crt_b;
-wire crt_hs, crt_vs, crt_hb, crt_vb;
-
-crt_adjust #(
-    .VTOTAL   (CRT_VTOTAL),
-    .HTOTAL   (CRT_HTOTAL),
-    // 1 = HPOS_CONTENTSHIFT. Spelled as a literal rather than the module's
-    // `HPOS_CONTENTSHIFT macro because this file is compiled before rtl/ in
-    // files.qip, so the macro is not defined yet at this point.
-    .HPOS_MODE(1)
-) u_crt_adjust (
-    .clk      (clk_sys),
-    .pxl_cen  (av_ce),
-    .pxl2_cen (crt_rd_ce),
-    .active   (crt_on),
-    .hsize    (crt_hsize),
-    .hoffset  (crt_hoffset),
-    .voffset  (crt_vshift),
-    .r_in     (av_r), .g_in(av_g), .b_in(av_b),
-    .hs_in    (av_hs), .vs_in(av_vs),
-    .hb_in    (av_hb | av_vb), .vb_in(av_vb),
-    .r_out    (crt_r), .g_out(crt_g), .b_out(crt_b),
-    .hs_out   (crt_hs), .vs_out(crt_vs),
-    .hb_out   (crt_hb), .vb_out(crt_vb),
-    .hs_ref_out(crt_hs_ref)
-);
-
-// The OSD centres itself on the rising edge of VGA_DE. Left following the
-// module's blank it would slide with the picture whenever H-Position moves, so
-// build a DE window that rises with the NATIVE active region and falls with the
-// adjusted one: the image moves, the OSD stays put on the physical screen.
-//
-// The native HSync rise is once per line, which is the cadence the reference
-// glue gets from a hcnt == HTOTAL-1 tick; sampling VBlank on it also delivers
-// the one-line delay the read side needs (it is emitting the previous line).
-reg av_hs_d;
-always_ff @(posedge clk_sys) if (av_ce) av_hs_d <= av_hs;
-wire av_hs_rise = av_ce && (av_hs & ~av_hs_d);
-
-reg crt_vb_1l;
-always_ff @(posedge clk_sys) if (av_hs_rise) crt_vb_1l <= av_vb;
-
-wire crt_native_active = ~(av_hb | crt_vb_1l);
-reg  crt_native_active_d;
-always_ff @(posedge clk_sys) if (av_ce) crt_native_active_d <= crt_native_active;
-wire crt_native_rise = crt_native_active & ~crt_native_active_d;
-
-wire crt_adj_active = ~crt_hb;
-reg  crt_adj_active_d;
-always_ff @(posedge clk_sys) if (crt_rd_ce) crt_adj_active_d <= crt_adj_active;
-wire crt_adj_fall = crt_adj_active_d & ~crt_adj_active;
-
-reg crt_de_osd;
-always_ff @(posedge clk_sys) begin
-    if      (crt_native_rise) crt_de_osd <= 1'b1;
-    else if (crt_adj_fall)    crt_de_osd <= 1'b0;
+    logic [16:0] sum;
+    if (av_line_start) begin
+        ce2_acc   <= 16'd0;
+        ce_pix_x2 <= 1'b0;
+    end
+    else begin
+        sum       = {1'b0, ce2_acc} + {1'b0, PIXEL_INC << 1};
+        ce2_acc   <= sum[15:0];
+        ce_pix_x2 <= sum[16];
+    end
 end
 
-// ---------------------------------------------------------------------------
-// Standard MiSTer arcade video chain: gamma, scandoubler and scanline FX.
-//
-// WIDTH is the game's active width, 336, and it is not cosmetic. arcade_video
-// passes LINE_LENGTH = WIDTH+4 to the scandoubler, which sizes the Hq2x line
-// stores; the library default of 768 would more than double their block RAM on
-// a design where M10K is the binding resource.
-//
-// This path and CRT Adjust are mutually exclusive, and that is a statement
-// about the hardware rather than a shortcut. CRT Adjust exists to hand a
-// 15 kHz analog CRT byte-exact pixels at a chosen duration; a scandoubler
-// exists to turn 15 kHz into 31 kHz for a monitor that cannot do 15 kHz. There
-// is no display for which both are wanted, and scanline FX on a real CRT that
-// already has scanlines is meaningless. So the mux below picks one whole path
-// or the other, and CRT Adjust deliberately gets no gamma: resampling nothing
-// is the entire point of it.
-// ---------------------------------------------------------------------------
-wire [7:0] mix_r, mix_g, mix_b;
-wire       mix_hs, mix_vs, mix_de, mix_ce;
-wire [1:0] mix_sl;
+wire [23:0] sd_rgb;
+wire        sd_hs, sd_vs, sd_hb, sd_vb;
 
-arcade_video #(.WIDTH(336), .DW(24), .GAMMA(1)) u_arcade_video (
-    .clk_video(clk_sys), .ce_pix(av_ce),
-    .RGB_in({av_r, av_g, av_b}),
-    .HBlank(av_hb), .VBlank(av_vb), .HSync(av_hs), .VSync(av_vs),
-    // CLK_VIDEO is only a pass-through of clk_video inside the module; it is
-    // driven directly at the top of this file, so it is left unconnected here.
-    .CLK_VIDEO(), .CE_PIXEL(mix_ce),
-    .VGA_R(mix_r), .VGA_G(mix_g), .VGA_B(mix_b),
-    .VGA_HS(mix_hs), .VGA_VS(mix_vs), .VGA_DE(mix_de), .VGA_SL(mix_sl),
-    .fx(status[5:3]),
-    .forced_scandoubler(forced_scandoubler),
-    .gamma_bus(gamma_bus)
+ssv_scandoubler u_scandoubler (
+    .clk(clk_sys), .rst(video_reset),
+    .ce_pix(av_ce), .ce_pix_x2(ce_pix_x2),
+    .rgb_in({av_r, av_g, av_b}),
+    .hs_in(av_hs), .vs_in(av_vs), .hb_in(av_hb), .vb_in(av_vb),
+    .rgb_out(sd_rgb),
+    .hs_out(sd_hs), .vs_out(sd_vs), .hb_out(sd_hb), .vb_out(sd_vb)
 );
 
-assign CE_PIXEL = crt_on ? crt_rd_ce : mix_ce;
-assign VGA_R  = crt_on ? crt_r  : mix_r;
-assign VGA_G  = crt_on ? crt_g  : mix_g;
-assign VGA_B  = crt_on ? crt_b  : mix_b;
-assign VGA_HS = crt_on ? crt_hs : mix_hs;
-assign VGA_VS = crt_on ? crt_vs : mix_vs;
-assign VGA_SL = crt_on ? 2'b00  : mix_sl;
+assign CE_PIXEL = sd_on ? ce_pix_x2 : av_ce;
+assign VGA_R    = sd_on ? sd_rgb[23:16] : av_r;
+assign VGA_G    = sd_on ? sd_rgb[15:8]  : av_g;
+assign VGA_B    = sd_on ? sd_rgb[7:0]   : av_b;
+assign VGA_HS   = sd_on ? sd_hs : av_hs;
+assign VGA_VS   = sd_on ? sd_vs : av_vs;
+assign VGA_SL   = status[4:3];
 
-// video_freak owns VGA_DE and the aspect outputs. It is pure logic -- one
-// 12x12 multiplier and a few counters, no block RAM -- and it is what supplies
-// the integer-scaling modes arcade cores are expected to offer.
-wire vga_de_in = crt_on ? crt_de_osd : mix_de;
+wire vga_de_in = sd_on ? ~(sd_hb | sd_vb) : ~(av_hb | av_vb);
 wire [1:0] aspect = status[2:1];
 
 video_freak u_video_freak (

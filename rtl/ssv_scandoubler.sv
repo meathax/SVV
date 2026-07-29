@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Plain 2x line doubler: 15 kHz in, 31 kHz out.
+//
+// This replaces sys/arcade_video.v for this core, and the reason is block RAM.
+// arcade_video reaches the scandoubler through video_mixer, and that
+// scandoubler does its line storage inside Hq2x -- two input line buffers plus
+// an output buffer four times the pixel width, because the HQ2x filter needs
+// them. At the game's 336-pixel active width that is roughly nine M10K, and
+// gamma_corr adds about four more for its 768-entry and three 256-entry
+// tables. On a design where M10K is the binding resource and the fitter is
+// already at its ceiling, that is a lot to spend on a filter nobody asked for
+// and a gamma curve that never runs on the target display.
+//
+// This module does the one job that is actually needed -- emit every input
+// line twice so a 31 kHz monitor can lock -- in one ping-pong buffer:
+// 2 banks x 512 entries x 28 bits, about three M10K.
+//
+// The design deliberately stores the SYNC AND BLANK BITS alongside the pixel
+// and replays them, instead of regenerating them from counters. Regenerating
+// means hardcoding HTOTAL/HBSTART/HSYNC positions here and keeping them in step
+// with ssv_video_timing, and it means getting the phase right: the line
+// reference is the RISING edge of an ACTIVE-LOW hsync, so counter zero is the
+// end of the sync pulse at hcnt 400, not the start of the active region. Every
+// one of those is a chance to be quietly one pixel out. Replaying what was
+// recorded cannot be out of phase with itself, and it tracks any future change
+// to the raster for free.
+//
+// Requires ce_pix_x2 to be exactly twice ce_pix and phase-locked to it; the
+// wrapper generates both from the same fractional accumulator ratio that
+// ssv_video_timing uses, restarted on the same line reference.
+
+`timescale 1ns/1ps
+
+module ssv_scandoubler #(
+    // 2^AW must be at least the line length in pixels (454 for SSV).
+    parameter int AW = 9
+) (
+    input  logic        clk,
+    input  logic        rst,
+
+    input  logic        ce_pix,      // native pixel enable
+    input  logic        ce_pix_x2,   // exactly 2x ce_pix, same phase
+
+    input  logic [23:0] rgb_in,
+    input  logic        hs_in,       // active low, as ssv_video_timing emits
+    input  logic        vs_in,
+    input  logic        hb_in,
+    input  logic        vb_in,
+
+    output logic [23:0] rgb_out,
+    output logic        hs_out,
+    output logic        vs_out,
+    output logic        hb_out,
+    output logic        vb_out
+);
+
+localparam int WORDW = 28;   // {hs, vs, hb, vb, rgb[23:0]}
+
+// ---------------------------------------------------------------------------
+// Line reference: the rising edge of the active-low hsync, i.e. the end of the
+// sync pulse. It is the same edge crt_adjust restarts its engine on, so the two
+// modules agree about where a line begins.
+// ---------------------------------------------------------------------------
+logic hs_in_d;
+always_ff @(posedge clk) if (ce_pix) hs_in_d <= hs_in;
+wire   line_start = ce_pix && (hs_in & ~hs_in_d);
+
+// ---------------------------------------------------------------------------
+// Write side, at the native rate. One bank per line, flipped on the reference,
+// so the read side always walks a line that is already complete.
+// ---------------------------------------------------------------------------
+(* ramstyle = "no_rw_check, M10K" *) logic [WORDW-1:0] mem [0:(1 << (AW+1))-1];
+
+logic [AW-1:0] wr, hmax;
+logic          bank;
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        wr   <= '0;
+        hmax <= '1;      // until a first full line is measured
+        bank <= 1'b0;
+    end
+    else if (ce_pix) begin
+        mem[{bank, wr}] <= {hs_in, vs_in, hb_in, vb_in, rgb_in};
+        if (line_start) begin
+            hmax <= wr;  // pixels in the line just finished
+            wr   <= '0;
+            bank <= ~bank;
+        end
+        else begin
+            wr <= wr + 1'b1;
+        end
+    end
+end
+
+// ---------------------------------------------------------------------------
+// Read side, at twice the rate off the opposite bank. Because ce_pix_x2 is
+// exactly 2x, wrapping at hmax emits the stored line twice per input line --
+// which is the whole trick. The reference also resets the counter every line so
+// a measurement glitch cannot accumulate.
+// ---------------------------------------------------------------------------
+logic [AW-1:0] rd;
+
+always_ff @(posedge clk) begin
+    if (rst)
+        rd <= '0;
+    else if (line_start)
+        rd <= '0;
+    else if (ce_pix_x2)
+        rd <= (rd >= hmax) ? '0 : rd + 1'b1;
+end
+
+logic [WORDW-1:0] q;
+always_ff @(posedge clk) if (ce_pix_x2) q <= mem[{~bank, rd}];
+
+// Held between read ticks, so the DAC sees each doubled pixel for its full
+// duration rather than only on the tick.
+assign {hs_out, vs_out, hb_out, vb_out} = q[WORDW-1 -: 4];
+assign rgb_out = q[23:0];
+
+endmodule

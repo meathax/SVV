@@ -39,20 +39,17 @@ The synthesizable Dyna Gear bring-up now includes:
   only. It is not the MiSTer-DB9 fork's framework mode, so it does not give
   the pad control of the OSD and does not present the fork's "UserIO Joystick"
   / "UserIO Players" options. Not yet confirmed against real hardware.
-- The standard MiSTer arcade video chain: `arcade_video` (gamma, scandoubler,
-  HQ2x, scanline FX) and `video_freak` (integer-scaling modes). The scandoubler
-  is sized to the game's 336-pixel active width rather than the library default
-  of 768, which halves its line stores on a design where M10K is the binding
-  resource.
+- A deliberately small video chain: `rtl/ssv_scandoubler.sv` (a plain 2x line
+  doubler for 31 kHz monitors) and `video_freak` (integer-scaling modes).
+  Scanline FX come from `sys_top`, which applies them itself from `VGA_SL`.
+  `arcade_video` was tried and removed: its scandoubler carries HQ2x line
+  stores and it pulls in `gamma_corr`, together about 13 M10K, which this
+  design cannot afford. Neither HQ2x nor gamma is missed on an arcade board.
 - High score save/load via the MRA's hiscore.dat entry and a `.nvm` dump,
   through the second port of the SSV main RAM.
 - DIP switches driven from the MRA's `<switches>` block instead of hand-mapped
   OSD options, so the bytes the game reads at `$210002`/`$210004` are the ones
   the MRA states.
-- CRT Adjust — H-Size, H-Position and V-Shift for a 15 kHz analog CRT, from
-  [rmonic79/MiSTer-CRT-Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust)
-  (`rtl/crt_adjust.sv`, core-side variant, `sys/` untouched). Off is a pure
-  passthrough. Not yet confirmed on a real CRT.
 
 Sim gameplay gates (attract frame-0 CRC, soak, coin/start schedule, input
 matrix, ES5506 PCM peak) are wired through `verif/run_gameplay_sims.sh`.
