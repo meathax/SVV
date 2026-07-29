@@ -39,19 +39,20 @@
       <part name="s16-1-07.u42" crc="42bcb41b" map="21"/>
     </interleave>
   </rom>
-  <switches default="FF,7F" base="16">
+  <switches default="FF,FF" base="16">
     <!-- DSW1 -->
-    <dip bits="0,2" name="Coin A" ids="1C/1C,2C/1C,3C/1C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C" values="7,6,5,4,3,2,1,0"/>
-    <dip bits="3,5" name="Coin B" ids="1C/1C,2C/1C,3C/1C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C" values="7,6,5,4,3,2,1,0"/>
+    <dip bits="0,2" name="Coin A" ids="3C/1C,2C/1C,1C/1C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C" values="5,6,7,4,3,2,1,0"/>
+    <dip bits="3,5" name="Coin B" ids="3C/1C,2C/1C,1C/1C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C" values="5,6,7,4,3,2,1,0"/>
     <dip bits="6" name="Half Coins To Continue" ids="No,Yes" values="1,0"/>
     <dip bits="7" name="Free Play" ids="Off,On" values="1,0"/>
     <!-- DSW2 -->
     <dip bits="8" name="Flip Screen" ids="Off,On" values="1,0"/>
-    <dip bits="9" name="Demo Sounds" ids="On,Off" values="1,0"/>
-    <dip bits="10,11" name="Difficulty" ids="Normal,Easy,Hard,Hardest" values="3,2,1,0"/>
+    <dip bits="9" name="Demo Sounds" ids="Off,On" values="0,1"/>
+    <dip bits="10,11" name="Difficulty" ids="Easy,Normal,Hard,Hardest" values="2,3,1,0"/>
     <dip bits="12" name="Controls" ids="Keyboard,Joystick" values="1,0"/>
     <dip bits="13" name="Communication" ids="Off,On" values="1,0"/>
     <dip bits="14" name="Communication Mode" ids="SLAVE,MASTER" values="1,0"/>
+    <dip bits="15" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
   <buttons names="Button 1,Button 2,Test,Service,Start,Coin" default="A,B,R,L,Start,Select" count="6"/>
 </misterromdescription>

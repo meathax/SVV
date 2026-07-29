@@ -28,15 +28,15 @@
   </rom>
   <switches default="FF,83" base="16">
     <!-- DSW1 -->
-    <dip bits="0,1" name="Coinage" ids="1 Medal/1 Credit,1 Medal/10 Credits,1 Medal/5 Credits,1 Medal/20 Credits" values="3,2,1,0"/>
-    <dip bits="2" name="Demo Sounds" ids="On,Off" values="1,0"/>
-    <dip bits="3" name="Attendant Pay" ids="Yes,No" values="1,0"/>
+    <dip bits="0,1" name="Coinage" ids="1 Medal/1 Credit,1 Medal/5 Credits,1 Medal/10 Credits,1 Medal/20 Credits" values="3,1,2,0"/>
+    <dip bits="2" name="Demo Sounds" ids="Off,On" values="0,1"/>
+    <dip bits="3" name="Attendant Pay" ids="No,Yes" values="0,1"/>
     <dip bits="4" name="Medals Payout" ids="400,800" values="1,0"/>
     <dip bits="5" name="Max Credits" ids="5000,9999" values="1,0"/>
-    <dip bits="6" name="Hopper" ids="Yes,No" values="1,0"/>
+    <dip bits="6" name="Hopper" ids="No,Yes" values="0,1"/>
     <dip bits="7" name="Reel Speed" ids="Low,High" values="1,0"/>
     <!-- DSW2 -->
-    <dip bits="8,9" name="Game Rate" ids="90%,85%,95%,80%" values="3,2,1,0"/>
+    <dip bits="8,9" name="Game Rate" ids="80%,85%,90%,95%" values="0,2,3,1"/>
     <dip bits="13" name="Controls" ids="Simple,Complex" values="1,0"/>
     <dip bits="14" name="Coin Sensor" ids="Active High,Active Low" values="1,0"/>
     <dip bits="15" name="Hopper Sensor" ids="Off,On" values="1,0"/>

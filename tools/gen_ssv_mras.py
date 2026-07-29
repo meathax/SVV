@@ -21,10 +21,10 @@ import re
 import sys
 import os
 
-# Sammy-published SSV sets, in MAME order.
-SETS = ['dynagear', 'survarts', 'survartsu', 'survartsj', 'eaglshot',
-        'eaglshotj', 'hypreact', 'meosism', 'hypreac2', 'sxyreact',
-        'sxyreac2', 'cairblad']
+# Every set in the driver, discovered from the GAME() lines rather than
+# hardcoded, so a MAME update that adds an SSV title is picked up by re-running
+# this instead of by remembering to edit a list.
+SETS = None
 
 # The core's CONF_STR J1 list is fixed at six entries, so an MRA cannot add a
 # button the core does not expose. Games with more buttons than this are noted
@@ -95,6 +95,25 @@ def parse_rom_start(src, setname):
                 'kind': l.group(1), 'name': l.group(2),
                 'offset': int(l.group(3), 16), 'size': int(l.group(4), 16),
                 'crc': l.group(5).lower()})
+            continue
+        # ROM_RELOAD re-places the PRECEDING file at another offset -- a real
+        # mirror in the region image, so it has to be emitted or the assembled
+        # ROM is short. It carries no filename; it inherits the last load's.
+        rl = re.match(r'ROM_RELOAD\(\s*(0x[0-9a-fA-F]+)\s*,'
+                      r'\s*(0x[0-9a-fA-F]+)\s*\)', line)
+        if rl and current is not None and current['loads']:
+            prev = current['loads'][-1]
+            current['loads'].append({
+                'kind': prev['kind'], 'name': prev['name'],
+                'offset': int(rl.group(1), 16), 'size': int(rl.group(2), 16),
+                'crc': prev['crc'], 'reload': True})
+            continue
+        # ROM_COPY aliases another region's contents. The ES5506 banks use it to
+        # point several banks at one sample set; that is an address alias, not
+        # extra data, so it is recorded for the comment and not duplicated.
+        cp = re.match(r'ROM_COPY\(\s*"([^"]+)"', line)
+        if cp and current is not None:
+            current.setdefault('copies', []).append(cp.group(1))
     return regions
 
 
@@ -110,17 +129,24 @@ def emit_region(region, indent='    '):
                        % (indent, ld['offset'] - pos))
             pos = ld['offset']
         if ld['kind'] == 'ROM_LOAD16_BYTE':
-            hi = loads[i + 1] if i + 1 < len(loads) else None
-            if hi is None or hi['offset'] != ld['offset'] + 1:
-                raise SystemExit('unpaired ROM_LOAD16_BYTE %s' % ld['name'])
+            nxt = loads[i + 1] if i + 1 < len(loads) else None
+            paired = (nxt is not None and nxt['kind'] == 'ROM_LOAD16_BYTE'
+                      and nxt['offset'] == ld['offset'] + 1)
+            # An UNPAIRED byte load is a real MAME idiom, not a parse failure:
+            # drifto94's sample ROMs each fill one lane of a 16-bit region and
+            # leave the other as ERASE00. A single-part interleave does exactly
+            # that -- the lane this part does not supply comes out as zero.
             out.append('%s<interleave output="16">' % indent)
-            out.append('%s  <part name="%s" crc="%s" map="01"/>'
-                       % (indent, xml_escape(ld['name']), ld['crc']))
-            out.append('%s  <part name="%s" crc="%s" map="10"/>'
-                       % (indent, xml_escape(hi['name']), hi['crc']))
+            out.append('%s  <part name="%s" crc="%s" map="%s"/>'
+                       % (indent, xml_escape(ld['name']), ld['crc'],
+                          '01' if ld['offset'] % 2 == 0 else '10'))
+            if paired:
+                out.append('%s  <part name="%s" crc="%s" map="10"/>'
+                           % (indent, xml_escape(nxt['name']), nxt['crc']))
             out.append('%s</interleave>' % indent)
+            # Either way the pair of lanes spans twice one part's length.
             pos += ld['size'] * 2
-            i += 2
+            i += 2 if paired else 1
             continue
         if ld['kind'] == 'ROM_LOAD16_WORD_SWAP':
             out.append('%s<interleave output="16">' % indent)
@@ -135,13 +161,25 @@ def emit_region(region, indent='    '):
     return out, pos
 
 
-def parse_dips(src, portsname):
-    """Collect DSW1/DSW2 switches, expanding the SSV_COINAGE_* macros."""
+def parse_dips(src, portsname, _seen=None):
+    """Collect DSW1/DSW2 switches, expanding the SSV_COINAGE_* macros.
+
+    PORT_INCLUDE is followed: ssv_quiz defines Flip Screen, Service, Demo
+    Sounds, Coin A and Difficulty that its users (ryorioh, koikois2) inherit
+    and never restate, so a parser that ignores includes emits an empty
+    <switches> for them. A later PORT_MODIFY of the same port and mask wins.
+    """
+    _seen = _seen or set()
+    if portsname in _seen:                       # guard against a cycle
+        return []
+    _seen.add(portsname)
     m = re.search(r'INPUT_PORTS_START\(\s*%s\s*\)(.*?)INPUT_PORTS_END'
                   % portsname, src, re.S)
     if not m:
         return []
     body, dips, port, cur = m.group(1), [], None, None
+    for inc in re.finditer(r'PORT_INCLUDE\(\s*(\w+)\s*\)', body):
+        dips.extend(parse_dips(src, inc.group(1), _seen))
     for line in body.splitlines():
         line = line.split('//')[0].rstrip()
         if not line.strip():
@@ -178,37 +216,76 @@ def parse_dips(src, portsname):
                    'name': deranged(d.group(3)), 'settings': []}
             dips.append(cur)
             continue
+        sv = re.search(r'PORT_SERVICE_DIPLOC\(\s*(0x[0-9a-fA-F]+)\s*,'
+                       r'\s*IP_ACTIVE_(LOW|HIGH)', line)
+        if sv:
+            mask = int(sv.group(1), 16)
+            on = 0 if sv.group(2) == 'LOW' else mask
+            dips.append({'port': port, 'mask': mask, 'default': mask - on,
+                         'name': 'Service Mode',
+                         'settings': [(mask - on, 'Off'), (on, 'On')]})
+            cur = None
+            continue
         s = re.search(r'PORT_DIPSETTING\(\s*(0x[0-9a-fA-F]+)\s*,\s*(.*?)\s*\)\s*$',
                       line)
         if s and cur is not None:
             cur['settings'].append((int(s.group(1), 16), deranged(s.group(2))))
-    return [d for d in dips if d['settings'] and d['mask']]
+
+    # A PORT_MODIFY overriding an inherited switch appears later with the same
+    # port and mask; keep the last definition of each.
+    merged = {}
+    for d in dips:
+        if d['settings'] and d['mask']:
+            merged[(d['port'], d['mask'])] = d
+    return list(merged.values())
 
 
 def dips_to_mra(dips):
-    """MRA <switches>: bit 0-7 are DSW1, 8-15 DSW2, defaults as MAME sets."""
+    """MRA <switches>: bit 0-7 are DSW1, 8-15 DSW2, defaults as MAME sets.
+
+    Returns (default, lines, skipped) -- skipped names the switches that cannot
+    be expressed, so the caller can say so rather than quietly dropping them.
+    """
     if not dips:
-        return None, None
+        return None, None, []
     default = [0, 0]
-    lines = []
+    lines, skipped = [], []
     for port, base in (('DSW1', 0), ('DSW2', 8)):
         group = [d for d in dips if d['port'] == port]
         if not group:
             continue
         lines.append('    <!-- %s -->' % port)
-        for d in group:
+        for d in sorted(group, key=lambda x: x['mask']):
             mask, idx = d['mask'], 0 if port == 'DSW1' else 1
             lo = (mask & -mask).bit_length() - 1
             hi = mask.bit_length() - 1
+            # The default still applies even if the control cannot be shown.
             default[idx] |= d['default'] & mask
+            # MRA bits="a,b" is the contiguous range a..b. ultrax's Region is
+            # mask 0x14 -- DSW2 switches 3 and 5, with switch 4 (Free Play) in
+            # between -- so it has no single-control representation and would
+            # otherwise silently swallow the neighbouring switch.
+            if mask != (((1 << (hi - lo + 1)) - 1) << lo):
+                skipped.append('%s (%s mask 0x%02X, non-contiguous)'
+                               % (d['name'], port, mask))
+                continue
             bits = str(base + lo) if lo == hi else '%d,%d' % (base + lo,
                                                               base + hi)
-            pairs = sorted(d['settings'], key=lambda kv: -kv[0])
-            ids = ','.join(xml_escape(lbl) for _, lbl in pairs)
+            # MAME's declaration order, not sorted by raw value: it lists
+            # settings the way a player expects to scroll them (Easy, Normal,
+            # Hard, Hardest / Lives 1, 2, 3, 4), and the raw values are
+            # arbitrary bit patterns whose numeric order means nothing.
+            pairs = d['settings']
+            # Commas separate entries in ids=, so a label containing one
+            # ("70000, every 90000" in pastelis) would silently split into two
+            # and desynchronise ids from values. MRA has no escape for it.
+            ids = ','.join(xml_escape(lbl).replace(', ', ' / ').replace(',', ' /')
+                           for _, lbl in pairs)
             vals = ','.join(str(v >> lo) for v, _ in pairs)
             lines.append('    <dip bits="%s" name="%s" ids="%s" values="%s"/>'
                          % (bits, xml_escape(d['name']), ids, vals))
-    return '%02X,%02X' % (default[0] & 0xff, default[1] & 0xff), lines
+    return ('%02X,%02X' % (default[0] & 0xff, default[1] & 0xff),
+            lines, skipped)
 
 
 def main():
@@ -225,8 +302,10 @@ def main():
                              'rot': m.group(6), 'maker': m.group(7),
                              'desc': m.group(8)}
 
+    order = [m.group(1) for m in
+             re.finditer(r'^GAME\(\s*\d+\??\s*,\s*(\w+)', src, re.M)]
     written = 0
-    for setname in SETS:
+    for setname in order:
         g = games.get(setname)
         if not g:
             print('SKIP %s: no GAME() line' % setname)
@@ -240,7 +319,7 @@ def main():
         gfx = [r for r in regions if r['name'] in ('sprites', 'gfxdata')]
         samp = [r for r in regions if r['name'].startswith('ensoniq')]
 
-        body, offsets = [], []
+        body, offsets, aliases = [], [], []
         cursor = 0
         for label, group in (('program', prog), ('graphics', gfx),
                              ('samples', samp)):
@@ -249,6 +328,8 @@ def main():
             start = cursor
             body.append('    <!-- %s -->' % label)
             for region in group:
+                for srcname in region.get('copies', []):
+                    aliases.append('%s aliases %s' % (region['name'], srcname))
                 if not region['loads']:
                     continue
                 lines, size = emit_region(region)
@@ -256,7 +337,8 @@ def main():
                 cursor += size
             offsets.append('%s 0x%07X-0x%07X' % (label, start, cursor - 1))
 
-        default, dip_lines = dips_to_mra(parse_dips(src, g['ports']))
+        default, dip_lines, dip_skipped = dips_to_mra(
+            parse_dips(src, g['ports']))
         names, defaults = BUTTONS.get(setname, BUTTONS_DEFAULT)
 
         supported = setname == 'dynagear'
@@ -270,6 +352,12 @@ def main():
         out = ['<misterromdescription>',
                '  <!-- Generated by tools/gen_ssv_mras.py from MAME ssv.cpp.',
                '       Stream offsets: %s' % '; '.join(offsets),
+               ('       ES5506 bank aliases (ROM_COPY in MAME, address aliases '
+                'rather than data, so not duplicated here): %s'
+                % '; '.join(sorted(set(aliases)))) if aliases else None,
+               ('       Switches MAME defines that an MRA cannot express, '
+                'left out and still at their default: %s'
+                % '; '.join(dip_skipped)) if dip_skipped else None,
                '       %s -->' % about,
                '  <name>%s</name>' % xml_escape(g['desc']),
                '  <setname>%s</setname>' % setname,
@@ -293,10 +381,15 @@ def main():
         out.append('  <buttons names="%s" default="%s" count="%d"/>'
                    % (names, defaults, len(names.split(','))))
         out.append('</misterromdescription>')
+        out = [line for line in out if line is not None]
 
         # Windows rejects ? : * " < > | \ / in filenames, and MAME titles do
-        # contain some of them ("Eagle Shot Golf (Japan, bootleg?)").
-        safe = re.sub(r'[\\/:*?"<>|]', '', g['desc']).strip()
+        # contain some of them: "Eagle Shot Golf (Japan, bootleg?)" and
+        # "Ultra X Weapons / Ultra Keibitai". Slashes separate alternate titles,
+        # so they become " - " rather than vanishing and welding words together.
+        safe = g['desc'].replace('/', ' - ')
+        safe = re.sub(r'[\\:*?"<>|]', '', safe)
+        safe = re.sub(r'\s+', ' ', safe).strip()
         path = os.path.join(out_dir, '%s.mra' % safe)
         with open(path, 'w', encoding='utf-8', newline='\n') as fh:
             fh.write('\n'.join(out) + '\n')
