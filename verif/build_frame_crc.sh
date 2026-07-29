@@ -15,8 +15,15 @@ cd "$(dirname "$0")/.."
 OUT="${1:-${TMPDIR:-/tmp}/ssv-frame-crc}"
 mkdir -p "$OUT"
 
-JOBS="$(nproc)"
+# Bounded, NOT $(nproc). nproc is 32 on this host, so an unbounded build forks
+# 32 compilers at up to ~1 GB each; two concurrent builds then exhaust the
+# 64 GB. 6 matches the Quartus NUM_PARALLEL_PROCESSORS cap used elsewhere.
+JOBS="${BUILD_JOBS:-6}"
+# ccache keeps rebuilds cheap, but it is not installed everywhere this script
+# runs (it is absent under Git Bash on this host). Fall back to no object cache
+# rather than failing the build with "ccache: No such file or directory".
 export OBJCACHE="${OBJCACHE:-ccache}"
+command -v "$OBJCACHE" >/dev/null 2>&1 || export OBJCACHE=""
 
 VFLAGS=(--binary --timing --assert --threads 1
         --verilate-jobs "$JOBS" --build-jobs "$JOBS"
@@ -37,10 +44,20 @@ CORE=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   rtl/ssv_core.sv
+  # tb_ssv_frame_crc instantiates ssv_sdram_harness unconditionally, and that
+  # harness instantiates the real `sdram` controller. Without this file the
+  # build dies with MODMISSING, i.e. +REAL_SDRAM could not be built at all.
+  rtl/mem/sdram.sv
   verif/ssv_tb_ce_cpu.sv
 )
 
-/usr/bin/verilator "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
+# Prefer WSL's /usr/bin/verilator (see header: it dodges the verilator-safe.exe
+# launcher stall). Under Git Bash that path does not exist, so fall back to
+# whatever verilator is on PATH there.
+VERILATOR=/usr/bin/verilator
+[ -x "$VERILATOR" ] || VERILATOR="$(command -v verilator)"
+
+"$VERILATOR" "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   --Mdir "$OUT" -o tb_ssv_frame_crc \
   -Iverif "${CORE[@]}" verif/tb_ssv_frame_crc.sv \
   >"$OUT/build.log" 2>&1 || { tail -40 "$OUT/build.log"; exit 1; }
