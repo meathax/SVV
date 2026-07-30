@@ -33,6 +33,21 @@ module ssv_core (
     output logic [1:0] sdr_wr_be,
     input              sdr_wr_ack,
 
+    // ST010 (uPD96050) program fetch. p5 is the controller's second 64-bit
+    // 4-word burst port and is LAST in the round-robin chain, so a DSP fetch
+    // can never delay the graphics fetcher or the sample engine. Held idle --
+    // req constant 0 -- unless cfg.has_st010, which is why the six non-DSP
+    // titles see the same SDRAM traffic they always did.
+    output             sdr_p5_req,
+    output      [ssv_pkg::SDR_AW:3] sdr_p5_addr,
+    input       [63:0] sdr_p5_dout,
+    input              sdr_p5_ack,
+
+    // ST010 "dspdata" load port, driven by ssv_rom_loader.
+    input              st010_drom_we,
+    input       [10:0] st010_drom_wa,
+    input       [15:0] st010_drom_wd,
+
     // ES5506 sample fetches (16-bit SDRAM words)
     output logic       sdr_p4_req,
     output logic [ssv_pkg::SDR_AW:1] sdr_p4_addr,
@@ -164,6 +179,27 @@ wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
 wire [23:0] rom_window_base = -(24'(cfg.prog_mb) << 20);
 wire sel_rom     = (a >= rom_window_base);
 wire sel_extmem  = sel_xram | sel_cpuram;
+
+// ---------------------------------------------------------------------------
+// ST010 daughterboard, $480000 and $482000-$482fff.
+//
+// drifto94_map (ssv.cpp:410-411) and twineag2_map (:769-770):
+//     map(0x480000, 0x480000).rw(m_dsp, upd96050_device::data_r, data_w);
+//     map(0x482000, 0x482fff).rw(dsp_r, dsp_w).umask16(0x00ff);
+// The window translation (offset = A[11:1], word = A[11:2], high byte = A[1])
+// lives in upd96050_st010.sv, which is where it is derived; this is only the
+// window decode and the wait-state handling.
+//
+// Everything below is gated on cfg.has_st010, so for the six titles without the
+// daughterboard sel_st010 is constant 0, the read mux is untouched, the DSP is
+// held in reset and sdr_p5_req never leaves 0.
+//
+// No conflict with sel_irqack ($240000-$240071): that is a CPU address, whereas
+// upd96050_st010 compares cpu_addr[23:1] == 23'h240000, which IS $480000.
+// ---------------------------------------------------------------------------
+wire sel_st010_port = cfg.has_st010 && (a == 24'h480000);
+wire sel_st010_win  = cfg.has_st010 && (a[23:12] == 12'h482);
+wire sel_st010      = sel_st010_port | sel_st010_win;
 
 // Registers, not memory, and it cannot be otherwise: every one of these 64
 // words is read combinationally in parallel (sprite_offsets, tilemap_scrolls
@@ -730,6 +766,72 @@ always_ff @(posedge clk_sys) begin
         end
     end
 end
+// ---------------------------------------------------------------------------
+// ST010: instruction-issue enable, DSP + data ROM, and the SDRAM program fetch.
+//
+// MAME instantiates UPD96050 at 10 MHz with its own `// TODO: correct?`, so the
+// clock is not authoritative. The core runs a fixed 5-state sequence per
+// instruction and starts one only when `ce` is high, so the instruction rate IS
+// the ce rate: 10 MHz / 4 = 2.5 MIPS. Off clk_sys = 48.324 MHz a 16-bit
+// fractional accumulator with increment 3391 gives
+//     48.324e6 * 3391 / 65536 = 2.5005 MHz   (+0.02%)
+// which is well inside the uncertainty of the 10 MHz figure itself.
+// ---------------------------------------------------------------------------
+logic [15:0] st010_ce_acc;
+logic        st010_ce;
+wire  [16:0] st010_acc_next = {1'b0, st010_ce_acc} + 17'd3391;
+
+always_ff @(posedge clk_sys) begin
+    if (rst || !cfg.has_st010) begin
+        st010_ce_acc <= 16'd0;
+        st010_ce     <= 1'b0;
+    end
+    else begin
+        st010_ce_acc <= st010_acc_next[15:0];
+        st010_ce     <= st010_acc_next[16];
+    end
+end
+
+wire [13:0] st010_prg_addr;
+wire        st010_prg_req;
+wire [23:0] st010_prg_data;
+wire        st010_prg_valid;
+wire [15:0] st010_rdata;
+logic [1:0] st010_rd_cnt;
+
+upd96050_st010 st010 (
+    .clk(clk_sys),
+    .rst(rst || !cfg.has_st010),
+    .ce_dsp(st010_ce),
+
+    .cpu_addr(m_addr), .cpu_be(m_be),
+    // The wrapper edge-detects the data-port strobes internally, so a level
+    // held for the whole bus cycle is safe here (upd96050_st010.sv:151-167).
+    .cpu_we(m_req &&  m_we && sel_st010 && !ack_r),
+    .cpu_re(m_req && !m_we && sel_st010 && !ack_r),
+    .cpu_wdata(m_wdata), .cpu_rdata(st010_rdata), .cpu_sel(),
+
+    .prg_addr(st010_prg_addr), .prg_req(st010_prg_req),
+    .prg_data(st010_prg_data), .prg_valid(st010_prg_valid),
+
+    .drom_we(st010_drom_we), .drom_wa(st010_drom_wa), .drom_wd(st010_drom_wd),
+
+    // MAME never wires the uPD96050's INT on SSV, and the DSP's P0/P1 outputs
+    // go nowhere on the daughterboard.
+    .int_req(1'b0), .p0(), .p1(),
+
+    .dbg_retire(), .dbg_pc(), .dbg_a(), .dbg_b(), .dbg_dp(), .dbg_dr(),
+    .dbg_sr(), .dbg_k(), .dbg_l(), .dbg_m(), .dbg_n()
+);
+
+ssv_st010_prg_fetch st010_fetch (
+    .clk(clk_sys), .rst(rst), .enable(cfg.has_st010),
+    .prg_addr(st010_prg_addr), .prg_req(st010_prg_req),
+    .prg_data(st010_prg_data), .prg_valid(st010_prg_valid),
+    .sdr_req(sdr_p5_req), .sdr_addr(sdr_p5_addr),
+    .sdr_dout(sdr_p5_dout), .sdr_ack(sdr_p5_ack)
+);
+
 wire [7:0] sound_rdata;
 // ES5506 MLAB banks need 2 wait cycles: steal addr, then latch q → read_latch.
 logic [1:0] sound_rd_cnt;
@@ -883,12 +985,14 @@ always_ff @(posedge clk_sys) begin
         ack_r        <= 1'b0;
         read_wait    <= 1'b0;
         sound_rd_cnt <= 2'd0;
+        st010_rd_cnt <= 2'd0;
         read_mux     <= 16'hffff;
     end
     else if (!m_req) begin
         ack_r        <= 1'b0;
         read_wait    <= 1'b0;
         sound_rd_cnt <= 2'd0;
+        st010_rd_cnt <= 2'd0;
     end
     else if (!ack_r) begin
         // ROM reads complete via the icache (rom_ready). ROM writes are nops
@@ -908,6 +1012,19 @@ always_ff @(posedge clk_sys) begin
         end
         else if (m_we) begin
             ack_r <= 1'b1;
+        end
+        // The $482000 data-RAM window is a block-RAM read: host_ram_dout is the
+        // byte for the address presented one clk earlier (upd96050.sv:113).
+        // Two wait cycles, the same shape the ES5506 MLAB banks use, cover both
+        // that and the combinational $480000 byte.
+        else if (sel_st010) begin
+            if (st010_rd_cnt < 2'd2)
+                st010_rd_cnt <= st010_rd_cnt + 2'd1;
+            else begin
+                st010_rd_cnt <= 2'd0;
+                ack_r        <= 1'b1;
+                read_mux     <= st010_rdata;
+            end
         end
         else if (sel_sound) begin
             if (sound_rd_cnt < 2'd2)

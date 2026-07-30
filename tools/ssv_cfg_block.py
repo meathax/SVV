@@ -16,6 +16,12 @@ import re
 # ---------------------------------------------------------------------------
 # PARSER STATUS -- all four verified against a direct reading of ssv.cpp.
 #
+# The has_st010 flag is NOT in this table because it is not parsed from the
+# machine config at all: it is the presence of a ROM_REGION named "st010", which
+# holds for drifto94, stmblade, stmbladej and twineag2. Keying on the region
+# rather than on UPD96050(config, ...) keeps the flag and the MRA's st010.bin
+# part derived from the same fact, so they cannot disagree.
+#
 #   set        addrmap          wdog  flags
 #   dynagear   survarts_map      1    ident=0 irq1=0
 #   survarts   survarts_map      1    ident=0 irq1=0
@@ -160,6 +166,20 @@ def has_add_buttons(src, map_name):
     return "0x500008" in body
 
 
+def has_st010(regions):
+    """True when the set declares a ROM_REGION named "st010".
+
+    Deliberately keyed on the ROM REGION and not on the machine config or the
+    state class. UPD96050(config, ...) appears in drifto94, stmblade and
+    twineag2, all of which live in the derived drifto94_state -- and a parser
+    that went looking for `ssv_state::` is exactly how these three previously
+    ended up reporting the wrong watchdog. The region is class-agnostic and is
+    also the thing the MRA has to emit, so keying on it keeps the flag and the
+    ROM part from ever disagreeing.
+    """
+    return any(r['name'] == 'st010' for r in regions)
+
+
 def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_loaded,
                     ens_valid, ens_map, flags, wdog):
     """Assemble the 16-byte block. Raises if a field will not fit."""
@@ -184,7 +204,8 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_loaded,
     b[8] = ens_valid & 0x0F
     b[9] = ((1 if flags.get("tile_code_identity") else 0) |
             (2 if flags.get("irq_level1_line0") else 0) |
-            (4 if flags.get("has_add_buttons") else 0))
+            (4 if flags.get("has_add_buttons") else 0) |
+            (8 if flags.get("has_st010") else 0))
     b[10] = wdog & 0x03
     b[11] = game_id & 0x0F
     b[15] = (-sum(b[:15])) & 0xFF

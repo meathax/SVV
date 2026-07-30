@@ -32,6 +32,12 @@ module ssv_rom_loader (
     // Per-game configuration, parsed from MRA <rom index="1">.
     output ssv_pkg::ssv_cfg_t cfg,
     output logic       cfg_valid,
+    // ST010 data ROM ("dspdata"): 2048 x 16 on chip, so it is written straight
+    // into the DSP wrapper's block RAM rather than read back from SDRAM. The
+    // program half ("dspprg") is 48 M10K and goes to SDRAM instead.
+    output logic       st010_drom_we,
+    output logic [10:0] st010_drom_wa,
+    output logic [15:0] st010_drom_wd,
     output logic       rom_loaded,
     // Highest index-0 stream address accepted during the active download.
     // Used by the diagnostic overlay; does not affect load behavior.
@@ -51,6 +57,7 @@ logic       index0_seen;
 //   1  version (1)           9  flags0: b0 tile_code_identity
 //   2  prog_mb                        b1 irq_level1_line0
 //   3  gfx_mb                         b2 has_add_buttons
+//                                     b3 has_st010
 //   4  gfx_code_k           10  wdog_mode
 //   5  gfx_code_mul3        11  game_id
 //   6  gfx_quarters         12..14 reserved (0)
@@ -83,6 +90,7 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
         tile_code_identity: cfg_raw[9][0],
         irq_level1_line0:   cfg_raw[9][1],
         has_add_buttons:    cfg_raw[9][2],
+        has_st010:          cfg_raw[9][3],
         wdog_mode:          cfg_raw[10][1:0]
     };
 endfunction
@@ -125,6 +133,11 @@ function automatic logic [SDR_AW:0] stream_byte_address(
                 within_quarter[1:0]     // byte within the 32-bit row
             );
         end
+        else if (stream_addr >= STREAM_ST010) begin
+            // st010.bin, placed contiguously in the free bank 2. MUST be tested
+            // before the sample branch below, which is an open-ended `>=`.
+            stream_byte_address = st010_stream_dest(stream_addr);
+        end
         else if (stream_addr >= STREAM_SAMPLES) begin
             // The sample region no longer sits at its stream offset: the
             // graphics records displaced it above XRAM and CPU RAM.
@@ -138,6 +151,14 @@ function automatic logic [SDR_AW:0] stream_byte_address(
 endfunction
 
 wire [SDR_AW:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
+
+// The "dspdata" half of st010.bin also feeds the DSP's on-chip 2048 x 16 data
+// ROM. MAME's region is ROM_REGION16_BE, so the word at index i is
+// { rom[2i], rom[2i+1] } -- the OPPOSITE order from the little-endian pairing
+// the SDRAM path uses, which is why wd is {byte_lo, ioctl_dout} and not
+// {ioctl_dout, byte_lo}.
+wire st010_data_byte = (ioctl_addr >= STREAM_ST010 + ST010_DATA_OFFSET) &&
+                       (ioctl_addr <  STREAM_ST010 + STREAM_ST010_SIZE);
 
 assign ioctl_wait = busy | ~mem_ready;
 
@@ -155,8 +176,12 @@ always_ff @(posedge clk) begin
         sdr_wr_be   <= 2'b00;
         rom_loaded  <= 1'b0;
         download_max_addr <= 27'd0;
+        st010_drom_we <= 1'b0;
+        st010_drom_wa <= '0;
+        st010_drom_wd <= '0;
     end
     else begin
+        st010_drom_we <= 1'b0;
         if (sdr_wr_ack) begin
             sdr_wr_req <= 1'b0;
             busy       <= 1'b0;
@@ -192,6 +217,13 @@ always_ff @(posedge clk) begin
                 sdr_wr_din  <= {ioctl_dout, byte_lo};
                 sdr_wr_be   <= 2'b11;
                 busy        <= 1'b1;
+                // Second destination for the same pair of bytes. Big-endian, so
+                // byte_lo (the EVEN stream byte) is the HIGH half of the word.
+                if (st010_data_byte) begin
+                    st010_drom_we <= 1'b1;
+                    st010_drom_wa <= st010_drom_word(ioctl_addr);
+                    st010_drom_wd <= {byte_lo, ioctl_dout};
+                end
             end
         end
 

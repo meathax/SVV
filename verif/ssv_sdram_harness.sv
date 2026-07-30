@@ -67,7 +67,15 @@ module ssv_sdram_harness #(
     input  logic        p4_req,
     input  logic [AW:1] p4_addr,
     output logic [15:0] p4_dout,
-    output logic        p4_ack
+    output logic        p4_ack,
+
+    // p5: ST010 (uPD96050) program fetch (64-bit, 4-word burst, 8-byte
+    // aligned). Idle for every title without the daughterboard, so a bench that
+    // leaves it unconnected keeps its previous behaviour exactly.
+    input  logic        p5_req,
+    input  logic [AW:3] p5_addr,
+    output logic [63:0] p5_dout,
+    output logic        p5_ack
 );
 
 wire [15:0] SDRAM_DQ;
@@ -111,7 +119,8 @@ sdram #(
     .p4_req(p4_req), .p4_addr(p4_addr),
     .p4_dout(p4_dout), .p4_ack(p4_ack),
 
-    .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
+    .p5_req(p5_req), .p5_addr(p5_addr),
+    .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
 ssv_sdram_chip #(

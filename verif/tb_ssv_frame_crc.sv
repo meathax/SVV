@@ -36,6 +36,12 @@ logic [15:0] sdr_p4_dout;
 logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
+// p5: ST010 program fetch. Dyna Gear has no ST010, so cfg.has_st010 is 0 and
+// this port is expected to stay silent for the whole run -- which is asserted
+// below rather than assumed.
+logic sdr_p5_req, sdr_p5_ack;
+logic [SDR_AW:3] sdr_p5_addr;
+logic [63:0] sdr_p5_dout;
 
 // ---------------------------------------------------------------------------
 // Two SDRAM models, selected at run time by +REAL_SDRAM.
@@ -82,8 +88,17 @@ ssv_sdram_harness #(
     .p2_req(sdr_p2_req), .p2_addr(sdr_p2_addr),
     .p2_dout(real_p2_dout), .p2_ack(real_p2_ack),
     .p4_req(sdr_p4_req), .p4_addr(sdr_p4_addr),
-    .p4_dout(real_p4_dout), .p4_ack(real_p4_ack)
+    .p4_dout(real_p4_dout), .p4_ack(real_p4_ack),
+    .p5_req(sdr_p5_req), .p5_addr(sdr_p5_addr),
+    .p5_dout(sdr_p5_dout), .p5_ack(sdr_p5_ack)
 );
+
+// Refutation condition for the "Dyna Gear is untouched" claim: if the ST010
+// integration ever leaks a fetch on a title without the daughterboard, this
+// fires instead of silently perturbing SDRAM arbitration.
+always @(posedge clk_sys)
+    if (!rst && sdr_p5_req)
+        $fatal(1, "ST010 program fetch requested with cfg.has_st010 = 0");
 
 assign sdr_p0_ack  = use_real_sdram ? real_p0_ack  : beh_p0_ack;
 assign sdr_p2_ack  = use_real_sdram ? real_p2_ack  : beh_p2_ack;
@@ -187,6 +202,9 @@ ssv_core dut (
     .sdr_wr_ack(sdr_wr_ack),
     .sdr_p4_req(sdr_p4_req), .sdr_p4_addr(sdr_p4_addr),
     .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack),
+    .sdr_p5_req(sdr_p5_req), .sdr_p5_addr(sdr_p5_addr),
+    .sdr_p5_dout(sdr_p5_dout), .sdr_p5_ack(sdr_p5_ack),
+    .st010_drom_we(1'b0), .st010_drom_wa(11'd0), .st010_drom_wd(16'd0),
     .in_dsw1(in_dsw1), .in_dsw2(in_dsw2),
     .in_p1(in_p1), .in_p2(in_p2),
     .in_system(in_system), .in_extra(in_extra),

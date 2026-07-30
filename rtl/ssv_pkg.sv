@@ -76,6 +76,24 @@ package ssv_pkg;
     localparam logic [SDR_AW:0] SDR_CPU_RAM_BASE = 27'h0420000; // bank 0
     localparam logic [SDR_AW:0] SDR_SAMPLES_BASE = 27'h6000000; // bank 3
 
+    // ST010 (NEC uPD96050) program ROM, for the three drifto94_state titles.
+    //
+    // Bank 2 was entirely free, so this costs nothing in row conflicts: the
+    // DSP's fetch port never shares a bank with the V60, the graphics fetcher
+    // or the sample engine, and 68 KB is 17 of the bank's 8192 rows.
+    //
+    // The whole 69,632-byte st010.bin image is placed here contiguously:
+    //   + 0x00000 .. 0x0ffff   "dspprg", 16384 x 32-bit big-endian, 24 used
+    //   + 0x10000 .. 0x10fff   "dspdata", 2048 x 16-bit big-endian
+    // Only the program half is ever READ from SDRAM -- the data half is 4 M10K
+    // on chip and is written there directly by the loader -- but placing both
+    // keeps the loader's stream mapping a single identity offset instead of a
+    // special case, and the 4 KB costs nothing.
+    //
+    // The base MUST be 8-byte aligned: program fetch uses the controller's
+    // 64-bit p5 port, whose address is [SDR_AW:3].
+    localparam logic [SDR_AW:0] SDR_ST010_BASE = 27'h4000000; // bank 2
+
     // Sizes of the regions inside the MRA index-0 STREAM. These are the
     // shipped game's actual byte counts and are NOT the SDRAM slot sizes
     // below; conflating the two is why the map previously only described
@@ -86,7 +104,16 @@ package ssv_pkg;
     localparam logic [26:0] STREAM_MAINCPU   = 27'h0000000;
     localparam logic [26:0] STREAM_SPRITES   = 27'h0100000;
     localparam logic [26:0] STREAM_SAMPLES   = 27'h0D00000;
-    localparam logic [26:0] STREAM_END       = 27'h1100000;
+    // st010.bin, appended after the samples. Present only in the MRAs for the
+    // three drifto94_state titles; a title without it simply never sends bytes
+    // in this range, which is why extending STREAM_END is not observable for
+    // Dyna Gear.
+    localparam logic [26:0] STREAM_ST010      = 27'h1100000;
+    localparam logic [26:0] STREAM_ST010_SIZE = 27'h0011000; // 69,632 bytes
+    localparam logic [26:0] STREAM_END       = 27'h1111000;
+
+    // Byte offset inside st010.bin where "dspdata" begins (ssv.cpp ROM_COPY).
+    localparam logic [26:0] ST010_DATA_OFFSET = 27'h0010000;
 
     // Region sizes, so the assertions below are checkable rather than implied.
     localparam logic [SDR_AW:0] SDR_MAINCPU_SIZE = 27'h0400000; //  4 MB slot
@@ -94,6 +121,7 @@ package ssv_pkg;
     localparam logic [SDR_AW:0] SDR_XRAM_SIZE    = 27'h0020000; // 128 KB
     localparam logic [SDR_AW:0] SDR_CPU_RAM_SIZE = 27'h0040000; // 256 KB
     localparam logic [SDR_AW:0] SDR_SAMPLES_SIZE = 27'h0800000; //  8 MB slot
+    localparam logic [SDR_AW:0] SDR_ST010_SIZE   = 27'h0011000; // 68 KB exact
 
     // Raw graphics bytes in the MRA stream: 3 populated quarters x 4 MB.
     // The MRA itself is unchanged; only where the loader puts the bytes is.
@@ -144,6 +172,10 @@ package ssv_pkg;
         logic       tile_code_identity; // init_ssv_tilescram vs init_ssv
         logic       irq_level1_line0;   // init_ssv_irq1 (twineag2, ultrax)
         logic       has_add_buttons;    // decodes $500008 (survarts)
+        // ST010 (uPD96050) daughterboard present: drifto94, stmblade, twineag2.
+        // Carried in the spare bit 3 of the config block's flags0 byte, beside
+        // tile_code_identity / irq_level1_line0 / has_add_buttons.
+        logic       has_st010;
         logic [1:0] wdog_mode;          // 0 none, 1 read-kick, 2 write-kick
     } ssv_cfg_t;
 
@@ -162,6 +194,7 @@ package ssv_pkg;
             tile_code_identity: 1'b0,
             irq_level1_line0:   1'b0,
             has_add_buttons:    1'b0,
+            has_st010:          1'b0,
             wdog_mode:          2'd1     // read-kick at $210000
         };
     endfunction
@@ -209,6 +242,40 @@ package ssv_pkg;
         gfx_plane_addr = gfx_record_addr(code, row)
                        + {23'd0, quarter, 2'd0}
                        + {25'd0, byte_in_row};
+    endfunction
+
+    // -----------------------------------------------------------------------
+    // ST010 addressing. As with gfx_record_addr above, these are THE authority:
+    // the ROM loader, the program-fetch cache and tb_ssv_rom_loader all call
+    // them, so a divergence is impossible rather than merely unlikely.
+    // -----------------------------------------------------------------------
+
+    // Where an st010.bin stream byte lands in SDRAM. Identity offset inside the
+    // region, so the image is contiguous and the "dspprg"/"dspdata" split is a
+    // property of the READERS, not of the placement.
+    function automatic logic [SDR_AW:0] st010_stream_dest(
+        input logic [26:0] stream_addr
+    );
+        st010_stream_dest = SDR_ST010_BASE +
+                            (stream_addr[SDR_AW:0] - STREAM_ST010[SDR_AW:0]);
+    endfunction
+
+    // Byte address of instruction `pc`. MAME's dspprg is a 32-bit big-endian
+    // region and the fetch is read_dword(pc) >> 8, so the instruction occupies
+    // bytes 4*pc + 0..2 and byte 4*pc + 3 is never used.
+    function automatic logic [SDR_AW:0] st010_prg_byte_addr(
+        input logic [13:0] pc
+    );
+        st010_prg_byte_addr = SDR_ST010_BASE + {11'd0, pc, 2'd0};
+    endfunction
+
+    // 2048-word on-chip data ROM index for an st010.bin stream byte in the
+    // "dspdata" half. Two BYTES per word, big-endian.
+    function automatic logic [10:0] st010_drom_word(
+        input logic [26:0] stream_addr
+    );
+        st010_drom_word =
+            (stream_addr[26:0] - (STREAM_ST010 + ST010_DATA_OFFSET)) >> 1;
     endfunction
 
     // -----------------------------------------------------------------------
@@ -268,7 +335,7 @@ package ssv_pkg;
         if (STREAM_SPRITES != STREAM_MAINCPU + STREAM_MAINCPU_SIZE)
                                                                     return 7;
         if (STREAM_SAMPLES != STREAM_SPRITES + STREAM_GFX_SIZE)     return 8;
-        if (STREAM_END     != STREAM_SAMPLES + STREAM_SAMPLES_SIZE)
+        if (STREAM_ST010   != STREAM_SAMPLES + STREAM_SAMPLES_SIZE)
                                                                     return 9;
 
         // --- The repack itself ---
@@ -284,6 +351,29 @@ package ssv_pkg;
         // p2 bursts are 16-byte aligned (sdram.sv p2_addr is [AW:4]), and the
         // record address is BASE + code<<7 + row<<4, so BASE must be too.
         if (SDR_GFX_BASE[3:0] != 4'd0)                              return 11;
+
+        // --- ST010 ---
+        // Appended to the checks above rather than folded into rules 1-4, so
+        // the existing rule numbers keep meaning what the git history says.
+        if (overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_MAINCPU_BASE, SDR_MAINCPU_SIZE) ||
+            overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_GFX_BASE,     SDR_GFX_SIZE)     ||
+            overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_XRAM_BASE,    SDR_XRAM_SIZE)    ||
+            overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_CPU_RAM_BASE, SDR_CPU_RAM_SIZE) ||
+            overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_SAMPLES_BASE, SDR_SAMPLES_SIZE))           return 12;
+        if ({1'b0, SDR_ST010_BASE} + {1'b0, SDR_ST010_SIZE}
+                                                > SDR_TOTAL_BYTES)  return 13;
+        // p5 bursts are 8-byte aligned (sdram.sv p5_addr is [AW:3]).
+        if (SDR_ST010_BASE[2:0] != 3'd0)                            return 14;
+        // The whole image must fit the region, and "dspdata" must start where
+        // MAME's ROM_COPY says it does.
+        if (SDR_ST010_SIZE != STREAM_ST010_SIZE)                    return 15;
+        if (ST010_DATA_OFFSET + 27'h1000 != STREAM_ST010_SIZE)      return 16;
+        if (STREAM_END != STREAM_ST010 + STREAM_ST010_SIZE)         return 17;
         return 0;
     endfunction
 

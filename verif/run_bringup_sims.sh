@@ -30,6 +30,10 @@ CORE_FILES=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
+  # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally
+  # and gates it on cfg.has_st010, so these are needed by every core build.
+  rtl/cpu/upd96050/upd96050.sv rtl/cpu/upd96050/upd96050_st010.sv
+  rtl/cpu/upd96050/ssv_st010_prg_fetch.sv
   rtl/ssv_core.sv
 )
 
@@ -49,6 +53,10 @@ SSV_CORE_FILES=(
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
+  # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally
+  # and gates it on cfg.has_st010, so these are needed by every core build.
+  rtl/cpu/upd96050/upd96050.sv rtl/cpu/upd96050/upd96050_st010.sv
+  rtl/cpu/upd96050/ssv_st010_prg_fetch.sv
   rtl/ssv_core.sv
 )
 
@@ -68,6 +76,13 @@ run_one() {
 
 run_one tb_ssv_rom_loader \
   rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv verif/tb_ssv_rom_loader.sv
+
+# ST010 program fetch. Checks the instruction-address -> SDRAM-byte arithmetic
+# and the big/little-endian handoff between the loader's packing and MAME's
+# 32-bit-BE dspprg region, which nothing else covers.
+run_one tb_ssv_st010_prg_fetch \
+  rtl/ssv_pkg.sv rtl/cpu/upd96050/ssv_st010_prg_fetch.sv \
+  verif/tb_ssv_st010_prg_fetch.sv
 
 # Line doubler. Shipped in 095d3b2 with "never produced a pixel"; this bench
 # found three real defects (907-vs-908 tick ratio, a one-pixel line shift, and

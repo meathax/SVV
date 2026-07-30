@@ -24,8 +24,30 @@ logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic [26:0] download_max_addr;
 logic [SDR_AW:1] q0_addr, q1_addr, q2_addr;
+logic st010_drom_we;
+logic [10:0] st010_drom_wa;
+logic [15:0] st010_drom_wd;
 
 ssv_rom_loader dut (.*);
+
+// st010_drom_we is a one-clk pulse coincident with the SDRAM write request, so
+// it has already fallen by the time send_byte() returns. Latch it.
+// drom_clr, not a blocking assignment to drom_seen from the initial block:
+// mixing blocking and non-blocking writes to one variable is exactly the
+// BLKANDNBLK case this build suppresses, and it does not reliably work.
+logic        drom_seen;
+logic        drom_clr = 1'b0;
+logic [10:0] drom_wa_l;
+logic [15:0] drom_wd_l;
+always @(posedge clk) begin
+    if (rst || drom_clr)
+        drom_seen <= 1'b0;
+    else if (st010_drom_we) begin
+        drom_seen <= 1'b1;
+        drom_wa_l <= st010_drom_wa;
+        drom_wd_l <= st010_drom_wd;
+    end
+end
 
 task tick;
     @(posedge clk); #1;
@@ -141,6 +163,69 @@ initial begin
         $fatal(1, "sample-region write mismatch got %h", sdr_wr_addr);
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
+
+    // -----------------------------------------------------------------------
+    // ST010: one 69,632-byte st010.bin appended to the stream, split by MAME's
+    // ROM_COPY into a 64 KB 32-bit-BE "dspprg" and a 4 KB 16-bit-BE "dspdata".
+    // Every expected address comes from ssv_pkg, so this checks the loader
+    // against the map rather than against a transcription of it.
+    // -----------------------------------------------------------------------
+
+    // First program word.
+    drom_clr = 1'b1; tick(); drom_clr = 1'b0; tick();
+    send_byte(STREAM_ST010,        8'h1a);
+    send_byte(STREAM_ST010 + 27'd1, 8'h2b);
+    if (!sdr_wr_req || sdr_wr_addr !== (st010_stream_dest(STREAM_ST010) >> 1) ||
+        sdr_wr_din !== 16'h2b1a)
+        $fatal(1, "st010 program base mismatch got %h", sdr_wr_addr);
+    // The SDRAM destination of instruction 0 must be what the fetch path will
+    // ask for. If these two ever disagree the DSP executes garbage, so assert
+    // the identity directly rather than trusting both sides separately.
+    if (st010_stream_dest(STREAM_ST010) !== st010_prg_byte_addr(14'd0))
+        $fatal(1, "st010 program base is not st010_prg_byte_addr(0)");
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    // Instruction 5 occupies st010.bin bytes 20..23 (4 bytes per dword).
+    send_byte(STREAM_ST010 + 27'd20, 8'h3c);
+    send_byte(STREAM_ST010 + 27'd21, 8'h4d);
+    if (!sdr_wr_req ||
+        sdr_wr_addr !== (st010_prg_byte_addr(14'd5) >> 1) ||
+        sdr_wr_din !== 16'h4d3c)
+        $fatal(1, "st010 instruction-5 address mismatch got %h", sdr_wr_addr);
+    if (drom_seen)
+        $fatal(1, "program-half byte wrote the on-chip data ROM");
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    // Data half. Byte offset 0x22/0x23 inside "dspdata" is word 0x11, and the
+    // region is ROM_REGION16_BE, so the EVEN byte is the HIGH half.
+    send_byte(STREAM_ST010 + ST010_DATA_OFFSET + 27'h22, 8'hde);
+    send_byte(STREAM_ST010 + ST010_DATA_OFFSET + 27'h23, 8'had);
+    if (!drom_seen)
+        $fatal(1, "dspdata byte did not write the on-chip data ROM");
+    if (drom_wa_l !== st010_drom_word(STREAM_ST010 + ST010_DATA_OFFSET +
+                                      27'h23))
+        $fatal(1, "dspdata word index mismatch got %h", drom_wa_l);
+    if (drom_wa_l !== 11'h011)
+        $fatal(1, "dspdata word index is not 0x011, got %h", drom_wa_l);
+    if (drom_wd_l !== 16'hdead)
+        $fatal(1, "dspdata is not big-endian, got %h", drom_wd_l);
+    // The same pair also lands in SDRAM at its identity offset.
+    if (!sdr_wr_req ||
+        sdr_wr_addr !== (st010_stream_dest(STREAM_ST010 + ST010_DATA_OFFSET +
+                                          27'h22) >> 1))
+        $fatal(1, "dspdata SDRAM address mismatch got %h", sdr_wr_addr);
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    // The whole region must sit in the free bank 2 and never touch the sample
+    // region, which the open-ended `>= STREAM_SAMPLES` branch would have
+    // claimed had the st010 test not been put ahead of it.
+    if (st010_stream_dest(STREAM_ST010)[SDR_AW:SDR_AW-1] !== 2'd2 ||
+        st010_stream_dest(STREAM_ST010 + STREAM_ST010_SIZE - 27'd1)
+            [SDR_AW:SDR_AW-1] !== 2'd2)
+        $fatal(1, "st010 region left SDRAM bank 2");
 
     ioctl_download = 0;
     tick();

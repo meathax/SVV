@@ -372,11 +372,19 @@ def main():
         prog = [r for r in regions if r['name'] == 'maincpu']
         gfx = [r for r in regions if r['name'] in ('sprites', 'gfxdata')]
         samp = [r for r in regions if r['name'].startswith('ensoniq')]
+        # ST010 (uPD96050) daughterboard. ONE 69,632-byte st010.bin, which MAME
+        # then ROM_COPYs into a 64 KB 32-bit-BE "dspprg" and a 4 KB 16-bit-BE
+        # "dspdata". Those two regions carry no ROM_LOADs of their own, so they
+        # produce no parts here and the loader does the split -- the same
+        # aliasing shape already used for the ES5506 banks. Discovered from the
+        # ROM region, so it is class-agnostic: these sets live in the derived
+        # drifto94_state.
+        st010 = [r for r in regions if r['name'] == 'st010']
 
         body, offsets, aliases = [], [], []
         cursor = 0
         for label, group in (('program', prog), ('graphics', gfx),
-                             ('samples', samp)):
+                             ('samples', samp), ('st010', st010)):
             if not group:
                 continue
             start = cursor
@@ -439,6 +447,7 @@ def main():
             flags['has_add_buttons'] = (
                 cfgblk.has_add_buttons(src, amap) if amap else False)
             wdog = cfgblk.watchdog_mode(src, amap) if amap else 0
+            flags['has_st010'] = cfgblk.has_st010(regions)
             cfg_bytes = cfgblk.build_cfg_bytes(
                 SUPPORTED.index(setname) if setname in SUPPORTED else 15,
                 prog_size, gfx_region, gfx_loaded,
