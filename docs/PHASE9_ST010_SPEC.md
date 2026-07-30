@@ -1,6 +1,23 @@
 # Phase 9 — ST010 (NEC uPD96050): interface specification
 
-**Status: implemented. Core + 258-check test suite in place, not yet integrated.**
+**Status: implemented and integrated.** Core + 258-check test suite, integrated
+into `ssv_core` gated on `cfg.has_st010` (commit 8038c60) and wired at the top
+level on 2026-07-30.
+
+> **The top-level wiring was missing until 2026-07-30, and that is worth
+> recording because "integrated" was already claimed.** `8038c60` connected the
+> DSP inside `ssv_core`, but `Arcade-SSV.sv` still tied `.p5_req(1'b0)` and its
+> `ssv_core` instance omitted `sdr_p5_*` and `st010_drom_*` entirely. On hardware
+> the DSP's data ROM was therefore never written and its program fetches could
+> never be acked. Simulation could not catch it: the frame-CRC bench instantiates
+> `ssv_core` directly and never elaborates the wrapper. Synthesis measured the
+> difference once connected — registers 22,934 → 23,722, block memory +48 Kbit,
+> and DSP blocks 59 → 60, the last because the multiplier had been optimised away
+> while its inputs were constant.
+>
+> Still true, and unchanged by the wiring: **no ST010 instruction has ever
+> executed in situ.** The three titles' ROMs are present locally now, but none has
+> been booted.
 
 > ### TWO CORRECTIONS to the first version of this spec
 >

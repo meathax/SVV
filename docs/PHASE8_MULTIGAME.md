@@ -148,6 +148,54 @@ to prove B3 was unreachable, and now proves the full low byte goes active.
 
 ## Phase 8 is complete.
 
+## Status, re-measured 2026-07-30
+
+The "Not done" table below was written before the config path landed and **three
+of its six rows are stale**. Corrected here rather than in place, so the original
+record of what was outstanding survives:
+
+| original row | actual state at HEAD |
+|---|---|
+| MRA `<rom index="1">` config path in the loader | **Done**, in the same commit. `rtl/mem/ssv_rom_loader.sv:193-209` captures and checksums the block; `Arcade-SSV.sv` wires `game_cfg` into the core. |
+| IRQ level 1 at scanline 0 | **Consumed.** `rtl/ssv_irq.sv:13,58-59`, driven from `rtl/ssv_core.sv:515`. |
+| Tile-code expansion table | **Consumed.** `expand_code()` in both renderers. |
+| Compressed ES5506 samples | Still absent; `CR_CMPD` voices are forced silent. |
+| `tools/gen_ssv_mras.py` support gate | Parsers and config blob done; `SUPPORTED = ['dynagear']` still narrows the "supported" note. |
+| V60 opcode gaps | Still partial, still no sticky status bit. |
+
+Two factual errors elsewhere in this document, both corrected by reading the
+generated blocks:
+
+* It lists the four-quarter titles as "cairblad, drifto94, vasara, vasara2".
+  **cairblad is a three-quarter title.** Its six 4 MB parts fill quarters A/B/C
+  of a 32 MB region and leave D empty, so `gfx_quarters` is 3. The comment at
+  `rtl/video/ssv_gfx_row_fetch.sv` said the same wrong thing.
+* It says `in_extra` is gated so "every other title still reads the idle
+  `16'hffff`", implying only survarts decodes `$500008`. **dynagear runs
+  `survarts_map`** and therefore decodes it too; its shipped MRA carries
+  `has_add_buttons = 1`.
+
+### The blocker this document did not name
+
+`cfg` was parsed, but the loader's **stream placement** stayed hardwired to Dyna
+Gear: the graphics quarter stride was fixed at 4 MB, `gfx_offset` was 24 bits so
+it wrapped at 16 MB, and index-0 writes were clipped at `STREAM_END = 0x1111000`,
+truncating Vasara's 44 MB stream at 39%. Dyna Gear was the only set that could
+load. Fixed 2026-07-30: every boundary is now derived from the record, with the
+three quarter boundaries precomputed so the non-power-of-two strides (3 MB and
+6 MB, for the 12 MB and 24 MB regions) need no divider.
+
+Fixed at the same time, and **not** previously recorded anywhere: `gfx_record_addr`
+and `gfx_plane_addr` took `code[16:0]`, and `ssv_gfx_row_fetch` cast the wrap
+result down with `17'(...)`. A 32 MB sprite region has `0x40000` tiles, which
+needs **18 bits**, so on cairblad, drifto94, vasara and vasara2 the upper half of
+tile space aliased onto the lower half. Dyna Gear's `0x20000` tiles fit 17 bits
+exactly, which is why the one title under test could not reveal it.
+
+The config block is now **version 2**; byte 12 carries `samples_mb`, needed to
+locate the st010 block behind the samples. Version 1 blocks are rejected rather
+than defaulted.
+
 ## Not done
 
 | item | note |
@@ -158,6 +206,12 @@ to prove B3 was unreachable, and now proves the full low byte goes active.
 | Tile-code expansion table | `init_ssv` bitswap vs cairblad's identity `init_ssv_tilescram`; `tile_code_identity` is in the record but not yet consumed. |
 | `tools/gen_ssv_mras.py` | Still gates `supported = setname == 'dynagear'`. Needs the machine-config/address-map/init parsers, the config blob, graphics tail padding and the hiscore entry. |
 | V60 opcode gaps | `0x59`, `0x5B`, `0x5D` partial. Dyna Gear's boot does not need them; eight other programs might. Mitigate with a sticky "unimplemented opcode" status bit rather than prediction. |
+
+| still open after the 2026-07-30 work | note |
+|---|---|
+| `cfg.bank_map` has no consumer | `ssv_es5506_voice.sv` documents it and then computes `SDR_SAMPLES_BASE + accum[31:11]` with no bank term, so all four ES5506 banks alias onto one region. Wrong for ultrax, ultraxg, twineag2 (`bank_valid=0xF`) and drifto94, vasara, vasara2. |
+| Full-core benches are Dyna-Gear-only | They hardwire `cfg_dynagear()` and `$fatal` on Dyna Gear's exact ROM sizes, so no other set can be simulated yet. `tools/make-sim-stream.py` now produces per-game images for all ten local sets; the benches have to accept them. |
+| No set has been run | Nine of the ten local sets have never executed a single instruction in this core. Everything above is structural. |
 
 ## Not reachable without new silicon
 
