@@ -1,5 +1,32 @@
 # Phase 0 — re-measurement before the 128 MB retarget
 
+> ## CORRECTION — every number below was measured on a truncated run
+>
+> The run recorded here asked for `+FRAMES=250` but left `+CYCLES` at its
+> default of 200,000,000. `verif/tb_ssv_frame_crc.sv`'s main loop exits on
+> **either** condition and used to do so **silently**, and a frame is
+> 262 × 3064.2 ≈ 803k `clk_sys` with ~35 frames going by before
+> `video_enable`. 200 M cycles therefore buys ~250 total frames, i.e. **215
+> post-VE frames — which is where every run below stopped.**
+>
+> `coin_start_p1_gameplay` does not reach controllable gameplay until **post-VE
+> frame 820**. So this pass measured the attract loop, the coin insert and the
+> "PUSH START" / character-select screens. **It never saw gameplay at all**,
+> and the phrase "215 post-VE frames of gameplay" below is wrong.
+>
+> That invalidates the *scope*, not the arithmetic, of §3 and §4 in particular:
+> a peak line occupancy of 57 of 96 and zero drops are what the **attract and
+> select screens** cost, which is why they do not reproduce the 86 and
+> "90 of 96" recorded from real gameplay in `DYNAGEAR_CORE_AUDIT.md:502` and
+> `M10K_REDUCTION.md:76`. Those older figures were not "not reproduced by this
+> scenario"; they were never given the chance.
+>
+> The testbench now prints
+> `WARNING CYCLE_BUDGET_TRUNCATED frames=… requested=… cycles=…` whenever the
+> cycle budget ends a run early, so this cannot happen unnoticed again. Any
+> measurement intended to cover gameplay needs `+CYCLES` of roughly
+> `803000 × (frames + 35)`.
+
 Instrumentation-only pass. No functional RTL changed; every counter lives under
 `` `ifdef SIMULATION `` or in the testbench, so the synthesis path is untouched.
 

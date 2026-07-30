@@ -71,7 +71,30 @@ localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
 // Keep headroom so valid sprites are not silently dropped.
 // Index as y*LINE_SLOTS+slot (not a shifted concat) so non-power-of-two depths
 // do not overrun the packed table.
-localparam integer LINE_SLOTS = 96;
+//
+// 96 was measured insufficient. A two-player dense-gameplay run of
+// `coin_start_2p_dense` (1800 post-VE frames, 431,760 scanlines) reported
+//
+//   C3_OCC max=96 at_cap=51        <- line_counts saturated, i.e. the cap hit
+//   C3_DEM max=101 over_cap=31     <- true demand, and 31 lines DROPPED
+//
+// where C3_DEM is the uncapped shadow count at the bottom of this file. So 31
+// scanline-instances silently discarded their 97th and later descriptors. 128
+// covers the measured 101 with 27 slots spare and, being a power of two, also
+// turns the `bucket_y * LINE_SLOTS` and `target_y_latched * LINE_SLOTS`
+// multiplies into shifts.
+//
+// Cost: line_entries goes 240*96=23040 to 240*128=30720 words of 7 bits, i.e.
+// 23 to 30 M10K at the 1024x10 packing Quartus chose, so +7 blocks.
+// line_counts and line_page_starts gain one bit of LINE_COUNT_WIDTH each and
+// do not change block count (line_page_starts is 240 x 15 fields, 105 -> 120
+// bits, both 3 blocks at 256x40).
+//
+// Note this REMOVES an accidental safety valve: the cap was also limiting how
+// much work one line could ask of the renderer. The worst 2P line already ran
+// 2441 clk_sys of the ~3064 a line allows, so the overrun counters must be
+// re-checked whenever this number goes up.
+localparam integer LINE_SLOTS = 128;
 localparam integer LINE_SLOT_WIDTH = $clog2(LINE_SLOTS);
 localparam integer LINE_COUNT_WIDTH = $clog2(LINE_SLOTS + 1);
 localparam integer LINE_TABLE_WORDS = 240 * LINE_SLOTS;
@@ -1476,5 +1499,42 @@ always_ff @(posedge clk) begin
         endcase
     end
 end
+
+`ifdef SIMULATION
+// -------------------------------------------------------------------------
+// Sim-only: uncapped per-scanline descriptor demand.
+//
+// line_counts saturates at LINE_SLOTS (see the BUILD_BUCKET_WRITE guard on
+// the always_ff above), so the synthesised counter can only ever say "this
+// line reached the cap", never how far past it the scene actually went. That
+// is not enough to choose a new LINE_SLOTS: raising 96 to 128 is only useful
+// if the demand fits under 128.
+//
+// This array counts every bucket write *attempt*, including the ones the cap
+// discards, so the required depth can be read off directly. Nothing here
+// drives the DUT and the whole block is excluded from synthesis.
+// -------------------------------------------------------------------------
+integer sim_line_demand [0:239];
+integer sim_line_demand_max;
+integer sim_line_demand_i;
+
+initial begin
+    for (sim_line_demand_i = 0; sim_line_demand_i < 240;
+         sim_line_demand_i = sim_line_demand_i + 1)
+        sim_line_demand[sim_line_demand_i] = 0;
+    sim_line_demand_max = 0;
+end
+
+always_ff @(posedge clk) begin
+    if (state == BUILD_CLEAR_LINES) begin
+        sim_line_demand[line_count_addr] <= 0;
+    end
+    else if (state == BUILD_BUCKET_WRITE) begin
+        sim_line_demand[bucket_y] <= sim_line_demand[bucket_y] + 1;
+        if (sim_line_demand[bucket_y] + 1 > sim_line_demand_max)
+            sim_line_demand_max <= sim_line_demand[bucket_y] + 1;
+    end
+end
+`endif
 
 endmodule

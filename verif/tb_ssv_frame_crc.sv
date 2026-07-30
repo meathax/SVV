@@ -211,11 +211,20 @@ ssv_core dut (
 // dropped its 97th descriptor, so `occ_at_cap` is the number that decides
 // whether raising it to 128 is warranted. Sampled when the vblank build
 // finishes, which is the only point the table is complete and stable.
-localparam int OCC_BINS = 160;
+localparam int OCC_BINS = 256;
 integer occ_hist [0:OCC_BINS-1];
 integer occ_max, occ_max_frame, occ_at_cap, occ_lines_sampled;
 integer occ_i, occ_v;
 logic   obj_cache_busy_d;
+
+// occ_hist above reads line_counts, which SATURATES at LINE_SLOTS, so it can
+// only report "this line hit the cap" and never how far past it the scene
+// went. That is enough to justify raising LINE_SLOTS but not to choose a new
+// value. dut.sprite_renderer.sim_line_demand is the uncapped shadow count of
+// every bucket write attempt (sim-only, `ifdef SIMULATION`), so `dem_max` is
+// the depth the scene actually asked for.
+integer dem_hist [0:OCC_BINS-1];
+integer dem_max, dem_max_frame, dem_over_cap, dem_v;
 
 // --- C4: `start` pulses arriving while the renderer is not in IDLE --------
 //
@@ -237,7 +246,9 @@ logic [4:0] es_voice_d;
 
 initial begin
     for (occ_i = 0; occ_i < OCC_BINS; occ_i = occ_i + 1) occ_hist[occ_i] = 0;
+    for (occ_i = 0; occ_i < OCC_BINS; occ_i = occ_i + 1) dem_hist[occ_i] = 0;
     occ_max = 0; occ_max_frame = 0; occ_at_cap = 0; occ_lines_sampled = 0;
+    dem_max = 0; dem_max_frame = 0; dem_over_cap = 0;
     start_dropped = 0; start_total = 0;
     bg_start_while_obj_busy = 0;
     es_nonbank2_slots = 0; es_compressed_slots = 0;
@@ -263,6 +274,19 @@ always_ff @(posedge clk_sys) begin
                 if (occ_v > occ_max) begin
                     occ_max = occ_v;
                     occ_max_frame = post_ve_frames;
+                end
+
+                // Uncapped demand for the same scanline.
+                dem_v = dut.sprite_renderer.sim_line_demand[occ_i];
+                if (dem_v >= 0 && dem_v < OCC_BINS)
+                    dem_hist[dem_v] = dem_hist[dem_v] + 1;
+                else if (dem_v >= OCC_BINS)
+                    dem_hist[OCC_BINS-1] = dem_hist[OCC_BINS-1] + 1;
+                if (dem_v > int'(dut.sprite_renderer.LINE_SLOTS))
+                    dem_over_cap = dem_over_cap + 1;
+                if (dem_v > dem_max) begin
+                    dem_max = dem_v;
+                    dem_max_frame = post_ve_frames;
                 end
             end
         end
@@ -674,6 +698,79 @@ task automatic apply_inputs(input integer f);
             if ((c % 60) < 6)           in_p1[2] = 1'b0;      // B2 jump
             if (((f - 950) % 1800) < 5) in_p1[0] = 1'b0;      // START
             if (((f - 950) % 3600) < 4) in_system[0] = 1'b0;  // COIN1
+        end
+    end
+    // -------------------------------------------------------------------
+    // coin_start_2p_dense -- the two-player scenario PHASE0_MEASUREMENT
+    // recorded as missing.
+    //
+    // C3's refutation condition was "peak occupancy <= 96 in 1P AND 2P".
+    // Only 1P had ever been run, so the LINE_SLOTS question stayed open, and
+    // commit d2237df's note that "two players will exceed it" was never
+    // tested either way. This is that test.
+    //
+    // Two coins (COIN1 then COIN2), both players start, P2 picks a different
+    // character, then both are driven with 120-frame out-of-phase patterns:
+    // in phase they overlap and share scanlines, out of phase they aggro
+    // enemies at two separate points of the stage, which is the case that
+    // actually stacks descriptors on one line.
+    //
+    // P1/P2 bit map (active low, per verif/tb_ssv_input_matrix.sv):
+    //   7 UP  6 DOWN  5 LEFT  4 RIGHT  3 B1  2 B2  1 B3  0 START
+    // SYSTEM: 0 COIN1  1 COIN2
+    // -------------------------------------------------------------------
+    if (scenario == "coin_start_2p_dense") begin : two_player
+        automatic integer c1, c2;
+        if (f >= 30  && f < 34)  in_system[0] = 1'b0;  // COIN1 -> P1 credit
+        if (f >= 40  && f < 44)  in_system[1] = 1'b0;  // COIN2 -> P2 credit
+        if (f >= 50  && f < 54)  in_system[0] = 1'b0;  // spare credit
+        if (f >= 165 && f < 170) in_p1[0] = 1'b0;      // P1 START
+        if (f >= 180 && f < 185) in_p2[0] = 1'b0;      // P2 START (join)
+        // Character select. P1 keeps the default (Roger, matching the 1P
+        // scenarios so the two runs stay comparable); P2 moves one right so
+        // the two players are different characters with different sprite
+        // sets, which is the denser case.
+        if (f >= 210 && f < 215) in_p2[4] = 1'b0;      // P2 RIGHT
+        if (f >= 250 && f < 255) begin                 // both confirm
+            in_p1[0] = 1'b0; in_p2[0] = 1'b0;
+        end
+        if (f >= 255 && f < 262) begin
+            in_p1[3] = 1'b0; in_p2[3] = 1'b0;
+        end
+        // Story beats and the map transition, same beats as the 1P gameplay
+        // scenario so the run reaches controllable play at the same frame.
+        if (f >= 300 && f < 330) in_p1[4] = 1'b0;
+        if (f >= 330 && f < 360) begin
+            in_p1[3] = 1'b0; in_p2[3] = 1'b0;
+        end
+        if (f >= 360 && f < 390) in_p1[7] = 1'b0;
+        if (f >= 420 && f < 425) begin
+            in_p1[3] = 1'b0; in_p2[3] = 1'b0;
+        end
+        if (f >= 480 && f < 485) in_p1[0] = 1'b0;
+        if (f >= 540 && f < 545) begin
+            in_p1[3] = 1'b0; in_p2[3] = 1'b0;
+        end
+        // Controllable play from the stage-intro GO prompt onwards. Pure
+        // function of f, so the scenario stays deterministic.
+        if (f >= 820) begin
+            c1 = (f - 820) % 240;
+            c2 = (f - 820 + 120) % 240;
+            if (c1 < 150)              in_p1[4] = 1'b0;  // P1 RIGHT
+            if (c1 >= 170 && c1 < 190) in_p1[7] = 1'b0;  // P1 UP
+            if ((c1 % 12) < 6)         in_p1[3] = 1'b0;  // P1 B1 attack
+            if ((c1 % 60) < 6)         in_p1[2] = 1'b0;  // P1 B2 jump
+            if (c2 < 150)              in_p2[4] = 1'b0;  // P2 RIGHT
+            if (c2 >= 170 && c2 < 190) in_p2[7] = 1'b0;  // P2 UP
+            if ((c2 % 12) < 6)         in_p2[3] = 1'b0;  // P2 B1 attack
+            if ((c2 % 60) < 6)         in_p2[2] = 1'b0;  // P2 B2 jump
+            // Answer respawn / continue prompts for either player, and keep
+            // credits topped up so neither drops out of the game.
+            if (((f - 820) % 1800) < 5) begin
+                in_p1[0] = 1'b0; in_p2[0] = 1'b0;
+            end
+            if (((f - 820) % 3600) < 4)          in_system[0] = 1'b0;
+            if (((f - 820 + 1800) % 3600) < 4)   in_system[1] = 1'b0;
         end
     end
 endtask
@@ -1271,6 +1368,16 @@ initial begin
 
     if (!ve_seen)
         $fatal(1, "video_enable never rose pc=%08x", debug_pc);
+    // The loop above also exits when the cycle budget runs out, and it used to
+    // do so silently: +FRAMES=250 with the default +CYCLES=200000000 stops at
+    // post-VE frame 215, because a frame is 262 x 3064.2 = ~803k clk_sys and
+    // ~35 frames go by before video_enable. Every measurement in
+    // docs/PHASE0_MEASUREMENT.md was taken from such a run and therefore never
+    // reached this scenario's controllable gameplay, which begins at post-VE
+    // frame 820. Say so loudly rather than reporting a short run as a full one.
+    if (post_ve_frames < max_frames)
+        $display("WARNING CYCLE_BUDGET_TRUNCATED frames=%0d requested=%0d cycles=%0d -- raise +CYCLES to reach the requested frame",
+                 post_ve_frames, max_frames, max_cycles);
     if (post_ve_frames < soak_frames)
         $fatal(1, "soak frames=%0d need=%0d", post_ve_frames, soak_frames);
     if (!ignore_overrun && (bg_overruns != 0 || obj_overruns != 0))
@@ -1309,6 +1416,15 @@ initial begin
         for (diag_i = 0; diag_i < OCC_BINS; diag_i = diag_i + 1)
             if (occ_hist[diag_i] != 0)
                 $display("C3_HIST %0d %0d", diag_i, occ_hist[diag_i]);
+        // Uncapped demand. C3_DEM max is the LINE_SLOTS the scene asked for;
+        // C3_OCC max can never exceed LINE_SLOTS because line_counts
+        // saturates. over_cap counts the (line, frame) pairs that dropped at
+        // least one descriptor.
+        $display("C3_DEM max=%0d frame=%0d over_cap=%0d",
+                 dem_max, dem_max_frame, dem_over_cap);
+        for (diag_i = 0; diag_i < OCC_BINS; diag_i = diag_i + 1)
+            if (dem_hist[diag_i] != 0)
+                $display("C3_DEMHIST %0d %0d", diag_i, dem_hist[diag_i]);
         $display("C4_START total=%0d dropped=%0d", start_total, start_dropped);
         $display("C5_BGSTART bg_start_while_obj_busy=%0d bg_ack_while_obj_owns=%0d",
                  bg_start_while_obj_busy, bg_ack_while_obj_owns);

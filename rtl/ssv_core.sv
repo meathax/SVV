@@ -318,9 +318,11 @@ end
 wire cache_deadline = (vcnt >= SSV_VTOTAL - 2);
 
 // Declared here rather than with the rest of the renderer nets below, because
-// line_buffer_start reads obj_cache_busy. An implicit net would be inferred
-// under the older rules, but slang rejects the use-before-declaration outright.
+// line_buffer_start reads obj_cache_busy and renderer_line_start reads
+// renderer_busy. An implicit net would be inferred under the older rules, but
+// slang rejects the use-before-declaration outright.
 wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
+wire renderer_busy;
 
 // Swap completed lines as active display enters horizontal blank. The extra
 // target_y==240 swap exposes the already-rendered final visible line; it must
@@ -329,8 +331,23 @@ wire line_buffer_start = video_enable && ce_pixel &&
                          (hcnt == SSV_HBSTART - 1'd1) &&
                          (renderer_target_y <= SSV_VBSTART) &&
                          !obj_cache_busy;
+// ...and never while either renderer is still working on the previous line.
+//
+// renderer_line_start starts the BACKGROUND renderer; the object renderer is
+// started by bg_done. So a line that misses its deadline used to start bg
+// while obj was still fetching, and because p2_owner_obj is obj_busy, bg's
+// spr_addr and rom_ack are both withheld -- it latches the OBJECT renderer's
+// tile code and attribute and paints the background with sprite graphics.
+// (See the p2_owner_obj comment below.)
+//
+// Skipping the start instead costs the late line its background and its
+// objects, so it shows the cleared backdrop: a flat line rather than a band of
+// another renderer's tiles. There is no lockup risk -- the swap itself is
+// still driven by line_buffer_start, and the busy renderer is not prolonged by
+// skipping a start, so the next line starts normally.
 wire renderer_line_start = line_buffer_start &&
-                           (renderer_target_y < SSV_VBSTART);
+                           (renderer_target_y < SSV_VBSTART) &&
+                           !renderer_busy;
 
 // Look ahead one address to cover the line-buffer/palette read pipeline.  The
 // output observed at coordinate x is the value requested on the preceding
@@ -343,7 +360,7 @@ wire renderer_plot_shadow, renderer_shadow_4bit;
 wire [35:0] renderer_plot_x;
 wire [59:0] renderer_plot_color;
 wire [31:0] renderer_plot_pen;
-wire renderer_busy, renderer_done;
+wire renderer_done;
 wire [3:0] bg_plot_we;
 wire bg_plot_shadow, bg_shadow_4bit;
 wire [35:0] bg_plot_x;
