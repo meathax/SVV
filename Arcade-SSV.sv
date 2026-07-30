@@ -911,9 +911,47 @@ ssv_scandoubler u_scandoubler (
 );
 
 assign CE_PIXEL = sd_on ? vid_ce_x2 : vid_ce;
+// ---------------------------------------------------------------------------
+// TEMPORARY INSTRUMENTATION -- SDRAM readback probe, painted to the screen.
+// Build with +define+DBG_SDRAM_PAINT (see the macro in Arcade-SSV.qsf).
+// DELETE BOTH once docs/issues/SDRAM_READ_LATENCY_BLACK_SCREEN.md is closed.
+//
+// The core emits a correctly timed 336x240 raster on hardware but draws nothing,
+// while the same tree matches MAME on 119 of 120 attract frames in simulation.
+// The wrapper already reads two known program words back out of SDRAM before
+// releasing the CPU (probe_sig0 from byte 0x00000, probe_sig1 from 0x1F3D0) and
+// compares them into rom_sig_ok -- but that only ever reached debug_status, which
+// nothing on hardware can observe. Since the raster demonstrably works, paint it.
+//
+// Paint the DATA, not a pass/fail bit, so a screenshot reports what SDRAM
+// actually returned:
+//
+//   ROM not loaded yet   -> pure blue  (00,00,FF)
+//   probe not finished   -> pure red   (FF,00,00)
+//   probe finished       -> (sig0[15:8], sig0[7:0], sig1[15:8])
+//
+// A correct read gives sig0=0x207A and sig1=0x0C7A, i.e. exactly RGB
+// (20,7A,0C) -- validated against sim_output/rom/maincpu.bin. Hardware returns
+// (00,7A,35), byte-identical across two different placements.
+//
+// Overridden at the final output rather than at vid_*, so the paint is
+// independent of CRT Adjust and of whether the doubler is engaged.
+//
+// Decode screenshots with a real PNG decoder: stripping filter bytes without
+// applying the filters reads a solid colour as all-zero and will mislead you.
+// ---------------------------------------------------------------------------
+`ifdef DBG_SDRAM_PAINT
+wire [7:0] dbg_r = ~rom_loaded ? 8'h00 : ~probe_done ? 8'hFF : probe_sig0[15:8];
+wire [7:0] dbg_g = ~rom_loaded ? 8'h00 : ~probe_done ? 8'h00 : probe_sig0[7:0];
+wire [7:0] dbg_b = ~rom_loaded ? 8'hFF : ~probe_done ? 8'h00 : probe_sig1[15:8];
+assign VGA_R    = dbg_r;
+assign VGA_G    = dbg_g;
+assign VGA_B    = dbg_b;
+`else
 assign VGA_R    = sd_on ? sd_rgb[23:16] : vid_r;
 assign VGA_G    = sd_on ? sd_rgb[15:8]  : vid_g;
 assign VGA_B    = sd_on ? sd_rgb[7:0]   : vid_b;
+`endif
 assign VGA_HS   = sd_on ? sd_hs : vid_hs;
 assign VGA_VS   = sd_on ? sd_vs : vid_vs;
 assign VGA_SL   = status[4:3];
