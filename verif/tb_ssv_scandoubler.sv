@@ -25,6 +25,32 @@
 //   A3  sync is replayed: 2 hs_out pulses per input line
 //   A4  vs_out survives doubling: 1 pulse per frame
 //   A6  VGA_DE is 672 active output pixels per output line pair (336 x 2)
+//   A7  the resolution MiSTer itself measures from the doubled stream
+//
+// A7 exists because A1-A6 all passed while Video Fx was unusable on real
+// hardware: MiSTer captured 52x481 instead of 336x480. A1-A6 are aggregate or
+// per-input-line checks, and the frame TOTAL of active pixels is correct even
+// when the pixels are distributed into the wrong output lines, so none of them
+// could see it.
+//
+// HYPOTHESIS (written before the test that evaluates it):
+//   vs_out/vb_out used to bypass the line store and pass straight through
+//   (ssv_scandoubler.sv:154-155). vblank changes state when hcnt wraps to 0,
+//   which is 54 native pixels -- about 108 x2 ticks -- AFTER the line
+//   reference, i.e. a quarter of the way into the FIRST of the two replays.
+//   So at each vertical blanking edge one output line pair has its active
+//   region cut in half, producing short DE runs of 52 and 620 rather than
+//   336 and 336. That is not cosmetic: both sys/hps_io.sv:906-960 and
+//   sys/video_freak.sv:66-68 measure the frame WIDTH as the length of a single
+//   DE run, and gate their measuring window on vsync, so one fragmentary run
+//   is latched as the width of the whole frame.
+//
+// REFUTATION CONDITION:
+//   if a faithful replica of sys/hps_io.sv's vid_hcnt/vid_vcnt measurement
+//   reports 336x480 on the unmodified DUT, the hypothesis is wrong.
+//
+// A7 is that replica. It also reports the shortest and longest DE run seen in
+// a frame, which is the direct statement of the defect: they must be equal.
 //
 // Build with --binary --timing --assert over rtl/ssv_pkg.sv,
 // rtl/ssv_video_timing.sv, rtl/ssv_scandoubler.sv and this file, with
@@ -38,7 +64,7 @@ module tb_ssv_scandoubler;
 import ssv_pkg::*;
 
 localparam logic [15:0] PIXEL_INC = 16'd9710;   // matches ssv_video_timing
-localparam int FRAMES = 3;
+localparam int FRAMES = 4;   // A7's DE-run statistics need a full steady frame
 
 logic clk = 1'b0;
 always #10 clk = ~clk;
@@ -96,7 +122,7 @@ int input_lines, out_hs_pulses, out_vs_pulses, out_de_pixels;
 int out_de_frame;
 int frames_seen;
 
-int a1_fail, a2_fail, a3_fail, a4_fail, a6_fail;
+int a1_fail, a2_fail, a3_fail, a4_fail, a6_fail, a7_fail;
 int a1_first_line, a2_reports;
 int a1_min_x2, a1_max_x2;
 
@@ -248,22 +274,105 @@ always_ff @(posedge clk) begin
                          frames_seen, out_vs_pulses);
             end
             // A6: 240 active lines, each emitted twice at 336 px = 161280
-            // active output pixels per frame. Checked per frame because the
-            // doubler's hsync-to-hsync line straddles the vblank boundary, so
-            // the two boundary lines legitimately split one active region
-            // between them (measured 52 + 620 = 672).
+            // active output pixels per frame. Checked per FRAME rather than per
+            // line because vblank_pulse fires 54 native pixels into an output
+            // line pair, so the pair carrying the last active row is split
+            // across the frame boundary (620 + 52) even when the doubler is
+            // correct. It was a per-frame total for the same reason before the
+            // vb_out fix, which is exactly why A6 could not see that fix's
+            // absence -- the total was right and the distribution was not.
+            // A7 is the check that sees it.
             if (frames_seen >= 1 && out_de_frame != 240 * 672) begin
                 a6_fail <= a6_fail + 1;
                 $display("A6 FAIL frame=%0d DE pixels=%0d want %0d",
                          frames_seen, out_de_frame, 240 * 672);
             end
             out_vs_pulses <= 0;
-            out_de_frame  <= 0;
+            // vblank_pulse can land on a ce_pix_x2 tick that is itself an
+            // active pixel, and this assignment overrides the accumulate above.
+            // Carry that one pixel into the new frame instead of dropping it,
+            // or the total reads 161279. Before the vb_out fix the DUT was
+            // blanking at exactly this instant, so the collision never showed.
+            out_de_frame  <= (ce_pix_x2 && !(hb_out || vb_out)) ? 1 : 0;
+        end
+    end
+end
+
+// ---------------------------------------------------------------------------
+// A7: what MiSTer measures.
+//
+// A verbatim port of sys/hps_io.sv:906-960 (the vid_hcnt/vid_vcnt half of it)
+// driven by exactly what the wrapper feeds the framework when sd_on:
+//   ce_pix = ce_pix_x2, de = ~(hb_out | vb_out)  (Arcade-SSV.sv:780,788)
+//   vs     = VGA_VS, after sys/sys_top.v:1718 sync_fix has normalised the
+//            core's ACTIVE-LOW vsync to the active-high sense hps_io assumes.
+// So the edge hps_io calls "old_vs & ~vs" is the END of the vsync pulse, and
+// the width it reports is the length of the first DE run after it.
+//
+// video_freak takes its hsize the same way (sys/video_freak.sv:57-68), off the
+// raw active-low VGA_VS, so both the reported resolution and the aspect ratio
+// come from that one DE run.
+// ---------------------------------------------------------------------------
+wire de_out    = ~(hb_out | vb_out);
+wire m_vs_ah   = ~vs_out;      // as sync_fix presents it
+
+int  m_hcnt, m_vcnt, m_vid_hcnt, m_vid_vcnt, m_meas;
+int  de_run, de_run_min, de_run_max;
+logic m_old_vs, m_old_de, m_calch;
+
+initial begin
+    m_hcnt = 0; m_vcnt = 0; m_vid_hcnt = 0; m_vid_vcnt = 0; m_meas = 0;
+    de_run = 0; de_run_min = 1 << 30; de_run_max = 0;
+end
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        m_old_vs <= 1'b0;
+        m_old_de <= 1'b0;
+        m_calch  <= 1'b0;
+    end
+    else if (ce_pix_x2) begin
+        m_old_vs <= m_vs_ah;
+        m_old_de <= de_out;
+
+        // Every DE run's length. On a correct doubler these are all equal.
+        if (de_out) de_run <= de_run + 1;
+        if (m_old_de && !de_out) begin
+            de_run <= 0;
+            if (frames_seen >= 2) begin
+                if (de_run < de_run_min) de_run_min <= de_run;
+                if (de_run > de_run_max) de_run_max <= de_run;
+            end
+        end
+
+        if (!m_vs_ah && !m_old_de && de_out) m_vcnt <= m_vcnt + 1;
+        if (m_calch && de_out)               m_hcnt <= m_hcnt + 1;
+        if (m_old_de && !de_out)             m_calch <= 1'b0;
+
+        if (m_old_vs && !m_vs_ah) begin
+            if (m_hcnt != 0 && m_vcnt != 0) begin
+                m_vid_hcnt <= m_hcnt;
+                m_vid_vcnt <= m_vcnt;
+                m_meas     <= m_meas + 1;
+                // The first measurement after reset covers a partial frame.
+                if (m_meas >= 1 &&
+                    (m_hcnt != int'(SSV_HBSTART) ||
+                     m_vcnt != 2 * int'(SSV_VBSTART))) begin
+                    a7_fail <= a7_fail + 1;
+                    $display("A7 FAIL MiSTer-measured %0dx%0d, want %0dx%0d",
+                             m_hcnt, m_vcnt,
+                             int'(SSV_HBSTART), 2 * int'(SSV_VBSTART));
+                end
+            end
+            m_vcnt  <= 0;
+            m_hcnt  <= 0;
+            m_calch <= 1'b1;
         end
     end
 end
 
 initial begin
+    a7_fail = 0;
     repeat (20) @(posedge clk);
     rst <= 1'b0;
 
@@ -280,8 +389,13 @@ initial begin
     $display("A3 hsync replay          failures=%0d", a3_fail);
     $display("A4 vsync per frame       failures=%0d", a4_fail);
     $display("A6 active DE width       failures=%0d", a6_fail);
+    $display("A7 MiSTer-measured resolution: %0dx%0d (want %0dx%0d)",
+             m_vid_hcnt, m_vid_vcnt, int'(SSV_HBSTART), 2 * int'(SSV_VBSTART));
+    $display("A7 DE run length: min=%0d max=%0d (want both %0d)",
+             de_run_min, de_run_max, int'(SSV_HBSTART));
+    $display("A7 measured resolution   failures=%0d", a7_fail);
 
-    if (a1_fail || a2_fail || a3_fail || a4_fail || a6_fail)
+    if (a1_fail || a2_fail || a3_fail || a4_fail || a6_fail || a7_fail)
         $display("FAIL tb_ssv_scandoubler");
     else
         $display("PASS tb_ssv_scandoubler");
