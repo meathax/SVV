@@ -166,6 +166,11 @@ package ssv_pkg;
         logic [5:0] gfx_mb;             // 12, 16, 24 or 32 (MAME region size)
         logic [4:0] gfx_code_k;         // tile modulus exponent
         logic       gfx_code_mul3;      // modulus is 3<<k, not 1<<k
+        // (1<<gfx_code_k)-1, precomputed. It is derived, not independent, but
+        // it MUST be a stored field rather than recomputed in the wrap: as a
+        // variable shift it put a 20-bit barrel shifter in the combinational
+        // path from this record to the SDRAM address and cost -12.7 ns.
+        logic [19:0] gfx_code_mask;
         logic [2:0] gfx_quarters;       // populated quarters: 3 or 4
         logic [7:0] bank_map;           // 2 bits per ES5506 CR bank
         logic [3:0] bank_valid;         // which CR banks carry data
@@ -188,6 +193,7 @@ package ssv_pkg;
             gfx_mb:             6'd16,
             gfx_code_k:         5'd17,   // 0x20000 tiles
             gfx_code_mul3:      1'b0,
+            gfx_code_mask:      20'h1FFFF, // (1<<17)-1
             gfx_quarters:       3'd3,    // quarter 3 never populated
             bank_map:           8'b11_10_01_00,
             bank_valid:         4'b0100, // bank 2 only
@@ -201,19 +207,40 @@ package ssv_pkg;
 
     // code % (mul3 ? 3<<k : 1<<k), returned at the full 18 bits a 32 MB
     // graphics region needs (0x40000 tiles).
+    // n mod 3 for a 5-bit n, as a LUT. This is what the comment above always
+    // claimed the implementation was; writing `high % 20'd3` instead put a
+    // 20-bit divider in the SDRAM address path.
+    //
+    // Five bits is sufficient and not a guess: the modulus is 3<<k with
+    // k = 15..18 across the four SSV graphics region sizes, and the code is 20
+    // bits, so code>>k is at most 20-15 = 5 bits. Rule 14 in layout_fault()
+    // bounds the region against the code width, which is what keeps that true.
+    function automatic logic [1:0] mod3_5(input logic [4:0] n);
+        case (n % 5'd3)
+            5'd0:    mod3_5 = 2'd0;
+            5'd1:    mod3_5 = 2'd1;
+            default: mod3_5 = 2'd2;
+        endcase
+    endfunction
+
     function automatic logic [17:0] wrap_code_cfg(
         input ssv_cfg_t cfg, input logic [19:0] code
     );
-        logic [19:0] high;
+        logic  [4:0] high5;
         logic  [1:0] rem3;
+        logic [19:0] low;
+        // One AND against the stored mask -- no shifter.
+        low = code & cfg.gfx_code_mask;
         if (!cfg.gfx_code_mul3) begin
-            wrap_code_cfg = 18'(code & ((20'd1 << cfg.gfx_code_k) - 20'd1));
+            wrap_code_cfg = 18'(low);
         end
         else begin
-            high = code >> cfg.gfx_code_k;
-            rem3 = 2'(high % 20'd3);
-            wrap_code_cfg = 18'((20'(rem3) << cfg.gfx_code_k) |
-                                (code & ((20'd1 << cfg.gfx_code_k) - 20'd1)));
+            // The only remaining variable shifts. Truncating to 5 bits BEFORE
+            // the mod is the whole point: it turns a 20-bit divide into a
+            // 32-entry lookup.
+            high5 = 5'(code >> cfg.gfx_code_k);
+            rem3  = mod3_5(high5);
+            wrap_code_cfg = 18'(low | (20'(rem3) << cfg.gfx_code_k));
         end
     endfunction
 

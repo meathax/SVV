@@ -84,6 +84,9 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
         gfx_mb:             cfg_raw[3][5:0],
         gfx_code_k:         cfg_raw[4][4:0],
         gfx_code_mul3:      cfg_raw[5][0],
+        // Derived here, ONCE, rather than in the wrap. As a variable shift in
+        // the wrap it cost -12.7 ns on the path to the SDRAM address.
+        gfx_code_mask:      (20'd1 << cfg_raw[4][4:0]) - 20'd1,
         gfx_quarters:       cfg_raw[6][2:0],
         bank_map:           cfg_raw[7],
         bank_valid:         cfg_raw[8][3:0],

@@ -51,6 +51,11 @@ function automatic ssv_cfg_t cfg_for(input int unsigned k, input bit mul3);
     ssv_cfg_t c = cfg_dynagear();
     c.gfx_code_k    = 5'(k);
     c.gfx_code_mul3 = mul3;
+    // gfx_code_mask is DERIVED from k and must move with it. Leaving it at
+    // cfg_dynagear()'s k=17 value while sweeping k made 3615 of these checks
+    // fail -- which is the bench doing its job, since a real cfg block that
+    // disagreed with its own k would corrupt every tile address.
+    c.gfx_code_mask = (20'd1 << k) - 20'd1;
     return c;
 endfunction
 
