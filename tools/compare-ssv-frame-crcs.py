@@ -43,7 +43,21 @@ def main() -> int:
         default=0,
         help="Skip the first N frame records on both sides",
     )
+    parser.add_argument(
+        "--min-frames",
+        type=int,
+        default=0,
+        help="Fail unless at least N frames were actually compared "
+        "(0 = derive from --max-frames, or 1)",
+    )
     args = parser.parse_args()
+
+    # A stream that ends early used to print PASS and exit 0, so an empty or
+    # truncated MAME capture passed the gate silently -- and the gameplay gate
+    # invokes this with --max-frames 1, where "no frames at all" is exactly the
+    # case that looked like success. Compare-nothing is now a failure: running
+    # out of records before `required` is reached is TRUNCATED, not PASS.
+    required = args.min_frames or args.max_frames or 1
 
     count = 0
     skipped = 0
@@ -56,11 +70,23 @@ def main() -> int:
         try:
             m_record = next(mame)
         except StopIteration:
+            if count < required:
+                print(
+                    f"TRUNCATED {args.mame}: compared {count} frames, "
+                    f"need {required} (skipped {skipped})"
+                )
+                return 1
             print(f"PASS: all {count} MAME frames match RTL (skipped {skipped})")
             return 0
         try:
             r_record = next(rtl)
         except StopIteration:
+            if count < required:
+                print(
+                    f"TRUNCATED {args.rtl}: compared {count} frames, "
+                    f"need {required} (skipped {skipped})"
+                )
+                return 1
             print(f"PASS: {count} available RTL frames match MAME (skipped {skipped})")
             return 0
 

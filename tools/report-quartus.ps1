@@ -202,3 +202,14 @@ else {
 if ($RequireReady -and -not $ready) {
     exit 1
 }
+
+# Explicit success exit, so $LASTEXITCODE is meaningful to callers.
+#
+# Without this the script simply fell off the end, and PowerShell only sets
+# $LASTEXITCODE for NATIVE executables -- so on success it kept whatever value
+# was already there. Both callers test `if ($LASTEXITCODE -ne 0) { throw }`:
+# tools/deploy-ssv.ps1 in a fresh session saw $null and refused to deploy a
+# perfectly good RBF, while tools/build-ssv.ps1 only passed because quartus_sh
+# had set 0 earlier in the same session. The latter is the dangerous half -- that
+# gate would also have "passed" had this script exited 1.
+exit 0
