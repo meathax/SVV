@@ -1,6 +1,30 @@
 # Phase 9 — ST010 (NEC uPD96050): interface specification
 
-**Status: specification only. No RTL written.**
+**Status: implemented. Core + 258-check test suite in place, not yet integrated.**
+
+> ### TWO CORRECTIONS to the first version of this spec
+>
+> **1. The M10K figure was wrong by ~10x.** This said the 16K x 24 program ROM
+> was "~5 M10K". It is **48**. 16384 x 24 = 393,216 bits and an M10K holds
+> 10,240 **bits**, not 10 KB -- I confused Kbit with KB. At the x10 aspect that
+> is 16 blocks deep x 3 lanes = 48. This is the fact that decides Phase 9, and
+> getting it wrong made the job look ~10x cheaper than it is.
+>
+> **2. The `$482000` translation below was a misreading of MAME.** "CPU byte
+> offset n addresses word n/2, high byte when n is odd" is only true if n is
+> MAME's *handler* offset, not the CPU address. With `umask16(0x00ff)` on a
+> 16-bit bus the handler sees one unit per word, so `offset = A[11:1]`, and
+> therefore:
+>
+> ```
+> DSP word  = A[11:2]      only 1024 of the 2048 words are CPU-visible
+> high byte = A[1]         NOT A[0]
+> lane      = D[7:0]       the EVEN byte (the V60 is little-endian)
+> ```
+>
+> Cross-checked against the driver's own comment: `$482022-$482023` is
+> "direction", which lands on offset 0x11 = word 8, high byte. Words
+> 0x400-0x7FF are DSP-private.
 
 This is the bounded first deliverable the plan asks for. It pins down the
 interface precisely, so the implementation (or the decision not to implement)
