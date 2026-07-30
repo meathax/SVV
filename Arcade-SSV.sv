@@ -332,8 +332,34 @@ ssv_rom_loader loader (
     .sdr_wr_req(ld_wr_req), .sdr_wr_addr(ld_wr_addr),
     .sdr_wr_din(ld_wr_din), .sdr_wr_be(ld_wr_be),
     .sdr_wr_ack(ld_wr_ack), .rom_loaded(rom_loaded),
-    .download_max_addr(download_max_addr)
+    .download_max_addr(download_max_addr),
+    // Second destination for the "dspdata" half of st010.bin: the DSP's
+    // on-chip 2048 x 16 data ROM.
+    .st010_drom_we(ld_st010_drom_we),
+    .st010_drom_wa(ld_st010_drom_wa),
+    .st010_drom_wd(ld_st010_drom_wd)
 );
+
+// ST010 (uPD96050) daughterboard, for drifto94 / stmblade / twineag2.
+//
+// These were left unconnected when the DSP was integrated into ssv_core: the
+// SDRAM p5 port was tied off below and the core instance simply omitted these
+// ports, so on hardware the DSP's data ROM was never written and its program
+// fetches could never be acked. Simulation did not catch it because the
+// frame-CRC bench drives ssv_core directly and never elaborates this wrapper.
+//
+// Everything here is inert for a title without the daughterboard: ssv_core
+// holds sdr_p5_req at 0 unless cfg.has_st010, and the loader only raises
+// st010_drom_we for stream bytes inside st010.bin, which such a title never
+// sends.
+wire        core_p5_req;
+wire [SDR_AW:3] core_p5_addr;
+wire [63:0] p5_dout;
+wire        p5_ack;
+
+wire        ld_st010_drom_we;
+wire [10:0] ld_st010_drom_wa;
+wire [15:0] ld_st010_drom_wd;
 
 wire core_p0_req;
 wire [SDR_AW:1] core_p0_addr;
@@ -433,7 +459,10 @@ sdram #(
     .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
     .p3_req(1'b0), .p3_addr('0), .p3_dout(), .p3_ack(),
     .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack),
-    .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
+    // p5 is LAST in the controller's round-robin chain, so an ST010 program
+    // fetch can never delay the graphics fetcher or the sample engine.
+    .p5_req(core_p5_req), .p5_addr(core_p5_addr),
+    .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
 // MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Test,Service,Start,Coin
@@ -554,6 +583,12 @@ ssv_core core (
     .sdr_wr_ack(core_wr_ack),
     .sdr_p4_req(p4_req), .sdr_p4_addr(p4_addr),
     .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
+    // ST010: program fetch over p5, data ROM loaded by ssv_rom_loader.
+    .sdr_p5_req(core_p5_req), .sdr_p5_addr(core_p5_addr),
+    .sdr_p5_dout(p5_dout), .sdr_p5_ack(p5_ack),
+    .st010_drom_we(ld_st010_drom_we),
+    .st010_drom_wa(ld_st010_drom_wa),
+    .st010_drom_wd(ld_st010_drom_wd),
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
     .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
     .in_system(system_port),
