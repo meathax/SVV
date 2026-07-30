@@ -181,18 +181,25 @@ endtask
 // will accept index-0 bytes -- without it cfg_valid stays low, index 0 is
 // discarded and rom_loaded never asserts (which is exactly how this bench
 // caught the new requirement). Send the Dyna Gear record first.
+// The bytes mra/Dyna Gear.mra ships, verbatim, rather than hand-built values.
+// This task previously restated them and carried the stale v1 form (bank_map
+// 0xE4, flags0 0x00, no samples_mb), which the loader now rejects outright --
+// version 2 is required because a v1 block has no sample size and would put the
+// st010 block on top of the samples.
+localparam logic [127:0] CFG_DYNAGEAR = 128'h53020110110003000404010004000079;
+
 task automatic send_cfg;
     logic [7:0] b [0:15];
     logic [7:0] sum;
     int i;
     begin
-        b[0]=8'h53; b[1]=8'd1;  b[2]=8'd1;  b[3]=8'd16;
-        b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'b11_10_01_00;
-        b[8]=8'b0000_0100;      b[9]=8'd0;  b[10]=8'd1; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd0; b[14]=8'd0;
+        for (i = 0; i < 16; i = i + 1)
+            b[i] = CFG_DYNAGEAR[(15 - i) * 8 +: 8];
         sum = 8'd0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
-        b[15] = -sum;
+        if (b[15] !== ((-sum) & 8'hFF))
+            $fatal(1, "cfg literal checksum %h, computed %h",
+                   b[15], (-sum) & 8'hFF);
         ioctl_index = 8'd1;
         for (i = 0; i < 16; i = i + 1) send_byte(27'(i), b[i]);
         ioctl_index = 8'd0;
