@@ -67,8 +67,9 @@ non-overlap**, because a bank-separated map is deliberately not ascending and
 contiguous. Rule 5 now bounds both graphics and samples against
 `SDR_TOTAL_BYTES` (128 MB).
 
-High-water is 100 MB, which leaves room for the nine-game worst case (44.4 MB of
-real data spread across banks).
+High-water is 104 MB once the slots are sized for the worst case across the
+nine titles (4 MB program, 32 MB graphics, 8 MB samples), against 44.4 MB of
+actual data in the largest set.
 
 ## Verification
 
@@ -96,12 +97,26 @@ What *is* asserted:
 
 ## Still open
 
-- **tRFC and the refresh period have not been read off the fitted part.**
-  `TRFC_CYC` is set to a conservative 11 (~114 ns, ~1.6 % of the bus at one
-  refresh per 700 cycles) and `REF_CYC` is 700, correct for 8192 rows / 64 ms.
-  If the part is 16384 rows / 64 ms, `REF_CYC` must halve to 350. **This is the
-  most likely silent-corruption bug in the retarget and it is a datasheet
-  lookup, not a simulation.**
+- ~~tRFC and the refresh period have not been read off the fitted part.~~
+  **CLOSED, by deduction rather than datasheet.**
+
+  The open risk was the row count: if the part had 16384 rows / 64 ms, a 700-cycle
+  refresh interval would have been too slow, and that failure is silent bit rot
+  rather than a hang. But the row count is not a free variable. The DE10-Nano
+  routes only `SDRAM_A[12:0]` and `SDRAM_BA[1:0]`, so 128 MB is reachable ONLY as
+  4 banks x 8192 rows x 2048 columns -- 8 banks needs `BA[2]`, 16384 rows needs
+  `A[13]`, neither exists. **Any 128 MB part that works on this pinout at all has
+  8192 rows**, so the requirement is fixed at 8192 / 64 ms = one REF every
+  7.8125 us.
+
+  | | value | requirement | margin |
+  |---|---|---|---|
+  | `REF_CYC` 700 | 7.2428 us | <= 7.8125 us | **7.3 %** |
+  | `TRFC_CYC` 11 | 12 cycles = 124.2 ns | >= 110 ns (120 ns worst common) | **13 %** |
+
+  Refresh costs about 2 % of the bus. Both values are chosen to be safe for any
+  plausible 1 Gbit part rather than tuned to one; a part number would only let us
+  tighten them, and there is no correctness risk in not having it.
 - **No `sdram_sz` gate** (explicit decision). A user with a 32 MB module gets
   silent 4:1 aliasing that looks like corrupt graphics rather than an error.
   The remedy, if it ever matters, is the power-on aliasing self-test — the

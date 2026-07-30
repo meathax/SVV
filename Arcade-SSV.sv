@@ -396,10 +396,15 @@ assign core_wr_ack = loader_owns_write ? 1'b0 : sw_ack;
 // 4 banks x 8192 rows x 2048 columns. COL_BITS 11 makes the controller's word
 // address 26 bits, matching ssv_pkg::SDR_AW.
 //
-// TRFC_CYC is deliberately conservative until the fitted part's datasheet is
-// read: a tRFC violation is silent bit rot, not a hang, so the safe direction
-// is to wait too long rather than too little. 11 cycles = ~114 ns costs ~1.6%
-// of the bus at one refresh per 700 cycles.
+// TRFC_CYC = 11 gives 12 cycles = 124.2 ns, which covers the 110 ns typical of
+// 1 Gbit SDR SDRAM and the 120 ns some parts specify -- safe for any plausible
+// part rather than tuned to one, because over-waiting costs ~2% of the bus and
+// under-waiting is silent bit rot.
+//
+// REF_CYC keeps its default 700 (7.24 us). That is provably correct without a
+// datasheet: the pinout routes only A[12:0] and BA[1:0], so 128 MB is reachable
+// only as 4 banks x 8192 rows x 2048 columns, which fixes the row count at
+// 8192 and the refresh requirement at 7.8125 us. See rtl/mem/sdram.sv.
 sdram #(
     .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11), .TRFC_CYC(11)
 ) sdram (

@@ -36,11 +36,30 @@ module sdram #(
     parameter int BANK_BITS = 2,
     parameter int ROW_BITS  = 13,
     parameter int COL_BITS  = 9,
-    // tRFC in clk_ram cycles, minus one (loaded into refw_cnt). Denser parts
-    // want ~110 ns = 11 cycles; the previous hardcoded 3'd6 could not even
-    // express that, which is why this is a parameter and refw_cnt is 4 bits.
+    // tRFC in clk_ram cycles, minus one (loaded into refw_cnt; the machine
+    // waits TRFC_CYC+1). The previous hardcoded 3'd6 gave 7 cycles = 72 ns,
+    // fine for a 256 Mbit part and NOT fine for a 1 Gbit one, and refw_cnt was
+    // 3 bits so it could not even express the larger value.
+    //
+    // TRFC_CYC = 11 -> 12 cycles = 124.2 ns at 96.648 MHz, which covers the
+    // 110 ns typical of 1 Gbit SDR SDRAM and the 120 ns some parts specify.
+    // Chosen to be safe for any plausible part rather than tuned to one, since
+    // over-waiting costs a fraction of a percent of the bus and under-waiting
+    // is silent bit rot.
     parameter int TRFC_CYC  = 6,
-    // Refresh interval. 8192 rows / 64 ms at 96.6 MHz -> every ~755 cycles.
+    // Refresh interval, in clk_ram cycles.
+    //
+    // THE ROW COUNT IS NOT A FREE VARIABLE, which is what makes this provably
+    // safe without a datasheet. Only SDRAM_A[12:0] and SDRAM_BA[1:0] are
+    // routed on the DE10-Nano, so a 128 MB part is reachable ONLY as
+    // 4 banks x 8192 rows x 2048 columns:
+    //   8 banks x 8192 x 1024 would need BA[2] -- not routed
+    //   4 banks x 16384 x 1024 would need A[13] -- not routed
+    // So the part has 8192 rows and must be fully refreshed every 64 ms, i.e.
+    // one REF command every 7.8125 us.
+    //
+    // REF_CYC = 700 -> 7.2428 us, a 7.3% margin. Refresh then costs about 2%
+    // of the bus (12 tRFC cycles plus ~2 for the PRE-all, per 700).
     parameter int REF_CYC   = 700
 ) (
     input             clk,          // clk_ram
