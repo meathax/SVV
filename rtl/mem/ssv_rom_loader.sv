@@ -54,14 +54,20 @@ logic       index0_seen;
 // Per-game configuration, MRA <rom index="1">, 16 bytes little-endian.
 //
 //   0  magic 'S' (0x53)      8  bank_valid
-//   1  version (1)           9  flags0: b0 tile_code_identity
+//   1  version (2)           9  flags0: b0 tile_code_identity
 //   2  prog_mb                        b1 irq_level1_line0
 //   3  gfx_mb                         b2 has_add_buttons
 //                                     b3 has_st010
 //   4  gfx_code_k           10  wdog_mode
 //   5  gfx_code_mul3        11  game_id
-//   6  gfx_quarters         12..14 reserved (0)
-//   7  bank_map             15  checksum: bytes 0..14 summed, negated
+//   6  gfx_quarters         12  samples_mb   (version 2)
+//   7  bank_map             13..14 reserved (0)
+//                           15  checksum: bytes 0..14 summed, negated
+//
+// Version 2 added byte 12, samples_mb. Version 1 blocks are REJECTED rather
+// than defaulted: a v1 block carries 0 there, and a zero sample size would put
+// the st010 block on top of the samples. Rejecting is the same no-fallback rule
+// the magic and checksum enforce.
 //
 // The block MUST precede <rom index="0"> in the MRA, because index-0 bytes
 // cannot be placed without knowing the layout. A mis-ordered or malformed
@@ -88,6 +94,7 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
         // the wrap it cost -12.7 ns on the path to the SDRAM address.
         gfx_code_mask:      (20'd1 << cfg_raw[4][4:0]) - 20'd1,
         gfx_quarters:       cfg_raw[6][2:0],
+        samples_mb:         cfg_raw[12][3:0],
         bank_map:           cfg_raw[7],
         bank_valid:         cfg_raw[8][3:0],
         tile_code_identity: cfg_raw[9][0],
@@ -98,19 +105,74 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
     };
 endfunction
 
+// ---------------------------------------------------------------------------
+// PER-GAME STREAM MAP.
+//
+// These were STREAM_* localparams holding Dyna Gear's geometry, so no other set
+// could load: the graphics quarter stride was hardwired to 4 MB via
+// gfx_offset[23:22], gfx_offset itself was 24 bits and so wrapped at 16 MB
+// (fatal for Vasara's 32 MB region), and index-0 writes were clipped at
+// STREAM_END = 0x1111000, which silently truncated Vasara's 44 MB stream at 39%.
+//
+// Everything below is computed ONCE, when the config block validates, and held
+// in registers. That matters for two reasons:
+//
+//  * The quarter stride is gfx_mb<<18 -- 2, 3, 4, 6 or 8 MB across the family.
+//    3 MB and 6 MB are not powers of two, so recovering the quarter index by
+//    arithmetic would need a divide. Instead the three quarter boundaries are
+//    precomputed and the lookup is three compares and one subtract. A variable
+//    shifter on this exact path cost -12.7 ns once already (commit 2b44914);
+//    a divider here would be worse.
+//  * ioctl_addr is combinational into the SDRAM write address, so nothing here
+//    may depend on the order bytes arrive.
+// ---------------------------------------------------------------------------
+logic [26:0] str_gfx_base, str_samp_base, str_st010_base, str_end;
+logic [26:0] qtr_size, qtr_base1, qtr_base2, qtr_base3;
+
+always_comb begin
+    // Region sizes straight out of the record.
+    qtr_size       = 27'(cfg.gfx_mb) << 18;            // region / 4
+    qtr_base1      = qtr_size;
+    qtr_base2      = qtr_size + qtr_size;
+    qtr_base3      = qtr_base2 + qtr_size;
+    str_gfx_base   = 27'(cfg.prog_mb) << 20;
+    // quarters is 3 or 4, so this is a select, not a multiplier.
+    str_samp_base  = str_gfx_base +
+                     ((cfg.gfx_quarters == 3'd4) ? (qtr_base3 + qtr_size)
+                                                 : qtr_base3);
+    str_st010_base = str_samp_base + (27'(cfg.samples_mb) << 20);
+    str_end        = str_st010_base +
+                     (cfg.has_st010 ? STREAM_ST010_SIZE : 27'd0);
+end
+
 function automatic logic [SDR_AW:0] stream_byte_address(
     input logic [26:0] stream_addr
 );
-    logic [23:0] gfx_offset;     // 0 .. 0xBFFFFF within the graphics stream
-    logic [21:0] within_quarter; // byte offset inside one 4 MiB quarter
-    logic  [1:0] quarter;        // 0=Q0 1=Q1 2=Q2  (Q3 absent on dynagear)
+    logic [26:0] gfx_offset;     // 0 .. 32 MB within the graphics stream
+    logic [26:0] within_quarter; // byte offset inside one quarter
+    logic  [1:0] quarter;        // which MAME graphics quarter
     begin
-        gfx_offset     = stream_addr[23:0] - STREAM_SPRITES[23:0];
-        within_quarter = gfx_offset[21:0];
-        quarter        = gfx_offset[23:22];
+        gfx_offset = stream_addr - str_gfx_base;
+        // Three compares against precomputed boundaries -- no divide.
+        if (gfx_offset >= qtr_base3) begin
+            quarter        = 2'd3;
+            within_quarter = gfx_offset - qtr_base3;
+        end
+        else if (gfx_offset >= qtr_base2) begin
+            quarter        = 2'd2;
+            within_quarter = gfx_offset - qtr_base2;
+        end
+        else if (gfx_offset >= qtr_base1) begin
+            quarter        = 2'd1;
+            within_quarter = gfx_offset - qtr_base1;
+        end
+        else begin
+            quarter        = 2'd0;
+            within_quarter = gfx_offset;
+        end
 
-        if ((stream_addr >= STREAM_SPRITES) &&
-            (stream_addr <  STREAM_SPRITES + STREAM_GFX_SIZE)) begin
+        if ((stream_addr >= str_gfx_base) &&
+            (stream_addr <  str_samp_base)) begin
             // All THREE populated quarters collapse into one aligned 16-byte
             // record per 16-pixel tile row, so the row fetcher gets a whole
             // row from a single 128-bit p2 burst. Bytes 12..15 of every record
@@ -129,23 +191,27 @@ function automatic logic [SDR_AW:0] stream_byte_address(
             // it. If a second SSV title ever decodes with scrambled graphics
             // under this same loader, this function is the first thing to
             // suspect.
+            // 18-bit tile code: a quarter is up to 8 MB (32 MB region / 4), so
+            // the code field is within_quarter[22:5]. It was [21:5] when the
+            // quarter was hardwired to 4 MB, which is one bit short for every
+            // 32 MB title.
             stream_byte_address = gfx_plane_addr(
-                within_quarter[21:5],   // tile code
+                within_quarter[22:5],   // tile code
                 within_quarter[4:2],    // row within the tile
                 quarter,
                 within_quarter[1:0]     // byte within the 32-bit row
             );
         end
-        else if (stream_addr >= STREAM_ST010) begin
+        else if (stream_addr >= str_st010_base) begin
             // st010.bin, placed contiguously in the free bank 2. MUST be tested
             // before the sample branch below, which is an open-ended `>=`.
-            stream_byte_address = st010_stream_dest(stream_addr);
+            stream_byte_address = st010_stream_dest(stream_addr, str_st010_base);
         end
-        else if (stream_addr >= STREAM_SAMPLES) begin
+        else if (stream_addr >= str_samp_base) begin
             // The sample region no longer sits at its stream offset: the
             // graphics records displaced it above XRAM and CPU RAM.
             stream_byte_address = SDR_SAMPLES_BASE +
-                                  (stream_addr[SDR_AW:0] - STREAM_SAMPLES[SDR_AW:0]);
+                                  (stream_addr[SDR_AW:0] - str_samp_base[SDR_AW:0]);
         end
         else begin
             stream_byte_address = stream_addr[SDR_AW:0];  // V60 program, identity
@@ -160,8 +226,12 @@ wire [SDR_AW:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
 // { rom[2i], rom[2i+1] } -- the OPPOSITE order from the little-endian pairing
 // the SDRAM path uses, which is why wd is {byte_lo, ioctl_dout} and not
 // {ioctl_dout, byte_lo}.
-wire st010_data_byte = (ioctl_addr >= STREAM_ST010 + ST010_DATA_OFFSET) &&
-                       (ioctl_addr <  STREAM_ST010 + STREAM_ST010_SIZE);
+// Per-game st010 window. Also gated on has_st010 so a set without the
+// daughterboard can never write the DSP data ROM even if str_st010_base happens
+// to coincide with the end of its stream.
+wire st010_data_byte = cfg.has_st010 &&
+                       (ioctl_addr >= str_st010_base + ST010_DATA_OFFSET) &&
+                       (ioctl_addr <  str_st010_base + STREAM_ST010_SIZE);
 
 assign ioctl_wait = busy | ~mem_ready;
 
@@ -203,13 +273,17 @@ always_ff @(posedge clk) begin
             cfg_sum = 8'd0;
             for (int i = 0; i < CFG_BYTES - 1; i++)
                 cfg_sum = cfg_sum + cfg_raw[i];
-            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd1) &&
+            // Version 2. A v1 block carries 0 in byte 12, and a zero
+            // samples_mb would place the st010 block on top of the samples, so
+            // an old block is rejected rather than defaulted -- same rule as the
+            // magic and the checksum.
+            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd2) &&
                          (cfg_raw[CFG_BYTES-1] == (-cfg_sum));
             cfg <= cfg_decode();
         end
 
         if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&
-            ioctl_index == 8'd0 && ioctl_addr < STREAM_END) begin
+            ioctl_index == 8'd0 && ioctl_addr < str_end) begin
             if (ioctl_addr > download_max_addr)
                 download_max_addr <= ioctl_addr;
             if (!ioctl_addr[0])
@@ -224,7 +298,7 @@ always_ff @(posedge clk) begin
                 // byte_lo (the EVEN stream byte) is the HIGH half of the word.
                 if (st010_data_byte) begin
                     st010_drom_we <= 1'b1;
-                    st010_drom_wa <= st010_drom_word(ioctl_addr);
+                    st010_drom_wa <= st010_drom_word(ioctl_addr, str_st010_base);
                     st010_drom_wd <= {byte_lo, ioctl_dout};
                 end
             end

@@ -8,7 +8,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010420120004040300000F0000005C</part>
+    <part>53020420120004040300000F08000053</part>
   </rom>
   <rom index="0" zip="janjans2.zip">
     <!-- program -->

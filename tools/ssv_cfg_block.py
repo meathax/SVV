@@ -57,6 +57,30 @@ import re
 # ---------------------------------------------------------------------------
 
 
+def region_extent(region):
+    """Bytes one MAME ROM_REGION occupies in the MRA stream.
+
+    Not the sum of the ROM_LOAD sizes. An unpaired ROM_LOAD16_BYTE fills one
+    lane of a 16-bit region, so it spans TWICE its file size with the other lane
+    zero -- which is exactly what gen_ssv_mras.py emits as a single-part
+    interleave. Several SSV sets load their ensoniq ROMs that way, so their
+    sample region is 8 MB of stream for 4 MB of files.
+
+    Shared by gen_ssv_mras.py (which writes samples_mb into the config block)
+    and make-sim-stream.py (which builds the matching image). Two copies of this
+    rule that disagreed would put the st010 block at two different offsets, and
+    that is the "wrong ROM load offset" fake bug CLAUDE.md warns about.
+    """
+    end = 0
+    for ld in region.get('loads', []):
+        off, size = ld['offset'], ld['size']
+        if ld['kind'] == 'ROM_LOAD16_BYTE':
+            end = max(end, off - (off % 2) + 2 * size)
+        else:
+            end = max(end, off + size)
+    return end
+
+
 def decompose_tiles(tiles):
     """tiles -> (k, mul3), where tiles == (3 << k) or (1 << k).
 
@@ -181,20 +205,35 @@ def has_st010(regions):
 
 
 def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_loaded,
-                    ens_valid, ens_map, flags, wdog):
-    """Assemble the 16-byte block. Raises if a field will not fit."""
+                    ens_valid, ens_map, flags, wdog, samples_size=0):
+    """Assemble the 16-byte block. Raises if a field will not fit.
+
+    samples_size is the SAMPLE REGION extent in the MRA stream, not the sum of
+    the ROM_LOAD sizes. The two differ: several sets load their ensoniq ROMs as
+    unpaired ROM_LOAD16_BYTE into a 16-bit region, so the region is twice the
+    file bytes with one lane zero (ultrax, vasara, drifto94, twineag2 are 8 MB
+    of region for 4 MB of files). The loader needs the region extent, because
+    that is what tells it where the samples end and the st010 block begins.
+    """
     k, mul3 = decompose_tiles(gfx_region // 128)
     quarters = 4 if gfx_loaded >= gfx_region else 3
     prog_mb = prog_size >> 20
     gfx_mb = gfx_region >> 20
+    samples_mb = samples_size >> 20
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
     if gfx_mb > 63:
         raise ValueError("graphics region %d MB does not fit gfx_mb" % gfx_mb)
+    if samples_mb > 15:
+        raise ValueError("sample region %d MB does not fit samples_mb"
+                         % samples_mb)
+    if samples_size and (samples_size & 0xFFFFF):
+        raise ValueError("sample region %d bytes is not a whole MB"
+                         % samples_size)
 
     b = [0] * 16
     b[0] = 0x53                 # magic 'S'
-    b[1] = 1                    # version
+    b[1] = 2                    # version 2 added byte 12, samples_mb
     b[2] = prog_mb
     b[3] = gfx_mb
     b[4] = k
@@ -208,6 +247,7 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_loaded,
             (8 if flags.get("has_st010") else 0))
     b[10] = wdog & 0x03
     b[11] = game_id & 0x0F
+    b[12] = samples_mb & 0x0F
     b[15] = (-sum(b[:15])) & 0xFF
     return b
 

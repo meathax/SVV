@@ -46,8 +46,13 @@ state_t state;
 // though the simulator accepts it. Naming the result keeps both toolchains
 // happy. (A comment line may not begin with the simulator's name either --
 // that is read as a lint pragma.)
+// 18 bits, not 17. wrap_code_cfg already returns 18, and a 0x40000-tile title
+// (any 32 MB sprite region: cairblad, drifto94, vasara, vasara2) uses all of
+// them. The old 17'(...) cast silently folded the upper half of tile space onto
+// the lower half; Dyna Gear's 0x20000 tiles fit 17 bits exactly, so it was the
+// one title that could not show the fault.
 wire [SDR_AW:0] start_record_addr =
-    gfx_record_addr(17'(wrap_code_cfg(cfg, tile_code)), tile_row);
+    gfx_record_addr(wrap_code_cfg(cfg, tile_code), tile_row);
 
 always_ff @(posedge clk) begin
     if (rst) begin

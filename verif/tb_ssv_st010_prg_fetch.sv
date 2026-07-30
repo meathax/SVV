@@ -63,6 +63,12 @@ logic [7:0] rom [0:4*NINSN-1];
 // controller's ports are.
 logic [15:0] mem16 [logic [SDR_AW:1]];
 
+// Drift Out '94's st010 stream base: 4 MB program + 32 MB graphics + 8 MB
+// samples. Stated as the sum so it reads as the layout it is.
+localparam logic [26:0] ST010_STREAM_BASE = 27'h0400000
+                                          + 27'h2000000
+                                          + 27'h0800000;
+
 initial begin
     int i, k;
     logic [SDR_AW:0] dest;
@@ -70,8 +76,16 @@ initial begin
         rom[i] = 8'((i * 7) + 3);
     // Byte pair k -> one 16-bit word, packed little-endian by the loader
     // (sdr_wr_din = {odd byte, even byte}), at the loader's own destination.
+    //
+    // The st010 block's stream base is now per-game -- it sits behind that
+    // set's program, graphics and samples -- so st010_stream_dest takes it as an
+    // argument. Which base is used is immaterial to this bench: it cancels out,
+    // because the same value is passed here and the fetch path addresses
+    // SDR_ST010_BASE relative. Drift Out '94's is used so the number is a real
+    // one rather than invented.
     for (k = 0; k < 2*NINSN; k++) begin
-        dest = st010_stream_dest(STREAM_ST010 + 27'(2*k));
+        dest = st010_stream_dest(ST010_STREAM_BASE + 27'(2*k),
+                                 ST010_STREAM_BASE);
         mem16[dest[SDR_AW:1]] = {rom[2*k+1], rom[2*k]};
     end
 end

@@ -8,7 +8,7 @@
   <manufacturer>American Sammy</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010118100103000404010F00000067</part>
+    <part>53020118100103000404010F04000062</part>
   </rom>
   <rom index="0" zip="survartsu.zip|survarts.zip">
     <!-- program -->

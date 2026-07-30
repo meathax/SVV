@@ -8,7 +8,7 @@
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010108100004000400010F0000007B</part>
+    <part>53020108100004000400010F04000076</part>
   </rom>
   <rom index="0" zip="meosism.zip">
     <!-- program -->

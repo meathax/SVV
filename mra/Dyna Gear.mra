@@ -8,7 +8,7 @@
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>5301011011000300040401000000007E</part>
+    <part>53020110110003000404010004000079</part>
   </rom>
   <rom index="0" zip="dynagear.zip">
     <!-- program -->

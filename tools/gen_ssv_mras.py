@@ -448,10 +448,14 @@ def main():
                 cfgblk.has_add_buttons(src, amap) if amap else False)
             wdog = cfgblk.watchdog_mode(src, amap) if amap else 0
             flags['has_st010'] = cfgblk.has_st010(regions)
+            # Sample-region EXTENT, via the shared helper, not the sum of load
+            # sizes: an unpaired ROM_LOAD16_BYTE spans twice its file size.
+            samples_size = sum(cfgblk.region_extent(r) for r in samp
+                               if r['loads'])
             cfg_bytes = cfgblk.build_cfg_bytes(
                 SUPPORTED.index(setname) if setname in SUPPORTED else 15,
                 prog_size, gfx_region, gfx_loaded,
-                ens_valid, ens_map, flags, wdog)
+                ens_valid, ens_map, flags, wdog, samples_size)
         except Exception as exc:
             # A set whose geometry this core cannot describe gets no config
             # block, so the loader refuses it outright rather than running on

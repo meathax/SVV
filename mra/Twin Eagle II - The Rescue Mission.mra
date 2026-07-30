@@ -10,7 +10,7 @@
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
-    <part>53010218100103440F0A010F00000011</part>
+    <part>53020218100103440F0A010F08000008</part>
   </rom>
   <rom index="0" zip="twineag2.zip">
     <!-- program -->

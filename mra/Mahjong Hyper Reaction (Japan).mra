@@ -8,7 +8,7 @@
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010118100103000400010F0000006B</part>
+    <part>53020118100103000400010F04000066</part>
   </rom>
   <rom index="0" zip="hypreact.zip">
     <!-- program -->

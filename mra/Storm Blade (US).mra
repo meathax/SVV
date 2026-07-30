@@ -9,7 +9,7 @@
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
-    <part>53010418100103000108000F00000064</part>
+    <part>53020418100103000108000F0400005F</part>
   </rom>
   <rom index="0" zip="stmblade.zip">
     <!-- program -->

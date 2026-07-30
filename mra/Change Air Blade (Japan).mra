@@ -9,7 +9,7 @@
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
-    <part>53010220120003000101010F00000063</part>
+    <part>53020220120003000101010F0400005E</part>
   </rom>
   <rom index="0" zip="cairblad.zip">
     <!-- program -->

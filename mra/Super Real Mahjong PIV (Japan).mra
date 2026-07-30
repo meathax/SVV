@@ -8,7 +8,7 @@
   <manufacturer>Seta</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010118100103000100010F0000006E</part>
+    <part>53020118100103000100010F04000069</part>
   </rom>
   <rom index="0" zip="srmp4.zip">
     <!-- program -->

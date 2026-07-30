@@ -11,7 +11,7 @@
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
-    <part>5301020C0F0103440F02010F00000026</part>
+    <part>5302020C0F0103440F02010F0800001D</part>
   </rom>
   <rom index="0" zip="ultrax.zip">
     <!-- program -->

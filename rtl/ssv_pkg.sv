@@ -172,6 +172,13 @@ package ssv_pkg;
         // path from this record to the SDRAM address and cost -12.7 ns.
         logic [19:0] gfx_code_mask;
         logic [2:0] gfx_quarters;       // populated quarters: 3 or 4
+        // Sample-region bytes in the MRA stream, in MB. Needed because the
+        // loader has to know where the samples END to find the st010 block
+        // behind them, and that is not derivable from anything else in this
+        // record. Measured across the ten local sets it is 2, 4 or 8 -- 8 for
+        // ultrax/vasara/drifto94/twineag2, whose ensoniq regions are 16 bits
+        // wide with only one lane loaded, so the region is twice the file bytes.
+        logic [3:0] samples_mb;
         logic [7:0] bank_map;           // 2 bits per ES5506 CR bank
         logic [3:0] bank_valid;         // which CR banks carry data
         logic       tile_code_identity; // init_ssv_tilescram vs init_ssv
@@ -184,8 +191,29 @@ package ssv_pkg;
         logic [1:0] wdog_mode;          // 0 none, 1 read-kick, 2 write-kick
     } ssv_cfg_t;
 
-    // Dyna Gear (SAM-5127). Reproduces today's hardwired behaviour exactly, so
-    // it is the reference the generalisation is regression-tested against.
+    // Dyna Gear (SAM-5127). Reference record for the benches, and what the
+    // generalisation is regression-tested against.
+    //
+    // It MUST agree byte-for-byte with the block mra/Dyna Gear.mra actually
+    // ships (`<rom index="1">` 5301011011000300040401000000007E), because that
+    // is what the loader hands the core on hardware. Two fields disagreed and
+    // are corrected below; both were stale rather than deliberate, and the
+    // MRA -- machine-derived from MAME's ssv.cpp -- is the authority:
+    //
+    //   has_add_buttons  was 0, MRA byte 9 = 0x04. dynagear runs survarts_map
+    //                    (not a map named after the set), and that map does
+    //                    decode $500008, so the flag is 1. Nothing changes
+    //                    behaviourally: ssv_core decodes sel_extra
+    //                    unconditionally and the flag only picks the wrapper's
+    //                    in_extra source, which every bench drives as 16'hffff.
+    //
+    //   bank_map         was 8'b11_10_01_00 (identity, bank b -> slot b), MRA
+    //                    byte 7 = 0x00. Identity is wrong here: dynagear loads
+    //                    ONE sample blob and populates CR bank 2 only
+    //                    (bank_valid 4'b0100), so bank 2 must read the first
+    //                    loaded slot, 0 -- not slot 2. Inert today because no
+    //                    RTL consumes bank_map yet, and it has to be right
+    //                    before anything does.
     function automatic ssv_cfg_t cfg_dynagear();
         cfg_dynagear = '{
             game_id:            4'd0,
@@ -195,11 +223,12 @@ package ssv_pkg;
             gfx_code_mul3:      1'b0,
             gfx_code_mask:      20'h1FFFF, // (1<<17)-1
             gfx_quarters:       3'd3,    // quarter 3 never populated
-            bank_map:           8'b11_10_01_00,
+            samples_mb:         4'd4,    // 4 MB, ROM_LOAD16_WORD_SWAP
+            bank_map:           8'b00_00_00_00, // every bank -> loaded slot 0
             bank_valid:         4'b0100, // bank 2 only
             tile_code_identity: 1'b0,
             irq_level1_line0:   1'b0,
-            has_add_buttons:    1'b0,
+            has_add_buttons:    1'b1,  // survarts_map decodes $500008
             has_st010:          1'b0,
             wdog_mode:          2'd1     // read-kick at $210000
         };
@@ -252,18 +281,29 @@ package ssv_pkg;
     //
     // Widths are spelled out because a silent truncation here is the whole
     // bug. All four concatenations are 27 bits, matching SDR_AW+1:
-    //   {3'd0, code[16:0], 7'd0} = 27, {20'd0, row, 4'd0}     = 27,
+    //   {2'd0, code[17:0], 7'd0} = 27, {20'd0, row, 4'd0}     = 27,
     //   {23'd0, quarter, 2'd0}   = 27, {25'd0, byte_in_row}   = 27.
+    //
+    // CODE IS 18 BITS, NOT 17. Each code owns 128 bytes here (4 quarters x 8
+    // rows x 4 bytes), so the 32 MB SDR_GFX_SIZE holds exactly 0x40000 codes --
+    // and 0x40000 is what MAME's elements() comes to for the 32 MB sprite
+    // regions (cairblad, drifto94, vasara, vasara2, and the wider family sets).
+    // That needs 18 bits, which is also what wrap_code_cfg already returns.
+    //
+    // These took code[16:0] until 2026-07-30, and ssv_gfx_row_fetch cast the
+    // wrap result down with 17'(...), so on any 0x40000-tile title the upper
+    // half of tile space aliased onto the lower half. Dyna Gear has exactly
+    // 0x20000 tiles and fits 17 bits precisely, which is why nothing caught it.
     // -----------------------------------------------------------------------
     function automatic logic [SDR_AW:0] gfx_record_addr(
-        input logic [16:0] code, input logic [2:0] row
+        input logic [17:0] code, input logic [2:0] row
     );
-        gfx_record_addr = SDR_GFX_BASE + {3'd0, code, 7'd0}
+        gfx_record_addr = SDR_GFX_BASE + {2'd0, code, 7'd0}
                                        + {20'd0, row, 4'd0};
     endfunction
 
     function automatic logic [SDR_AW:0] gfx_plane_addr(
-        input logic [16:0] code, input logic [2:0] row,
+        input logic [17:0] code, input logic [2:0] row,
         input logic  [1:0] quarter, input logic [1:0] byte_in_row
     );
         gfx_plane_addr = gfx_record_addr(code, row)
@@ -280,11 +320,18 @@ package ssv_pkg;
     // Where an st010.bin stream byte lands in SDRAM. Identity offset inside the
     // region, so the image is contiguous and the "dspprg"/"dspdata" split is a
     // property of the READERS, not of the placement.
+    // st010_base is passed in rather than read from STREAM_ST010, because the
+    // block sits behind that game's program + graphics + samples and so lands at
+    // a different stream offset for every set (Storm Blade 0x1880000, Twin Eagle
+    // II 0x1C00000, Drift Out '94 0x2C00000). The loader computes it from the
+    // config record; STREAM_ST010 described Dyna Gear only, which has no ST010
+    // at all.
     function automatic logic [SDR_AW:0] st010_stream_dest(
-        input logic [26:0] stream_addr
+        input logic [26:0] stream_addr,
+        input logic [26:0] st010_base
     );
         st010_stream_dest = SDR_ST010_BASE +
-                            (stream_addr[SDR_AW:0] - STREAM_ST010[SDR_AW:0]);
+                            (stream_addr[SDR_AW:0] - st010_base[SDR_AW:0]);
     endfunction
 
     // Byte address of instruction `pc`. MAME's dspprg is a 32-bit big-endian
@@ -299,10 +346,11 @@ package ssv_pkg;
     // 2048-word on-chip data ROM index for an st010.bin stream byte in the
     // "dspdata" half. Two BYTES per word, big-endian.
     function automatic logic [10:0] st010_drom_word(
-        input logic [26:0] stream_addr
+        input logic [26:0] stream_addr,
+        input logic [26:0] st010_base
     );
         st010_drom_word =
-            (stream_addr[26:0] - (STREAM_ST010 + ST010_DATA_OFFSET)) >> 1;
+            (stream_addr[26:0] - (st010_base + ST010_DATA_OFFSET)) >> 1;
     endfunction
 
     // -----------------------------------------------------------------------

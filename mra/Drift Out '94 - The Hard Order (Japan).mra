@@ -8,7 +8,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010420120004040308000F00000054</part>
+    <part>53020420120004040308000F0800004B</part>
   </rom>
   <rom index="0" zip="drifto94.zip">
     <!-- program -->
