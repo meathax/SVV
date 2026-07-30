@@ -72,7 +72,11 @@ wire  [15:0] p0_dout;
 wire         p0_ack;
 
 logic        p1_req  = 1'b0;
-logic [24:3] p1_addr = '0;
+// [AW:3], not a hardcoded [24:3].  At CTL_COL_BITS=11 the controller port is
+// [26:3], so a 22-bit driver left the two BANK bits permanently zero and every
+// p1/p5 burst in this bench could only ever address bank 0 -- a coverage hole
+// that hid the burst ports' bank decode entirely.
+logic [AW:3] p1_addr = '0;
 wire  [63:0] p1_dout;
 wire         p1_ack;
 
@@ -92,7 +96,7 @@ wire  [15:0] p4_dout;
 wire         p4_ack;
 
 logic        p5_req  = 1'b0;
-logic [24:3] p5_addr = '0;
+logic [AW:3] p5_addr = '0;      // [AW:3] for the same reason as p1_addr above
 wire  [63:0] p5_dout;
 wire         p5_ack;
 
@@ -148,16 +152,41 @@ ssv_sdram_chip #(
 // ---------------------------------------------------------------------------
 int errors = 0;
 
-function automatic [15:0] pat(input [23:0] a);
+// Word address, [AW-1:0].  Bit 0 of these values lands on the controller's
+// a[1], so they are WORD addresses: col = a[CTL_COL_BITS-1:0],
+// row = a[CTL_COL_BITS+12:CTL_COL_BITS], bank = a[AW-1:AW-2].
+function automatic [15:0] pat(input [AW-1:0] a);
     // address-derived and distinct for every word, including neighbours
     pat = {a[7:0] ^ a[23:16], a[15:8] ^ 8'h5a} ^ 16'h1234;
 endfunction
 
-localparam int NG = 9;
-bit [23:0] grp [0:NG-1];
+// Distinct over EVERY address bit, including the bank field, which pat() above
+// ignores: at CTL_COL_BITS=11 the bank is a[25:24] and pat() only reaches
+// a[23:0], so two addresses differing only in bank share a pattern and a bank
+// decode fault would cancel.  Used by the geometry sweep in section 8, whose
+// addresses differ in exactly that field.  Pairwise distinctness is asserted at
+// runtime rather than argued for.
+function automatic [15:0] patw(input [AW-1:0] a);
+    logic [31:0] h;
+    h    = ({{(32-AW){1'b0}}, a} + 32'h9e3779b9) * 32'h85ebca6b;
+    patw = h[31:16] ^ h[15:0];
+endfunction
 
-function automatic string where(input [23:0] a);
-    where = $sformatf("bank %0d row %0d col %0d", a[23:22], a[21:9], a[8:0]);
+localparam int NG = 9;
+bit [AW-1:0] grp [0:NG-1];
+
+// Build a word address from bank/row/column for the CONFIGURED geometry, so the
+// same test covers the same structural corners at COL_BITS 9, 10 and 11.
+function automatic [AW-1:0] mk(input int bank, input int row, input int col);
+    mk = (AW'(bank) << (CTL_COL_BITS + 13))
+       | (AW'(row)  <<  CTL_COL_BITS)
+       |  AW'(col);
+endfunction
+
+function automatic string where(input [AW-1:0] a);
+    where = $sformatf("bank %0d row %0d col %0d",
+                      a[AW-1:AW-2], a[CTL_COL_BITS+12:CTL_COL_BITS],
+                      a[CTL_COL_BITS-1:0]);
 endfunction
 
 // ---------------------------------------------------------------------------
@@ -181,7 +210,7 @@ task automatic bus_idle();
     @(negedge clk);
 endtask
 
-task automatic do_wr(input [23:0] a, input [15:0] d, input [1:0] be);
+task automatic do_wr(input [AW-1:0] a, input [15:0] d, input [1:0] be);
     @(negedge clk);
     wr_addr = a; wr_din = d; wr_be = be; wr_req = 1'b1;
     @(negedge clk);                 // the posedge in between latches the request
@@ -191,7 +220,7 @@ task automatic do_wr(input [23:0] a, input [15:0] d, input [1:0] be);
     bus_idle();
 endtask
 
-task automatic do_p0(input [23:0] a, output [15:0] d, output int cost);
+task automatic do_p0(input [AW-1:0] a, output [15:0] d, output int cost);
     @(negedge clk);
     p0_addr = a; p0_req = 1'b1;
     @(negedge clk);                 // posedge in between = t0 (request latched)
@@ -203,7 +232,7 @@ task automatic do_p0(input [23:0] a, output [15:0] d, output int cost);
     bus_idle();
 endtask
 
-task automatic do_p4(input [23:0] a, output [15:0] d, output int cost);
+task automatic do_p4(input [AW-1:0] a, output [15:0] d, output int cost);
     @(negedge clk);
     p4_addr = a; p4_req = 1'b1;
     @(negedge clk);
@@ -216,9 +245,9 @@ task automatic do_p4(input [23:0] a, output [15:0] d, output int cost);
 endtask
 
 // a is the WORD address of the first of four words (must be 4-word aligned)
-task automatic do_p1(input [23:0] a, output [63:0] d, output int cost);
+task automatic do_p1(input [AW-1:0] a, output [63:0] d, output int cost);
     @(negedge clk);
-    p1_addr = a[23:2]; p1_req = 1'b1;
+    p1_addr = a[AW-1:2]; p1_req = 1'b1;
     @(negedge clk);
     p1_req = 1'b0;
     cost = 0;
@@ -228,8 +257,35 @@ task automatic do_p1(input [23:0] a, output [63:0] d, output int cost);
     bus_idle();
 endtask
 
+// p5: 4-word burst, same shape as p1 but the LAST port in the round-robin.
+task automatic do_p5(input [AW-1:0] a, output [63:0] d, output int cost);
+    @(negedge clk);
+    p5_addr = a[AW-1:2]; p5_req = 1'b1;
+    @(negedge clk);
+    p5_req = 1'b0;
+    cost = 0;
+    while (!p5_ack) begin @(negedge clk); cost++; end
+    d = p5_dout;
+    while (p5_ack) @(negedge clk);
+    bus_idle();
+endtask
+
+// p2: 8-word burst, 16-byte aligned.  Never exercised by this bench before, so
+// the 8-lane assembly in deliver() (sdram.sv:629) had no coverage at all.
+task automatic do_p2(input [AW-1:0] a, output [127:0] d, output int cost);
+    @(negedge clk);
+    p2_addr = a[AW-1:3]; p2_req = 1'b1;
+    @(negedge clk);
+    p2_req = 1'b0;
+    cost = 0;
+    while (!p2_ack) begin @(negedge clk); cost++; end
+    d = p2_dout;
+    while (p2_ack) @(negedge clk);
+    bus_idle();
+endtask
+
 // ---------------------------------------------------------------------------
-task automatic chk16(input string tag, input [23:0] a,
+task automatic chk16(input string tag, input [AW-1:0] a,
                      input [15:0] got, input [15:0] exp);
     if (got !== exp) begin
         errors++;
@@ -241,9 +297,67 @@ endtask
 // ---------------------------------------------------------------------------
 int  c, cost_p0, cost_p1, cost_p4;
 int  cmax_p0, cmax_p1, cmax_p4;
-logic [15:0] rd16;
-logic [63:0] rd64;
-logic [63:0] exp64;
+logic  [15:0] rd16;
+logic  [63:0] rd64;
+logic [127:0] rd128;
+logic  [63:0] exp64;
+
+// ---------------------------------------------------------------------------
+// section 8 state (see the block comment at its call site)
+// ---------------------------------------------------------------------------
+// The top column bit for the configured geometry: bit 10 of an 11-bit column,
+// which the controller has to route to A[11] because A[10] is auto-precharge.
+localparam [11:0] TOPCOL = 12'(1 << (CTL_COL_BITS - 1));
+
+bit [AW-1:0] gs [0:3], gb4 [0:3], gb8 [0:3];
+bit [AW-1:0] alist [0:127];
+int ng2;
+int seen_hit_s, seen_act_s, seen_pre_s;
+int seen_hit_b, seen_act_b, seen_pre_b;
+int snap_hit, snap_miss, snap_conf, snap_ref;
+
+// Snapshot the controller's own transaction classifier for one port.  The three
+// exits from ST_IDLE are exhaustive and mutually exclusive (sdram.sv:391-397),
+// so hit/miss/conflict tell us which path a transaction actually took instead of
+// re-deriving it here -- a re-derivation can disagree with the machine it is
+// supposed to be measuring.
+task automatic cls_snap(input int port);
+    snap_hit  = u_ctl.sdr_row_hit[port];
+    snap_miss = u_ctl.sdr_row_miss[port];
+    snap_conf = u_ctl.sdr_conflict_total;
+    snap_ref  = u_ctl.sdr_refresh_count;
+endtask
+
+// Classify the transaction that just completed and tally it.  Exactly one of
+// hit/miss must have advanced, always -- that part is asserted unconditionally.
+// WHICH one is only asserted-about when no refresh intervened: a refresh
+// PRE-alls every bank (sdram.sv:698-702), so it can legitimately turn an
+// expected open-row hit into a miss, and asserting through that would make the
+// bench flaky rather than strict.
+task automatic cls_take(input int port, input bit is_burst);
+    int dh, dm, dc;
+    begin
+        dh = u_ctl.sdr_row_hit[port]      - snap_hit;
+        dm = u_ctl.sdr_row_miss[port]     - snap_miss;
+        dc = u_ctl.sdr_conflict_total     - snap_conf;
+        if (dh + dm != 1) begin
+            errors++;
+            $fatal(1, "port %0d: %0d transactions classified for one request (hit+%0d miss+%0d)",
+                   port, dh + dm, dh, dm);
+        end
+        if (u_ctl.sdr_refresh_count != snap_ref) return;   // refresh intervened
+        if (is_burst) begin
+            if (dh)      seen_hit_b++;
+            else if (dc) seen_pre_b++;
+            else         seen_act_b++;
+        end
+        else begin
+            if (dh)      seen_hit_s++;
+            else if (dc) seen_pre_s++;
+            else         seen_act_s++;
+        end
+    end
+endtask
 
 initial begin
     grp[0] = 24'h000000;   // bank0 row0    col0     — bottom of memory
@@ -363,6 +477,111 @@ initial begin
         do_p4(24'h001000 + r[23:0], rd16, c); if (c < cost_p4) cost_p4 = c;
         do_p1(24'h001000 + (r[23:0] << 2), rd64, c); if (c < cost_p1) cost_p1 = c;
     end
+
+    // =====================================================================
+    // 8. Geometry sweep: all four banks, the TOP column bit, and each of the
+    //    three ways a transaction can leave ST_IDLE.
+    //
+    //    WHY THIS EXISTS.  Sections 1-7 use 24-bit literal word addresses.  At
+    //    CTL_COL_BITS=11 the bank field is a[25:24], so every one of those
+    //    addresses lies in BANK 0 and the bank decode is never really tested;
+    //    p2 (8-word burst) was never driven at all, so the 8-lane assembly in
+    //    deliver() (sdram.sv:629-630) had no coverage; and p1/p5 could not
+    //    leave bank 0 because their bench drivers were 22 bits wide.
+    //
+    //    What this asserts:
+    //      * all four banks, on single-word (p0/p4) and burst (p1/p2/p5) ports;
+    //      * the TOP column bit set on every address -- A[11] on a 2048-column
+    //        part.  A[10] is auto-precharge, so column bit 10 has to ride on
+    //        A[11] (sdram.sv:613-615 cas_addr).  That splice is the only new
+    //        address arithmetic the 128 MB retarget introduced;
+    //      * a read whose row is ALREADY OPEN (ST_IDLE -> ST_RD), one that
+    //        needs ACT (-> ST_ACT), and one that must precharge a wrong row
+    //        first (-> ST_PRE_BANK), each classified by the controller's OWN
+    //        transaction counters rather than assumed from the address.
+    //
+    //    Every cell is preloaded by hierarchical reference, so the controller's
+    //    write path is not involved and a read-side mapping error cannot be
+    //    cancelled by a matching write-side one.
+    // =====================================================================
+    $display("--- section 8: %0d banks x {open-row, ACT, PRE} x {single, burst}",
+             1 << 2);
+    ng2 = 0;
+    for (int b = 0; b < 4; b++) begin
+        gs[b]  = mk(b, 3, TOPCOL | 12'h005);   // single words, row 3
+        gb4[b] = mk(b, 3, TOPCOL | 12'h008);   // 4-word burst, row 3
+        gb8[b] = mk(b, 9, TOPCOL | 12'h010);   // 8-word burst, row 9
+        for (int k = 0; k < 8; k++) begin
+            alist[ng2] = gs[b]  + AW'(k); ng2++;
+            alist[ng2] = gb4[b] + AW'(k); ng2++;
+            alist[ng2] = gb8[b] + AW'(k); ng2++;
+        end
+    end
+    // The pattern must be distinct over the whole set, or a bank/column decode
+    // fault could return another cell and still compare equal.  Proved, not
+    // asserted in a comment.
+    for (int i = 0; i < ng2; i++)
+        for (int j = i + 1; j < ng2; j++)
+            if (alist[i] != alist[j] && patw(alist[i]) == patw(alist[j]))
+                $fatal(1, "bench defect: patw collision %06x / %06x",
+                       alist[i], alist[j]);
+    for (int i = 0; i < ng2; i++) u_chip.mem[alist[i]] = patw(alist[i]);
+
+    seen_hit_s = 0; seen_act_s = 0; seen_pre_s = 0;
+    seen_hit_b = 0; seen_act_b = 0; seen_pre_b = 0;
+
+    for (int b = 0; b < 4; b++) begin
+        // Close this bank deterministically: a write auto-precharges
+        // (sdram.sv:784-787), so the next read into it must ACT.
+        do_wr(gs[b] + AW'(60), 16'h0000, 2'b11);
+
+        cls_snap(0);  do_p0(gs[b],           rd16, c);  cls_take(0, 0);
+        chk16("g8.p0.act",  gs[b],           rd16, patw(gs[b]));
+        cls_snap(0);  do_p0(gs[b] + AW'(1),  rd16, c);  cls_take(0, 0);
+        chk16("g8.p0.hit",  gs[b] + AW'(1),  rd16, patw(gs[b] + AW'(1)));
+
+        cls_snap(1);  do_p1(gb4[b],          rd64, c);  cls_take(1, 1);
+        for (int w = 0; w < 4; w++)
+            chk16($sformatf("g8.p1.lane%0d", w), gb4[b] + AW'(w),
+                  rd64[w*16 +: 16], patw(gb4[b] + AW'(w)));
+
+        // row 9 while row 3 is open: the wrong-row path, on a burst port
+        cls_snap(2);  do_p2(gb8[b],          rd128, c); cls_take(2, 1);
+        for (int w = 0; w < 8; w++)
+            chk16($sformatf("g8.p2.lane%0d", w), gb8[b] + AW'(w),
+                  rd128[w*16 +: 16], patw(gb8[b] + AW'(w)));
+
+        // and back to row 3: the wrong-row path on a single-word port
+        cls_snap(0);  do_p0(gs[b] + AW'(2),  rd16, c);  cls_take(0, 0);
+        chk16("g8.p0.pre",  gs[b] + AW'(2),  rd16, patw(gs[b] + AW'(2)));
+
+        cls_snap(4);  do_p4(gb4[b] + AW'(2), rd16, c);  cls_take(4, 0);
+        chk16("g8.p4.hit",  gb4[b] + AW'(2), rd16, patw(gb4[b] + AW'(2)));
+
+        // Close the bank again so a BURST also gets to take the ACT path; the
+        // sequence above always leaves some row open, so without this the
+        // burst-with-closed-bank case never occurs.
+        do_wr(gs[b] + AW'(61), 16'h0000, 2'b11);
+
+        cls_snap(5);  do_p5(gb4[b],          rd64, c);  cls_take(5, 1);
+        for (int w = 0; w < 4; w++)
+            chk16($sformatf("g8.p5.lane%0d", w), gb4[b] + AW'(w),
+                  rd64[w*16 +: 16], patw(gb4[b] + AW'(w)));
+    end
+
+    // Coverage gate.  A pass that never took the ACT-skip path, or never took
+    // the wrong-row path, would not be evidence about either.
+    if (seen_hit_s == 0 || seen_act_s == 0 || seen_pre_s == 0)
+        $fatal(1, "section 8 did not cover single-word open-row (%0d), ACT (%0d), wrong-row (%0d)",
+               seen_hit_s, seen_act_s, seen_pre_s);
+    if (seen_hit_b == 0 || seen_act_b == 0 || seen_pre_b == 0)
+        $fatal(1, "section 8 did not cover burst open-row (%0d), ACT (%0d), wrong-row (%0d)",
+               seen_hit_b, seen_act_b, seen_pre_b);
+    $display("section 8 OK: banks 0-3, top column bit, p0/p1/p2/p4/p5");
+    $display("  single-word: open-row %0d  ACT %0d  wrong-row %0d",
+             seen_hit_s, seen_act_s, seen_pre_s);
+    $display("  burst      : open-row %0d  ACT %0d  wrong-row %0d",
+             seen_hit_b, seen_act_b, seen_pre_b);
 
     if (errors != 0) $fatal(1, "FAIL tb_ssv_sdram_loopback: %0d errors", errors);
 
