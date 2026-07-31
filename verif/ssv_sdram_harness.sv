@@ -25,17 +25,35 @@
 `timescale 1ns/1ps
 
 module ssv_sdram_harness #(
-    // Geometry, passed to BOTH the controller and the part so they cannot
-    // drift apart by accident. Overriding only one of them on purpose is the
-    // mismatch/aliasing negative test.
+    // Geometry is NO LONGER a parameter. The board carries the MiSTer 128 MB
+    // module -- two 32Mx16 devices selected by nCS, with DQML/DQMH shorted to
+    // A11/A12 -- and both the controller and verif/ssv_sdram_module.sv encode
+    // that contract directly. Parameterising it is how a controller for a part
+    // this board does not have got configured and shipped: it byte-masked its
+    // own writes through the A11 short and never sent MRS to device 1.
+    //
+    // The old BANK_BITS/ROW_BITS/COL_BITS/CHIP_COL_BITS/CHIP_CLK_180 knobs are
+    // accepted and IGNORED so existing benches still elaborate; they no longer
+    // select anything.
     parameter int BANK_BITS      = 2,
     parameter int ROW_BITS       = 13,
-    parameter int COL_BITS       = 9,
+    parameter int COL_BITS       = 10,
     parameter int CHIP_COL_BITS  = COL_BITS,
+    // Clock the part on clk_ram, EDGE-ALIGNED with the controller. This is the
+    // convention every MiSTer core's simulation uses, including the Sega
+    // System 32 core this controller comes from and which runs on this board.
+    //
+    // Inverting it to "model the board's 180-degree SDRAM_CLK" is wrong and was
+    // tried: in a zero-delay RTL simulation the half-cycle offset is not
+    // representable as an inverted clock, it merely shifts which cycle the part
+    // samples, and it made the proven controller fail. The real relationship is
+    // a setup/hold property of the physical interface, which belongs to STA and
+    // the SDC, not to a behavioural part model.
+    parameter bit CHIP_CLK_180   = 1'b0,
     parameter int TRFC_CYC       = 6,
-    // Word-address width the harness ports carry. Derived, so a bench that
-    // overrides COL_BITS gets matching port widths for free.
-    parameter int AW             = BANK_BITS + ROW_BITS + COL_BITS
+    // 26-bit word address = 128 MB across the two devices, matching
+    // ssv_pkg::SDR_AW.
+    parameter int AW             = 26
 ) (
     input  logic        clk_ram,
     input  logic        init,
@@ -84,10 +102,10 @@ wire  [1:0] SDRAM_BA;
 wire        SDRAM_DQML, SDRAM_DQMH;
 wire        SDRAM_nCS, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nWE, SDRAM_CKE;
 
-sdram #(
-    .BANK_BITS(BANK_BITS), .ROW_BITS(ROW_BITS), .COL_BITS(COL_BITS),
-    .TRFC_CYC(TRFC_CYC)
-) controller (
+// No geometry parameters: the controller now encodes the MiSTer 128 MB module
+// contract (two devices via nCS, DQM shorted to A11/A12) and the geometry is
+// fixed by the hardware.
+sdram controller (
     .clk(clk_ram),
     .init(init),
     .ready(ready),
@@ -123,10 +141,17 @@ sdram #(
     .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
-ssv_sdram_chip #(
-    .BANK_BITS(BANK_BITS), .ROW_BITS(ROW_BITS), .COL_BITS(CHIP_COL_BITS)
-) chip (
-    .clk(clk_ram),
+// The part is verif/ssv_sdram_module.sv -- the MiSTer 128 MB MODULE (two
+// devices, nCS as device select, DQM shorted to A11/A12) -- and NOT
+// verif/ssv_sdram_chip.sv, which models a single monolithic 64Mx16 part this
+// board does not carry. Grading against that fiction is why every bench in this
+// repository passed while hardware showed a black screen and no sound.
+//
+// STRICT is on: a controller that fights the A11/A12 short, or touches a device
+// that never received MRS, stops the run at the first offence instead of
+// returning quietly wrong data for someone to chase through the video chain.
+ssv_sdram_module #(.STRICT(1'b1)) chip (
+    .clk(CHIP_CLK_180 ? ~clk_ram : clk_ram),
     .SDRAM_DQ(SDRAM_DQ),
     .SDRAM_A(SDRAM_A),
     .SDRAM_BA(SDRAM_BA),
