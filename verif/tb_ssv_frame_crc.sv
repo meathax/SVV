@@ -77,8 +77,29 @@ always #2.5 clk_ram = ~clk_ram;
 // part the board does not have. AW then derives to 26 = ssv_pkg::SDR_AW, so
 // the port widths line up with the core's without truncation -- and this build
 // suppresses WIDTH warnings, so a mismatch here would be silent.
+// SSV_CHIP_COL_BITS exists to run the harness's documented mismatch/aliasing
+// negative test: the CONTROLLER keeps the geometry Arcade-SSV.sv instantiates
+// (COL_BITS 11 = 128 MB), while the PART is built smaller. That is the only way
+// to reproduce, in simulation, a board fitted with a module the controller was
+// not built for -- every ordinary run leaves it at 11 and is unaffected.
+`ifndef SSV_CHIP_COL_BITS
+`define SSV_CHIP_COL_BITS 11
+`endif
+// SSV_CHIP_CLK_180 must stay 0: clocking the part model on the inverted clock
+// does NOT model the board's 180-degree forwarded SDRAM_CLK -- in a zero-delay
+// simulation it merely shifts which edge the part samples, and it breaks the
+// PROVEN controller (reads return idle-bus zeros; the V60 dies at its reset
+// vector). The 1 default briefly used here did exactly that while the contract
+// and loader benches, which take the harness default of 0, kept passing -- a
+// disagreement that cost a debugging round. The real phase relationship is
+// STA/SDC territory. See ssv_sdram_harness.sv.
+`ifndef SSV_CHIP_CLK_180
+`define SSV_CHIP_CLK_180 0
+`endif
 ssv_sdram_harness #(
-    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11), .TRFC_CYC(11)
+    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11),
+    .CHIP_COL_BITS(`SSV_CHIP_COL_BITS),
+    .CHIP_CLK_180(`SSV_CHIP_CLK_180), .TRFC_CYC(11)
 ) u_sdram (
     .clk_ram(clk_ram), .init(rst), .ready(sdram_ready),
     .wr_req(sdr_wr_req), .wr_addr(sdr_wr_addr), .wr_din(sdr_wr_din),
@@ -99,6 +120,33 @@ ssv_sdram_harness #(
 always @(posedge clk_sys)
     if (!rst && sdr_p5_req)
         $fatal(1, "ST010 program fetch requested with cfg.has_st010 = 0");
+
+// Handshake census, counted on the RISING EDGE of each strobe so a level held
+// across many cycles counts once -- the controller services one transaction per
+// rising edge, so edges are the meaningful unit.
+integer dbg_p0_req_cnt = 0, dbg_p0_ack_cnt = 0;
+integer dbg_p2_req_cnt = 0, dbg_p2_ack_cnt = 0;
+integer dbg_wr_req_cnt = 0, dbg_wr_ack_cnt = 0;
+logic dbg_p0_rq, dbg_p0_ak, dbg_p2_rq, dbg_p2_ak, dbg_wr_rq, dbg_wr_ak;
+always @(posedge clk_sys) begin
+    dbg_p0_rq <= sdr_p0_req; dbg_p0_ak <= sdr_p0_ack;
+    dbg_p2_rq <= sdr_p2_req; dbg_p2_ak <= sdr_p2_ack;
+    dbg_wr_rq <= sdr_wr_req; dbg_wr_ak <= sdr_wr_ack;
+    if (sdr_p0_req & ~dbg_p0_rq) dbg_p0_req_cnt <= dbg_p0_req_cnt + 1;
+    if (sdr_p0_ack & ~dbg_p0_ak) dbg_p0_ack_cnt <= dbg_p0_ack_cnt + 1;
+    // First transactions in full: the census said 12 reqs all acked and then
+    // silence, which cannot distinguish wrong-data from a wedged consumer.
+    // Addresses and returned words can -- they are checkable against
+    // sim_output/rom/maincpu.bin offline.
+    if (sdr_p0_req & ~dbg_p0_rq && dbg_p0_req_cnt < 20)
+        $display("P0LOG req %0d byteaddr=%07h", dbg_p0_req_cnt, {sdr_p0_addr, 1'b0});
+    if (sdr_p0_ack & ~dbg_p0_ak && dbg_p0_ack_cnt < 20)
+        $display("P0LOG ack %0d dout=%04h", dbg_p0_ack_cnt, sdr_p0_dout);
+    if (sdr_p2_req & ~dbg_p2_rq) dbg_p2_req_cnt <= dbg_p2_req_cnt + 1;
+    if (sdr_p2_ack & ~dbg_p2_ak) dbg_p2_ack_cnt <= dbg_p2_ack_cnt + 1;
+    if (sdr_wr_req & ~dbg_wr_rq) dbg_wr_req_cnt <= dbg_wr_req_cnt + 1;
+    if (sdr_wr_ack & ~dbg_wr_ak) dbg_wr_ack_cnt <= dbg_wr_ack_cnt + 1;
+end
 
 assign sdr_p0_ack  = use_real_sdram ? real_p0_ack  : beh_p0_ack;
 assign sdr_p2_ack  = use_real_sdram ? real_p2_ack  : beh_p2_ack;
@@ -1310,8 +1358,8 @@ initial begin
         $display("REAL_SDRAM preloading chip image");
         // V60 program, 1 MB at SDR_MAINCPU_BASE = 0.
         for (i = 0; i < 524288; i = i + 1)
-            u_sdram.chip.mem[i] =
-                {main_rom[i*2+1], main_rom[i*2]};
+            u_sdram.chip.preload_word(i[25:0],
+                {main_rom[i*2+1], main_rom[i*2]});
         // Graphics, 16 MB at SDR_GFX_BASE = 0x0100000. One aligned 16-byte
         // record per 16-pixel tile row: Q0 | Q1 | Q2 | pad. This mirrors the
         // behavioural p2 model above and ssv_pkg::gfx_plane_addr; a divergence
@@ -1334,9 +1382,9 @@ initial begin
             automatic integer src       = (quarter == 3)
                                             ? 0
                                             : quarter * 4194304 + q0 + (in_rec & 3);
-            u_sdram.chip.mem[(SDR_GFX_BASE >> 1) + i] =
+            u_sdram.chip.preload_word(((SDR_GFX_BASE >> 1) + i),
                 (quarter == 3) ? 16'h0000
-                               : {sprite_rom[src+1], sprite_rom[src]};
+                               : {sprite_rom[src+1], sprite_rom[src]});
         end
         // ES5506 samples. Without these the sample engine fetches zeroes, which
         // is what every full-core run in this project has done so far -- so the
@@ -1349,8 +1397,8 @@ initial begin
             // SDR_SAMPLES_BASE moved to 0x1160000 (above XRAM and CPU RAM)
             // when the graphics region grew to 16 MB.
             for (i = 0; i < 2097152; i = i + 1)
-                u_sdram.chip.mem[(SDR_SAMPLES_BASE >> 1) + i] =
-                    {sample_rom[i*2+1], sample_rom[i*2]};
+                u_sdram.chip.preload_word(((SDR_SAMPLES_BASE >> 1) + i),
+                    {sample_rom[i*2+1], sample_rom[i*2]});
             $display("REAL_SDRAM samples preloaded");
         end
         else
@@ -1384,8 +1432,16 @@ initial begin
     if (state_fd != 0)
         $fclose(state_fd);
 
-    if (!ve_seen)
+    if (!ve_seen) begin
+        // Port-level handshake census. "video_enable never rose" says the CPU
+        // stalled but not where; these counts separate "the core never asked"
+        // from "it asked and was never answered", which are opposite bugs.
+        $display("SDR_CENSUS p0 req=%0d ack=%0d | p2 req=%0d ack=%0d | wr req=%0d ack=%0d | ready=%0b",
+                 dbg_p0_req_cnt, dbg_p0_ack_cnt,
+                 dbg_p2_req_cnt, dbg_p2_ack_cnt,
+                 dbg_wr_req_cnt, dbg_wr_ack_cnt, sdram_ready);
         $fatal(1, "video_enable never rose pc=%08x", debug_pc);
+    end
     // The loop above also exits when the cycle budget runs out, and it used to
     // do so silently: +FRAMES=250 with the default +CYCLES=200000000 stops at
     // post-VE frame 215, because a frame is 262 x 3064.2 = ~803k clk_sys and

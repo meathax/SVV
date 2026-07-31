@@ -405,22 +405,15 @@ assign sw_be   = loader_owns_write ? ld_wr_be   : core_wr_be;
 assign ld_wr_ack   = loader_owns_write ? sw_ack : 1'b0;
 assign core_wr_ack = loader_owns_write ? 1'b0 : sw_ack;
 
-// 128 MB module fitted on this board: 64M x 16, i.e.
-// 4 banks x 8192 rows x 2048 columns. COL_BITS 11 makes the controller's word
-// address 26 bits, matching ssv_pkg::SDR_AW.
-//
-// TRFC_CYC = 11 gives 12 cycles = 124.2 ns, which covers the 110 ns typical of
-// 1 Gbit SDR SDRAM and the 120 ns some parts specify -- safe for any plausible
-// part rather than tuned to one, because over-waiting costs ~2% of the bus and
-// under-waiting is silent bit rot.
-//
-// REF_CYC keeps its default 700 (7.24 us). That is provably correct without a
-// datasheet: the pinout routes only A[12:0] and BA[1:0], so 128 MB is reachable
-// only as 4 banks x 8192 rows x 2048 columns, which fixes the row count at
-// 8192 and the refresh requirement at 7.8125 us. See rtl/mem/sdram.sv.
-sdram #(
-    .BANK_BITS(2), .ROW_BITS(13), .COL_BITS(11), .TRFC_CYC(11)
-) sdram (
+// The 128 MB module fitted on this board is TWO 32Mx16 devices, not one
+// 64Mx16 part: SDRAM_nCS selects between them and DQML/DQMH are shorted to
+// A11/A12. The controller encodes that contract and takes NO geometry
+// parameters -- parameterising it is exactly how the wrong part came to be
+// configured, which byte-masked every write through the A11 short and left
+// device 1 without an MRS. See rtl/mem/sdram.sv and
+// docs/issues/SDRAM_MODULE_CONTRACT.md; the failure is reproduced by
+// verif/tb_ssv_sdram_module_contract.sv.
+sdram sdram (
     .clk(clk_ram), .init(~pll_locked), .ready(sdram_ready),
     .SDRAM_DQ(SDRAM_DQ), .SDRAM_A(SDRAM_A), .SDRAM_BA(SDRAM_BA),
     .SDRAM_DQML(SDRAM_DQML), .SDRAM_DQMH(SDRAM_DQMH),
