@@ -63,9 +63,35 @@ try {
 
     $running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'quartus%'" -ErrorAction SilentlyContinue)
     $projects = @($running | ForEach-Object {
-        # Project name is the -c argument, else the last bare token.
+        # Project name is the -c argument, else the first NON-FLAG argument
+        # after the executable.
+        #
+        # It is NOT "the last bare token". quartus_map is invoked as
+        #   quartus_map.exe "Arcade-SegaModel1" --read_settings_files=on --write_settings_files=off
+        # with the project FIRST, so a trailing-token match returns "off" --
+        # observed 31 Jul 2026, where a real second build reported as project
+        # "off". The count happened to be right that time, but two different
+        # projects both ending in "=off" collapse to ONE entry and let a THIRD
+        # build start. That is precisely the case this cap exists to prevent, so
+        # the parser must name the project correctly, not merely often.
         if ($_.CommandLine -match '-c\s+"?([A-Za-z0-9_.\-]+)"?') { $Matches[1] }
-        elseif ($_.CommandLine -match '"?([A-Za-z0-9_.\-]+)"?\s*$') { $Matches[1] }
+        else {
+            # Drop the executable, then keep arguments that are neither flags
+            # (-x / --x) nor key=value settings. The project is the last such
+            # token, which is correct for all three observed invocations:
+            #   quartus_sh.exe --flow compile Apache3          -> Apache3
+            #   quartus_map.exe "Proj" --read_settings_files=on -> Proj
+            #   quartus_fit.exe ...=off "Proj" -c Proj         -> (-c wins)
+            # @() is required: with a single match the pipeline yields a STRING,
+            # and $toks[-1] then indexes its last CHARACTER -- "Arcade-SegaModel1"
+            # parses as the project "1", which collapses distinct projects and
+            # under-counts. Observed 31 Jul 2026 while fixing the trailing-token
+            # bug above.
+            $toks = @(($_.CommandLine -split '\s+') | Select-Object -Skip 1 |
+                      ForEach-Object { $_.Trim('"') } |
+                      Where-Object { $_ -and $_ -notmatch '^-' -and $_ -notmatch '=' })
+            if ($toks.Count) { $toks[-1] }
+        }
     } | Where-Object { $_ } | Sort-Object -Unique)
 
     if ($projects -contains $project) {
