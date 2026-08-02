@@ -84,7 +84,7 @@ package ssv_pkg;
     //
     // Put this small image immediately after the fixed 8 MiB sample slot in
     // bank 3; the regions do not overlap and the descriptor still selects
-    // whether the DSP exists. Bank 2 remains free in the ten-set profile.
+    // whether the DSP exists. Bank 2 remains free in the supported profile.
     //
     // The whole 69,632-byte st010.bin image is placed here contiguously:
     //   + 0x00000 .. 0x0ffff   "dspprg", 16384 x 32-bit big-endian, 24 used
@@ -365,19 +365,9 @@ package ssv_pkg;
         cfg_stmblade.visible_height = 8'd240;
     endfunction
 
-    function automatic ssv_cfg_t cfg_survartsu();
-        cfg_survartsu = cfg_dynagear();
-        cfg_survartsu.game_id          = 4'd6;
-        cfg_survartsu.gfx_mb           = 6'd24;
-        cfg_survartsu.gfx_code_k       = 5'd16;
-        cfg_survartsu.gfx_code_mul3    = 1'b1;
-        cfg_survartsu.gfx_code_mask    = 20'h0ffff;
-        cfg_survartsu.extra_input_mode = 2'd2;
-    endfunction
-
     function automatic ssv_cfg_t cfg_twineag2();
         cfg_twineag2 = cfg_stmblade();
-        cfg_twineag2.game_id          = 4'd7;
+        cfg_twineag2.game_id          = 4'd6;
         cfg_twineag2.prog_mb          = 3'd2;
         cfg_twineag2.bank_map         = 8'h44;
         cfg_twineag2.bank_valid       = 4'b1111;
@@ -393,9 +383,9 @@ package ssv_pkg;
         cfg_twineag2.visible_width_half = 8'd168;
     endfunction
 
-    function automatic ssv_cfg_t cfg_ultrax(input logic review_build);
+    function automatic ssv_cfg_t cfg_ultrax();
         cfg_ultrax = cfg_twineag2();
-        cfg_ultrax.game_id          = review_build ? 4'd9 : 4'd8;
+        cfg_ultrax.game_id          = 4'd7;
         cfg_ultrax.gfx_mb           = 6'd12;
         cfg_ultrax.gfx_code_k       = 5'd15;
         cfg_ultrax.gfx_code_mask    = 20'h07fff;
@@ -409,10 +399,8 @@ package ssv_pkg;
             4'd3:    cfg_for_game = cfg_vasara2();
             4'd4:    cfg_for_game = cfg_drifto94();
             4'd5:    cfg_for_game = cfg_stmblade();
-            4'd6:    cfg_for_game = cfg_survartsu();
-            4'd7:    cfg_for_game = cfg_twineag2();
-            4'd8:    cfg_for_game = cfg_ultrax(1'b0);
-            4'd9:    cfg_for_game = cfg_ultrax(1'b1);
+            4'd6:    cfg_for_game = cfg_twineag2();
+            4'd7:    cfg_for_game = cfg_ultrax();
             default: cfg_for_game = cfg_dynagear();
         endcase
     endfunction

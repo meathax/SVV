@@ -135,10 +135,10 @@ settled hardware facts and build on them.
 
 Dyna Gear is the target, but a few cheap decisions keep the family reachable.
 
-**Survival Arts is the natural second game.** It reportedly shares the **same `SAM-5127`
-sub-board and the same memory map** as Dyna Gear `[SECONDARY]`. That makes it the lowest-cost
-validation that the core is a *platform* and not a single-game special case — and it would
-exercise different sprite/tilemap content through the same paths.
+**Survival Arts was the historical natural second game.** It reportedly shares the **same
+`SAM-5127` sub-board and the same memory map** as Dyna Gear `[SECONDARY]`. That made it a
+low-cost platform-generalisation candidate, but it is retired from the current supported
+profile and is not a release-validation target.
 
 Design implications to keep in view:
 
@@ -177,4 +177,5 @@ Design implications to keep in view:
 3. **Phase 0** — board photographs and scope measurements, whenever a board is to hand. This
    is the only route to real video-timing accuracy.
 4. **Phase 2** — ES5506 spec deep-read, in parallel with anything else.
-5. **Phase 4** — Survival Arts as the platform-generality test.
+5. **Phase 4** — Historical Survival Arts platform-generalisation work is retired from the
+   release plan.

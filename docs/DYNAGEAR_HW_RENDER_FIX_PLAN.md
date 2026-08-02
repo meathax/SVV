@@ -548,8 +548,10 @@ CACHE_BUILD max=44020 cycles (frame 527) deadline_aborts=0
 
 The original window was lines 240–259, i.e. 20 lines × 454 pixels at 6.749
 `clk_sys` per pixel (`PIXEL_INC` 9710/65536) = **61,284 cycles**. The current
-universal pooled renderer has measured a dense Survival Arts build at 61,306
-cycles, so the line-260 active portion is deliberately part of the budget;
+universal pooled renderer historically measured a dense Survival Arts build at
+61,306 cycles, so the line-260 active portion is deliberately part of the budget;
+Survival Arts is retired from the current release profile, but this measurement remains useful
+for shared-renderer worst-case context.
 the exact post-fix margin remains a required Verilator measurement. That is
 not a comfortable design point for something whose failure mode is a permanent
 freeze — the deadline remains a containment mechanism, not a substitute for a

@@ -25,7 +25,7 @@ four corners.** Worst hold is +0.100 ns. `releases/SSV.rbf` is staged
 These fit and timing numbers predate the universal pooled line-entry table and
 are therefore historical evidence, not release evidence for the current RTL.
 The current 65,536-entry pool is steered to MLAB to protect the nearly-full
-M10K budget; a fresh Quartus fit is still required after all ten attract gates
+M10K budget; a fresh Quartus fit is still required after all eight attract gates
 pass.
 
 The `ascal` `o_vlastcpt` fix closed the HDMI domain by itself under the

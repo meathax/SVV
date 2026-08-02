@@ -5,9 +5,10 @@ contract is `AGENTS.md`, `core-debug.toml`, `docs/GAME_COVERAGE.md`, and
 `docs/implementation-status.md`. All work stays in the single universal
 profile; there are no per-game RBFs or compile-time game forks.
 
-Target: the ten authoritative manifest entries `dynagear`, `cairblad`, `vasara`,
-`vasara2`, `drifto94`, `stmblade`, `survartsu`, `twineag2`, `ultrax`, and
-`ultraxg`.
+Target: the eight current authoritative manifest entries `dynagear`,
+`cairblad`, `vasara`, `vasara2`, `drifto94`, `stmblade`, `twineag2`, and
+`ultrax`. Survival Arts and the Ultra X Gamest review build are retired local
+archives, not supported profile entries.
 
 All per-game facts below were read out of
 `D:\Arcade\AI\MAMESOURCE\mame\src\mame\seta\ssv.cpp`, not inferred.
@@ -25,7 +26,7 @@ program size, graphics region size, tile-code modulus (`gfx_code_k`,
 and `wdog_mode`.
 
 Descriptor byte 5 retains its ABI location, but only bit 0 is decoded: zero
-selects factor 1 and one selects factor 3. The ten-set generator and verifier
+selects factor 1 and one selects factor 3. The eight-set generator and verifier
 reject factors 5/7 and graphics regions outside 12, 16, 24, or 32 MiB.
 
 `cfg_dynagear()` remains the reference record for unit tests, while production
@@ -38,16 +39,16 @@ The record is runtime descriptor state, not a compile-time game selection.
 Resource cost therefore belongs to the one shared universal path and must be
 measured in synthesis rather than inferred from any individual set.
 
-### Tile-code wrapping — a real bug for five of the ten entries
+### Tile-code wrapping — a real bug for three of the eight supported entries
 
 MAME wraps sprite codes with `code % gfxelement->elements()`, a **true modulo**,
 and `elements()` = sprites region / 128:
 
 | set | region | elements | decomposition |
 |---|---:|---:|---|
-| ultrax / ultraxg | 0x0C00000 | 0x18000 | **3 × 2^15** |
+| ultrax | 0x0C00000 | 0x18000 | **3 × 2^15** |
 | dynagear | 0x1000000 | 0x20000 | 2^17 |
-| survartsu / twineag2 / stmblade | 0x1800000 | 0x30000 | **3 × 2^16** |
+| twineag2 / stmblade | 0x1800000 | 0x30000 | **3 × 2^16** |
 | cairblad / drifto94 / vasara / vasara2 | 0x2000000 | 0x40000 | 2^18 |
 
 The core's `wrap_code = code[16:0]` mask was correct **only** for Dyna Gear.
@@ -110,13 +111,13 @@ watchdog device reset; `verif/tb_ssv_es5506_regs.sv` covers the retention edge.
 
 `sel_rom` derived from `cfg.prog_mb`: in 24-bit arithmetic the base is exactly
 `-prog_size`, giving **$f00000 / $e00000 / $c00000** for 1 / 2 / 4 MB — MAME's
-values for all nine sets, with no extra config field.
+values for all eight supported sets, with no extra config field.
 
 The watchdog now has three modes, and this is not cosmetic:
 
 | mode | kick | games |
 |---:|---|---|
-| 1 | read `$210000` | dynagear, survarts, twineag2, ultrax |
+| 1 | read `$210000` | dynagear, twineag2, ultrax |
 | 2 | write `$210000` | vasara, vasara2 |
 | 0 | none | drifto94, stmblade |
 
@@ -134,7 +135,7 @@ the exact boundary, and the decisive **wrong-direction** phase.
 ### Per-game region sizes
 
 The SDRAM slots carried Dyna Gear's sizes, so the larger titles would not have
-fit. They are now sized for the worst case across the ten entries (program 4 MB,
+fit. They are now sized for the worst case across the eight entries (program 4 MB,
 graphics 32 MB, samples 8 MB), with graphics occupying exactly bank 1.
 High-water 104 MB of 128 MB, no overlaps, graphics base still 16-byte aligned.
 
@@ -154,10 +155,9 @@ Bases did not move, so no byte of data relocated: frame CRC identical.
 
 ### Six-button matrix and $500008
 
-MAME's `ADD_BUTTONS` at `$500008` carries P1 buttons 4-6 on bits 0-2 and P2 on
-bits 4-6, active low, and **only `survarts_map` decodes it** -- Survival Arts is
-a fighting game. The core exposed two game buttons, tied B3 released, and
-hardwired `in_extra` to `16'hffff`.
+The retired Survival Arts family used MAME's `ADD_BUTTONS` at `$500008` for
+P1/P2 buttons 4-6. That path remains documented in the shared source audit, but
+it is not part of the supported profile or release matrix.
 
 `J1` is now ten entries (`B1..B6, Test, Service, Start, Coin`), which renumbers
 every joystick bit, so `CONF_STR`, `player_port`, `db15_to_joy`, the
@@ -165,8 +165,9 @@ test/service/coin taps, `in_extra`, the input-matrix bench's *mirror* of all of
 that, and the `<buttons>` list in the ten manifest MRAs moved together. B3 is a real
 button now; SSV's port always carried it and Dyna Gear simply never presses it.
 
-`extra_input_mode` distinguishes an absent decode, Dyna Gear's decoded but
-idle port, and Survival Arts' live B4-B6 wiring. `system_input_mode` separately
+`extra_input_mode` distinguishes an absent decode and Dyna Gear's decoded but
+idle port in the supported profile. The retired Survival Arts B4-B6 wiring
+remains available only to source-level diagnostics. `system_input_mode` separately
 keeps Vasara/Vasara 2 Test and Tilt fixed high while normal profiles retain
 live cabinet inputs.
 
@@ -187,7 +188,7 @@ to prove B3 was unreachable, and now proves the full low byte goes active.
 | MRA `<rom index="1">` config path in the loader | **Done.** Descriptor bytes are validated, decoded, and used for ROM placement and runtime feature selection. |
 | IRQ level 1 at scanline 0 | **Done in shared RTL.** `cfg.irq_level1_line0` is consumed by `rtl/ssv_irq.sv`; per-set gameplay qualification remains open. |
 | Tile-code expansion table | **Done in shared RTL.** Both renderers consume `cfg.tile_code_identity`; modulo coverage is in `verif/tb_ssv_cfg.sv`. |
-| `tools/gen_ssv_mras.py` | **Done for the qualified matrix.** The authoritative manifest, descriptor generation, and profile audit are in `tools/ssv_supported_sets.py`, `tools/gen_ssv_mras.py`, and `tools/verify_ssv_universal_profile.py`. |
+| `tools/gen_ssv_mras.py` | **Done for the qualified matrix.** The eight-set authoritative manifest, descriptor generation, and profile audit are in `tools/ssv_supported_sets.py`, `tools/gen_ssv_mras.py`, and `tools/verify_ssv_universal_profile.py`. |
 | Compressed ES5506 samples | **Shared path implemented; focused-tested.** The MAME/OTTO decoder is centralized in `ssv_pkg`, with table-value and post-mixer polarity regressions; full real-set/matrix qualification remains open. |
 | V60 opcode gaps | **Open qualification boundary.** Any implementation is shared CPU RTL and must be covered before promoting additional sets. |
 

@@ -26,7 +26,8 @@ from ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
 # in <about> rather than silently mapped to nothing.
 # The core's J1 list is now ten entries: six game buttons then
 # Test/Service/Start/Coin. SSV's P1/P2 ports carry B1-B3 and the $500008
-# window carries B4-B6 (Survival Arts uses all six). Test and Service reuse
+# window carries B4-B6 (the retired Survival Arts family used all six). Test and
+# Service reuse
 # R and L, which is what they mapped to before the widening.
 BUTTONS_DEFAULT = ('Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,'
                    'Test,Service,Start,Coin',
@@ -485,7 +486,7 @@ def main():
             gfx_mb = gfx_region >> 20
             if gfx_mb not in cfgblk.SUPPORTED_GFX_MB:
                 raise ValueError(
-                    "graphics region %d MB is outside the ten-set profile" %
+                    "graphics region %d MB is outside the supported profile" %
                     gfx_mb)
             gfx_load_end = max((region_load_end(r) for r in gfx), default=0)
             prog_size = prog[0]['size'] if prog else 0

@@ -71,7 +71,7 @@ def decompose_tiles(tiles):
     """tiles -> (k, factor_code), where tiles == ODD_TILE_FACTORS[code] << k.
 
     MAME wraps sprite codes with `code % gfxelement->elements()` -- a true
-    modulo -- and elements() = sprites_region / 128.  The ten-set manifest
+    modulo -- and elements() = sprites_region / 128.  The supported-set manifest
     needs only power-of-two and 3*power-of-two tile counts.  Encoding the odd
     factor selects the shared small constant-modulo path in RTL.
     """
@@ -363,7 +363,7 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
     if gfx_mb not in SUPPORTED_GFX_MB:
-        raise ValueError("graphics region %d MB is outside the ten-set profile" %
+        raise ValueError("graphics region %d MB is outside the supported profile" %
                          gfx_mb)
     if visible_width & 1 or not 2 <= visible_width <= 510:
         raise ValueError("visible width %d is not an encodable even width" % visible_width)
@@ -382,7 +382,7 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     b[8] = ens_valid & 0x0F
     b[9] = ((1 if flags.get("tile_code_identity") else 0) |
             (2 if flags.get("irq_level1_line0") else 0) |
-            # Bit 2 is reserved zero in the ten-set descriptor ABI.
+            # Bit 2 is reserved zero in the supported descriptor ABI.
             (8 if flags.get("has_st010") else 0) |
             (16 if flags.get("has_drifto_unknown") else 0) |
             (32 if flags.get("lockout_inverted") else 0) |

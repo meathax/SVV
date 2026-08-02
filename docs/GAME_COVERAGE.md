@@ -6,7 +6,8 @@ a 16-byte index-1 descriptor before index-0 ROM data; that descriptor selects
 the ROM geometry and optional board paths at runtime.
 
 `tools/ssv_supported_sets.py` is the authoritative release list. It currently
-matches all ten locally available ROM archives:
+matches the eight supported ROM archives. Two retired local archives are kept
+for reference but are not profile entries or generated support descriptors:
 
 | Set | Hardware family selected at runtime |
 |---|---|
@@ -15,15 +16,13 @@ matches all ten locally available ROM archives:
 | `vasara`, `vasara2` | 4 MiB program, 32 MiB graphics, two ES5506 banks, write-kick watchdog |
 | `drifto94` | ST010, 4 MiB program, 32 MiB graphics, 2 KiB NVRAM, no watchdog |
 | `stmblade` | ST010, 4 MiB program, 24 MiB graphics, 2 KiB NVRAM, no watchdog |
-| `survartsu` | 24 MiB graphics, `$400000-$43ffff` RAM, extra B4-B6 input window |
 | `twineag2` | ST010, `$010000-$03ffff` RAM, IRQ level-1 line 0, four ES5506 bank aliases |
-| `ultrax`, `ultraxg` | 12 MiB graphics, `$010000-$03ffff` RAM, IRQ level-1 line 0 |
+| `ultrax` | 12 MiB graphics, `$010000-$03ffff` RAM, IRQ level-1 line 0 |
 
-The current source-exhaustion and gameplay-proof pass is narrower: it runs only
-the eight parents in `PARENT_RUN_ORDER`, in the owner-selected order Dyna Gear,
-Vasara, Vasara 2, then Cair Blade, Drift Out '94, Storm Blade, Twin Eagle II,
-and Ultra X. `survartsu` and `ultraxg` remain in the universal manifest but are
-clones for this task and are not run or accepted as proof for a parent.
+The current source-exhaustion and gameplay-proof pass runs the eight supported
+sets in `PARENT_RUN_ORDER`, in the owner-selected order Dyna Gear, Vasara,
+Vasara 2, then Cair Blade, Drift Out '94, Storm Blade, Twin Eagle II, and Ultra
+X. There are no clone/review entries in the release profile.
 
 The descriptor also carries the exact graphics modulo geometry, populated
 graphics quarters, ES5506 bank-valid/map fields, sample-stream size, and
@@ -44,7 +43,7 @@ This verifies that every qualified archive has one MRA, every MRA selects
 `SSV`, descriptors are ordered/checksummed/unique, supported memory geometries
 fit the universal SDRAM map, and every named ROM part exists locally.
 Presentation rotation is generated from MAME (`ROT0` -> `horizontal`,
-`ROT270` -> `vertical (ccw)`) and checked for all ten manifest entries; raw
+`ROT270` -> `vertical (ccw)`) and checked for all eight manifest entries; raw
 Verilator/MAME comparison remains on the same native unrotated raster.
 
 Qualification status is not the same as full gameplay accuracy. Historical
@@ -57,28 +56,17 @@ diverged at frame 55 in the logo bounding box (98.2949% exact pixels, 1,375
 pixels different). Video state first diverged at frame 8, with no renderer
 overrun. This is close-attract evidence, not the required gameplay proof or
 the 360-frame screenshot gate. A shared exact-consecutive ordinary-descriptor
-cache suppression is source-integrated. Survival Arts
-executes the renderer
-on its first diagnostic frame; the current two-frame demand census measured
-23,161 line entries and 821 peak entries, and the shared deadline containment
-reached the first visible-line swap without a cache abort. Exact consecutive
-non-shadow descriptor suppression removed the six diagnostic object overruns
-(`6560` skips; graphics transactions `2463 -> 8`). The first strict Survival
-attempt reached frame 326/360 without a renderer overrun, then stopped on the
-testbench's `400,000,000`-cycle budget, so the strict gate remains inconclusive
-and needs a clean rerun with the larger deterministic budget. The shared
-behavioral visual model now also serves the ST010 program-fetch burst and
-loads the 2,048-word ST010 data ROM before releasing the core: Storm Blade
-reaches completed frames (30-frame replay, exact pixels through frame 5), and
-Drift Out reaches a completed first frame with exact pixels and state. Those
-are bounded bring-up results only; all strict passes must still be rerun after
-the current shared renderer and map changes before release evidence is
-considered current.
+cache suppression is source-integrated. The shared behavioral visual model now
+also serves the ST010 program-fetch burst and loads the 2,048-word ST010 data
+ROM before releasing the core: Storm Blade reaches completed frames (30-frame
+replay, exact pixels through frame 5), and Drift Out reaches a completed first
+frame with exact pixels and state. Those are bounded bring-up results only; all
+strict passes must still be rerun after the current shared renderer and map
+changes before release evidence is considered current.
 
-A pinned MAME reference sweep now has 20-frame CRC/state streams for all ten
-authoritative sets. These are behavioral-reference inputs for later
-differential checks only; they do not count as Verilator attract or screenshot
-evidence.
+A pinned MAME reference sweep now has 20-frame CRC/state streams for all eight
+current authoritative sets. Reference streams for retired local archives are
+historical only; none count as Verilator attract or screenshot evidence.
 
 The native SDL Verilator harness has independently proved the live-window path
 on Dyna Gear: the pre-audio harness model opened a responsive native window, reached
@@ -132,13 +120,11 @@ attract screenshot gate plus matched gameplay proof.
 | `vasara2` | Not proven | 0% | Current visible lockstep `vasara2-attract120-20260802` is exact through frame 54 and first differs at frame 55 in the logo box (1,375 pixels, 98.2949% exact); state first differs at frame 8. No renderer overrun was reported. This is close-attract evidence only; the 360-frame Verilator screenshot and matched gameplay proof remain pending. |
 | `drifto94` | Completed first frame; longer replay diverges | 0% | Native geometry is 336x238. The current ST010-backed one-frame replay is pixel/state exact; a bounded 30-frame probe reached frame 16 before the session wall-clock ceiling and had already diverged heavily after frame 11. Attract/gameplay gate remains pending |
 | `stmblade` | Completed frames; short replay diverges | 0% | Native geometry is 352x240. The current ST010-backed replay completed 30/30 frames with no renderer overrun; frames 1-5 were pixel-exact, then the first visible divergence was frame 6 (94.51% exact by frame 30). ST010-specific trace evidence and the strict attract/gameplay gate remain pending |
-| `survartsu` | Not proven | 0% | Deadline and two-frame throughput diagnostics pass after duplicate suppression; first strict attempt stopped at frame 326/360 on cycle budget, clean rerun pending launcher availability |
 | `twineag2` | Boot timeout before first compared frame | 0% | Native MAME preflight is valid at 336x240. The visible RTL model still did not reach a ready frame within the bounded 90-second one-frame probe; ST010/IRQ1 gameplay proof remains pending |
 | `ultrax` | Boot timeout before first compared frame | 0% | Native MAME preflight is valid at 336x240. The visible RTL model opened and executed reset-vector reads, but did not reach a ready frame within the bounded 90-second one-frame probe; IRQ1 gameplay proof remains pending |
-| `ultraxg` | Not proven | 0% | Profile/media audited; strict run pending |
 
-Historical strict attract progress remains 2/10 games (20%), while
-current screenshot-qualified release progress is 0/10 until Dyna Gear,
+Historical strict attract progress remains 2/8 games (25%), while
+current screenshot-qualified release progress is 0/8 until Dyna Gear,
 Cairblad, Vasara 2, and every remaining set are rerun under the updated gate.
 
 The same descriptor-driven runner selects each title and does not create a

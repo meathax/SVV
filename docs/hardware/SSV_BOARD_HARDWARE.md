@@ -71,7 +71,7 @@ which no photograph can settle.
 |---|---|---|---|
 | SSV is a two-part system: a common motherboard plus a per-game ROM/cartridge board | `[SECONDARY]` | Multiple collector/auction listings | Matches the core's structure (fixed core + per-game ROM set) |
 | Motherboard revisions **STA-0001** and **STA-0001B** exist | `[SECONDARY]` | Search summary of collector sources | Unknown whether the revisions differ functionally. Worth establishing before claiming "SSV accurate" generally |
-| **Dyna Gear and Survival Arts share the same `SAM-5127` sub-board and the same memory map** | `[SECONDARY]` | arcade-projects.com discussion | **Directly actionable:** Survival Arts is the cheapest second game to support — same board, same map. Good first target after Dyna Gear |
+| **Dyna Gear and Survival Arts share the same `SAM-5127` sub-board and the same memory map** | `[SECONDARY]` | arcade-projects.com discussion | **Historical platform evidence only:** Survival Arts is retired from the current supported profile; this is not a release-support target |
 | 4-in-1 multi ROM boards exist (Change Air Blade, Vasara 1, Vasara 2, Ultra X Weapons) | `[SECONDARY]` | Auction listings, repair logs | These are aftermarket/multi conversions, not original topology |
 
 ## 2. Crystals and oscillators — RESOLVED `[PRIMARY]`
@@ -119,8 +119,9 @@ does. The remaining customs still need a sharper photograph.
 ## 4a. Dyna Gear ROM board — `SAM-5127` `[PRIMARY]`
 
 Silkscreen reads **`SAM-5127`** / **`MADE IN JAPAN`**, confirming the forum claim that Dyna
-Gear uses this sub-board (and therefore that Survival Arts, reported to share it, is the
-natural second target).
+Gear uses this sub-board (and Survival Arts was reported to share it); that historical
+comparison remains useful for board analysis, but Survival Arts is outside the current release
+profile.
 
 | Feature | Detail |
 |---|---|

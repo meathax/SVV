@@ -9,7 +9,11 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
+from ssv_supported_sets import (
+    RETIRED_LOCAL_SETS,
+    SUPPORTED_SETS,
+    SUPPORTED_SET_IDS,
+)
 
 
 def fail(message: str, errors: list[str]) -> None:
@@ -63,9 +67,8 @@ def main() -> int:
     rows = []
     seen_ids: set[int] = set()
     # Archives named by a qualified MRA are media dependencies, not additional
-    # supported sets.  In particular survartsu may be stored as a split clone
-    # plus survarts parent archive even though only survartsu is in the
-    # authoritative manifest.
+    # supported sets. Retired local archives are allowed below so removing a
+    # profile entry does not require deleting private ROM media.
     allowed_archive_stems: set[str] = set()
     for setname in SUPPORTED_SETS:
         if setname not in by_set:
@@ -192,6 +195,7 @@ def main() -> int:
     if args.require_roms:
         local_sets = {p.stem for p in (repo / "rom").glob("*.zip")}
         required_sets = set(SUPPORTED_SETS)
+        allowed_archive_stems.update(RETIRED_LOCAL_SETS)
         missing_required = required_sets - local_sets
         unexpected = local_sets - allowed_archive_stems
         if missing_required or unexpected:

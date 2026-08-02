@@ -10,7 +10,7 @@
   <rbf>SSV</rbf>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53020218100103440F0A110708A8F068</part>
+    <part>53020218100103440F0A110608A8F069</part>
   </rom>
   <rom index="0" zip="twineag2.zip">
     <!-- program -->

@@ -11,7 +11,7 @@
   <rbf>SSV</rbf>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>5302020C0F0103440F02110808A8F07C</part>
+    <part>5302020C0F0103440F02110708A8F07D</part>
   </rom>
   <rom index="0" zip="ultrax.zip">
     <!-- program -->

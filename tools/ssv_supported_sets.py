@@ -6,8 +6,8 @@ by the MRA index-1 descriptor and selected at ROM-load time; they are not
 separate Quartus revisions or compile-time feature builds.
 
 Keep this list limited to sets for which the project owner has a local ROM
-archive and intends to qualify.  Clone sets are listed separately when their
-archive is present, even when they share the same hardware feature family.
+archive and intends to qualify.  Retired local archives are listed separately
+below so the media audit can preserve them without treating them as support.
 """
 
 SUPPORTED_SETS = (
@@ -17,9 +17,14 @@ SUPPORTED_SETS = (
     "vasara2",
     "drifto94",
     "stmblade",
-    "survartsu",
     "twineag2",
     "ultrax",
+)
+
+# Private archives retained locally for reference, but deliberately excluded
+# from the universal profile and MRA generation.
+RETIRED_LOCAL_SETS = (
+    "survartsu",
     "ultraxg",
 )
 
@@ -28,8 +33,8 @@ SUPPORTED_SET_IDS = {
 }
 
 # Execution scope for the current source-exhaustion/real-game proof pass.
-# This does not replace SUPPORTED_SETS or remove locally qualified clone media;
-# it only prevents clone evidence from standing in for a parent-ROM run.
+# This remains separate from SUPPORTED_SETS so future diagnostic subsets cannot
+# silently change the release profile.
 PARENT_RUN_ORDER = (
     "dynagear",
     "vasara",

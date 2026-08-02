@@ -13,12 +13,11 @@ Verilator attract, soak, renderer-overrun, screenshot, and media audit
 requirements.  MAME execution and screenshots are behavioural-reference
 evidence only.
 
-The authoritative universal-profile manifest still contains ten local archives,
-but the project owner narrowed this source-port and real-game proof pass to the
-eight parent sets in `PARENT_RUN_ORDER` in `tools/ssv_supported_sets.py`.
-`dynagear` is first, followed by `vasara`, `vasara2`, and the remaining parents.
-The in-manifest clones `survartsu` and `ultraxg` are ignored by this pass and may
-not supply proof for their parents.  The other 23 MAME entries remain an
+The authoritative universal-profile manifest contains the eight supported sets
+in `PARENT_RUN_ORDER` in `tools/ssv_supported_sets.py`. `dynagear` is first,
+followed by `vasara`, `vasara2`, and the remaining parents. The retired local
+archives `survartsu` and `ultraxg` are preserved for reference only and are not
+profile entries or proof targets. The other 25 MAME entries remain an
 inventory of what was inspected, but their maps, devices, inputs, descriptors,
 and MRAs are deliberately out of scope and must not be implemented or generated
 by this pass.
@@ -118,7 +117,7 @@ cost and shared hardware family, not by a new support promise.
 | Group | Count | Sets | Meaning for the universal core |
 | --- | ---: | --- | --- |
 | Parent proof scope | 8 | `dynagear`, `cairblad`, `vasara`, `vasara2`, `drifto94`, `stmblade`, `twineag2`, `ultrax` | Current source-port and Verilator gameplay-proof targets, ordered by `PARENT_RUN_ORDER`. |
-| In-manifest clones excluded from this pass | 2 | `survartsu`, `ultraxg` | Local media/profile entries remain intact, but this pass does not run or qualify them. |
+| Retired local archives excluded from this pass | 2 | `survartsu`, `ultraxg` | Private media remains intact, but neither archive has a supported MRA or profile entry. |
 | Clone-easy candidates | 4 | `survarts`, `survartsj`, `stmbladej`, `vasara2a` | Mostly media/region/input variants, but each still requires a manifest entry, generated descriptor, legal local media, and full universal-model qualification. |
 | Near-base candidates | 5 | `keithlcy`, `pastelis`, `mslider`, `ryorioh`, `meosism` | Reuse the base board with specific IRQ, mirror, quiz-input, medal-input, or NVRAM additions. |
 | Mahjong/key-matrix family | 8 | `srmp4`, `srmp4o`, `hypreact`, `hypreac2`, `janjans1`, `janjans2`, `koikois2`, `srmp7` | Needs descriptor-driven key matrices/selectors; some sets also need inverted lockout and SRMP7 sound behaviour. |
@@ -171,7 +170,7 @@ and zeroes to all 32 voice banks; watchdog reset restores only the device-level
 
 ## Qualified-set findings and current disposition
 
-These findings affect one or more of the ten qualified targets or a universal
+These findings affect one or more of the eight qualified targets or a universal
 path used by them.  “Source-integrated” only describes the current worktree; it
 does not mean the qualification matrix passed.
 
@@ -370,7 +369,7 @@ clearing every enable/vector register.
 
 The universal core covers the qualified level-1/level-3 path.  Descriptor byte
 9 bit 2 is deliberately reserved and rejected rather than carrying Pastel
-Island's scanline-120 level-2 path into this ten-set profile.  The enable-line
+Island's scanline-120 level-2 path into this eight-set profile.  The enable-line
 timing difference is now a demonstrated qualified-game defect: Vasara reached
 its IRQ setup with level 3 already pending, wrote mask `0x000c`, and the old
 combinational RTL asserted before the following `UPDPSW` disabled interrupts.
@@ -495,7 +494,7 @@ alignment, and bus sequencing.  The repository has 29 directed V60 benches and
 recorded Python-reference cosim baselines, but not an exhaustive MAME
 opcode-by-addressing-mode comparison.
 
-The next useful evidence is trace-driven coverage from all ten qualified sets:
+The next useful evidence is trace-driven coverage from all eight qualified sets:
 compare instruction PC/opcode, registers, flags, effective address, width,
 read/write data, and exception/IRQ boundaries.  Do not invent implementations
 for suboperations MAME also marks unhandled.
@@ -566,17 +565,17 @@ required shared descriptor path.
 | P0 | Correct sample-region big-endian word storage | Source-integrated; compile-checked | Loader word tests `CDAB`, `8001`, `8000`; byte-loaded zero lane | Qualified attract/audio checks across every sample-bank layout |
 | P0 | Complete ES5506 BLE/zero-length/envelope/ECOUNT/IRQV/compressed semantics | Source-integrated; compile-checked | Dedicated voice/register tests for both sides of every condition | Qualified attract/soak with no audio fetch/protocol failures; targeted audible/capture checks |
 | P0 | Live CRTC clip limits | Source-integrated; compile-checked | All four edges for BG and objects, reset/default and writes | Qualified frame captures, especially Twin Eagle II |
-| P0 | Descriptor-visible geometry and matching blank status | Source-integrated; compile-checked | Four geometry profiles and exact edge points | Same-run non-empty screenshots at native geometry for all ten qualified sets |
+| P0 | Descriptor-visible geometry and matching blank status | Source-integrated; compile-checked | Four geometry profiles and exact edge points | Same-run non-empty screenshots at native geometry for all eight qualified sets |
 | P0 | Transaction-correct random reads | Source-integrated; compile-checked | Held request, repeated transactions, shared stream, disabled path | Drift Out/Storm Blade attract soak |
-| P0 | Zero-valued unmapped reads | Source-integrated; compile-checked | Optional/no-read/write-only apertures plus mapped idle inputs | All-ten CPU progress/attract regression |
+| P0 | Zero-valued unmapped reads | Source-integrated; compile-checked | Optional/no-read/write-only apertures plus mapped idle inputs | All-eight CPU progress/attract regression |
 | P0 | Power-on video and watchdog-retained board latches | Source-integrated; compile-checked | Cold/soft reset, output bit 7, CRTC RAM, IRQ mask/vector, bookkeeping | Parent-set boot plus watchdog interaction |
 | P1 | NVRAM zero-init and 2 KiB/64 KiB persistence | Source-integrated; compile-checked | Byte lanes, both sizes, cold zero, bridge upload/download, disabled isolation | Drift Out, Storm Blade, Cair Blade save/restart evidence |
 | P1 | Exact three-second watchdog from reset | Source-integrated; compile-checked | Pre/post-video timeout, exact boundary, all kick modes/directions | Representative qualified profile per watchdog mode |
 | P1 | Coin lockout polarity/gating and counters | Source-integrated; compile-checked | Normal/inverted, two slots, edges, lanes, reset | Cair Blade plus normal-polarity qualified set |
 | P1 | Vasara SYSTEM mask | Source-integrated; compile-checked | Masked and live descriptor profiles | Vasara and Vasara 2 input/attract checks |
-| P1 | Extra-input mode replacing boolean | Source-integrated; compile-checked | `none`, Dyna fixed-high, Survival six-button | Dyna Gear and Survival Arts-family runs |
+| P1 | Extra-input mode replacing boolean | Source-integrated; compile-checked | `none`, Dyna fixed-high, retired Survival six-button diagnostic | Dyna Gear; Survival Arts is outside the supported matrix |
 | P1 | Split cold versus soft ST010 reset | Source-integrated; compile-checked | Register/RAM retention and reset-only fields | Twin Eagle II watchdog/continued-execution run |
-| P1 | V60 trace-driven semantic coverage | Decode exhausted; semantic coverage incomplete | Differential traces by opcode/address mode and IRQ boundary | Coverage from all ten qualified sets |
+| P1 | V60 trace-driven semantic coverage | Decode exhausted; semantic coverage incomplete | Differential traces by opcode/address mode and IRQ boundary | Coverage from all eight qualified sets |
 | P2 | Palette upper-byte decision | Hardware uncertainty | Trace/readback experiment before allocation | Representative palette-intensive game plus resource report |
 | P3 | Resolve BPP/priority/vblank/sprite-timing uncertainties | Research work | Synthetic ordered-pixel and raster-timed write/poll tests | PCB or independent primary evidence before behavioural changes |
 
@@ -594,7 +593,7 @@ same-run evidence under the repository policy.
 
 ## Final audit verification snapshot
 
-- `python tools/verify_ssv_universal_profile.py --require-roms`: **PASS 10/10**
+- `python tools/verify_ssv_universal_profile.py --require-roms`: **PASS 8/8**
   using the single `SSV.rbf` profile; qualified clone/parent media dependencies
   are derived from their MRAs without adding another supported set.
 - V60 directed suite: **31 passed, 0 failed** under Verilator 5.032.  The static

@@ -35,7 +35,7 @@ typedef struct {
     bit          mul3;
 } game_t;
 
-// Every graphics size in the authoritative ten-set manifest. Unqualified
+// Every graphics size in the authoritative supported-set manifest. Unqualified
 // MAME geometries are intentionally not accepted by this release-profile test.
 // region/128 = odd_factor << k.
 game_t games [0:3] = '{
@@ -135,39 +135,36 @@ initial begin
     end
     checked += 4;
 
-    // 5. The extra-button window is descriptor-selected, matching MAME's
-    // survarts_map() rather than being a global address alias. Check both sides
-    // of the optional path at the shared predicate used by ssv_core.
+    // 5. The optional extra-button window remains descriptor-selected rather
+    // than being a global address alias. Supported profiles expose either the
+    // Dyna decoded-idle port or no window at all.
     begin
-        if (extra_input_window_cfg(cfg_survartsu(), 24'h500008) !== 1'b1 ||
+        if (extra_input_window_cfg(cfg_dynagear(), 24'h500008) !== 1'b1 ||
             cfg_dynagear().extra_input_mode !== 2'd1 ||
-            cfg_survartsu().extra_input_mode !== 2'd2 ||
-            extra_input_window_cfg(cfg_survartsu(), 24'h50000a) !== 1'b0 ||
+            extra_input_window_cfg(cfg_dynagear(), 24'h50000a) !== 1'b0 ||
             extra_input_window_cfg(cfg_cairblad(), 24'h500008) !== 1'b0 ||
             extra_input_window_cfg(cfg_vasara(), 24'h500009) !== 1'b0) begin
             errors++;
             $display("FAIL descriptor-gated extra-input window");
         end
-        checked += 6;
+        checked += 5;
     end
 
     // 6. The MAME map-specific extra CPU RAM windows are descriptor data:
-    // Dyna/Survival use $400000, Twin Eagle/Ultra X use $010000, and the
-    // remaining maps do not expose backing RAM in either location.
+    // Dyna uses $400000, Twin Eagle/Ultra X use $010000, and the remaining
+    // supported maps do not expose backing RAM in either location.
     begin
         if (cfg_dynagear().extra_ram_mode !== 2'd1 ||
-            cfg_survartsu().extra_ram_mode !== 2'd1 ||
             cfg_cairblad().extra_ram_mode !== 2'd0 ||
             cfg_vasara().extra_ram_mode !== 2'd0 ||
             cfg_drifto94().extra_ram_mode !== 2'd0 ||
             cfg_stmblade().extra_ram_mode !== 2'd0 ||
             cfg_twineag2().extra_ram_mode !== 2'd2 ||
-            cfg_ultrax(1'b0).extra_ram_mode !== 2'd2 ||
-            cfg_ultrax(1'b1).extra_ram_mode !== 2'd2) begin
+            cfg_ultrax().extra_ram_mode !== 2'd2) begin
             errors++;
             $display("FAIL descriptor extra CPU RAM mode");
         end
-        checked += 9;
+        checked += 7;
     end
 
     // 7. Drift Out/Storm Blade expose MAME's random-read test windows at
@@ -178,7 +175,7 @@ initial begin
             cfg_drifto94().has_drifto_unknown !== 1'b1 ||
             cfg_stmblade().has_drifto_unknown !== 1'b1 ||
             cfg_twineag2().has_drifto_unknown !== 1'b0 ||
-            cfg_ultrax(1'b0).has_drifto_unknown !== 1'b0) begin
+            cfg_ultrax().has_drifto_unknown !== 1'b0) begin
             errors++;
             $display("FAIL descriptor Drift Out random-read windows");
         end
@@ -193,7 +190,7 @@ initial begin
             cfg_drifto94().nvram_mode !== 2'd1 ||
             cfg_stmblade().nvram_mode !== 2'd1 ||
             cfg_twineag2().nvram_mode !== 2'd0 ||
-            cfg_ultrax(1'b0).nvram_mode !== 2'd0) begin
+            cfg_ultrax().nvram_mode !== 2'd0) begin
             errors++;
             $display("FAIL descriptor NVRAM window size");
         end
@@ -209,13 +206,11 @@ initial begin
             active_width_cfg(cfg_cairblad()) !== 9'd338 ||
             active_width_cfg(cfg_stmblade()) !== 9'd352 ||
             active_width_cfg(cfg_twineag2()) !== 9'd336 ||
-            active_width_cfg(cfg_ultrax(1'b0)) !== 9'd336 ||
-            active_width_cfg(cfg_ultrax(1'b1)) !== 9'd336 ||
+            active_width_cfg(cfg_ultrax()) !== 9'd336 ||
             // cfg_for_game() is the universal frame/visual bench path. Keep
             // its IDs in parity with the direct descriptor constructors.
+            active_width_cfg(cfg_for_game(4'd6)) !== 9'd336 ||
             active_width_cfg(cfg_for_game(4'd7)) !== 9'd336 ||
-            active_width_cfg(cfg_for_game(4'd8)) !== 9'd336 ||
-            active_width_cfg(cfg_for_game(4'd9)) !== 9'd336 ||
             active_height_cfg(cfg_drifto94()) !== 9'd238 ||
             cfg_vasara().system_input_mode !== 1'b1 ||
             cfg_vasara2().system_input_mode !== 1'b1 ||
@@ -224,7 +219,7 @@ initial begin
             errors++;
             $display("FAIL descriptor geometry/system-input mode");
         end
-        checked += 15;
+        checked += 13;
     end
 
     // 10. Prove this bench DISCRIMINATES. A test that passes against both the

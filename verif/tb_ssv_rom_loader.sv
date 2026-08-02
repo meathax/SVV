@@ -220,7 +220,7 @@ initial begin
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
-    ultrax_cfg = cfg_ultrax(1'b0);
+    ultrax_cfg = cfg_ultrax();
     send_cfg(ultrax_cfg);
     if (!cfg_valid || cfg.game_id !== ultrax_cfg.game_id ||
         cfg.extra_ram_mode !== 2'd2 || cfg.nvram_mode !== 2'd0)
