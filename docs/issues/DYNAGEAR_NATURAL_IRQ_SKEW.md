@@ -1,5 +1,9 @@
 # Issue contract: natural vblank IRQ retirement skew vs MAME
 
+> Historical investigation below predates the shared CPU increment correction
+> from 21702 to 21701. Preserve its traces as historical evidence; use the
+> current-model ledger for qualification claims.
+
 ## Issue
 
 With natural vblank (no `DIFF_IRQ_SCHEDULE`), the first V60 IRQ handler entry

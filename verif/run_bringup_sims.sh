@@ -77,6 +77,39 @@ run_one() {
 run_one tb_ssv_rom_loader \
   rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv verif/tb_ssv_rom_loader.sv
 
+run_one tb_ssv_cfg \
+  rtl/ssv_pkg.sv verif/tb_ssv_cfg.sv
+
+run_one tb_ssv_irq \
+  rtl/ssv_irq.sv verif/tb_ssv_irq.sv
+
+run_one tb_ssv_video_timing \
+  rtl/ssv_pkg.sv rtl/ssv_video_timing.sv verif/tb_ssv_video_timing.sv
+
+run_one tb_ssv_clock_ratio \
+  rtl/ssv_pkg.sv rtl/ssv_video_timing.sv verif/ssv_tb_ce_cpu.sv \
+  verif/tb_ssv_clock_ratio.sv
+
+run_one tb_ssv_input_matrix \
+  verif/tb_ssv_input_matrix.sv
+
+run_one tb_ssv_nvram_bridge \
+  rtl/mem/ssv_nvram_bridge.sv verif/tb_ssv_nvram_bridge.sv
+
+run_one tb_ssv_gfx_row_fetch \
+  rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
+  verif/tb_ssv_gfx_row_fetch.sv
+
+run_one tb_ssv_cached_sprite_renderer \
+  rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
+  rtl/video/ssv_gfx_row_decode.sv \
+  rtl/video/ssv_cached_sprite_renderer.sv \
+  verif/tb_ssv_cached_sprite_renderer.sv
+
+run_one tb_ssv_line_buffer4 \
+  rtl/common/s32_big_dpram.sv rtl/video/ssv_line_buffer4.sv \
+  verif/tb_ssv_line_buffer4.sv
+
 # ST010 program fetch. Checks the instruction-address -> SDRAM-byte arithmetic
 # and the big/little-endian handoff between the loader's packing and MAME's
 # 32-bit-BE dspprg region, which nothing else covers.
@@ -98,6 +131,10 @@ run_one tb_ssv_rom_write_ack \
   "${SSV_CORE_FILES[@]}" verif/tb_ssv_rom_write_ack.sv
 
 run_one tb_ssv_watchdog \
+  "${SSV_CORE_FILES[@]}" verif/tb_ssv_watchdog.sv
+run_one tb_ssv_watchdog_mode0 \
+  "${SSV_CORE_FILES[@]}" verif/tb_ssv_watchdog.sv
+run_one tb_ssv_watchdog_mode2 \
   "${SSV_CORE_FILES[@]}" verif/tb_ssv_watchdog.sv
 
 # Natural-vblank boot must raise video_enable (long RAM clear ~35s wall).

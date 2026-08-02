@@ -67,7 +67,8 @@
 
 module upd96050_st010 (
     input               clk,
-    input               rst,
+    input               rst,       // cold/download reset: clear all state/RAM
+    input               soft_rst,  // watchdog /RESET: MAME-retained state
     // Instruction-issue enable for the DSP. On SSV, drive from a fractional
     // accumulator with increment 3391 off clk_sys (48.324 MHz) for the
     // 2.5 MIPS MAME models at its (self-flagged "TODO: correct?") 10 MHz.
@@ -154,7 +155,7 @@ logic dp_rd_q, dp_wr_q;
 wire  dp_rd_lvl = cpu_re && sel_dport;
 wire  dp_wr_lvl = cpu_we && sel_dport;
 always_ff @(posedge clk) begin
-    if (rst) begin
+    if (rst || soft_rst) begin
         dp_rd_q <= 1'b0;
         dp_wr_q <= 1'b0;
     end
@@ -205,7 +206,7 @@ wire [15:0] drom_data = drom_hi_q ? 16'h0000 : drom_q;
 
 //==========================================================================
 upd96050 dsp (
-    .clk(clk), .ce(ce_dsp), .rst(rst),
+    .clk(clk), .ce(ce_dsp), .rst(rst), .soft_rst(soft_rst),
 
     .prg_addr(prg_addr), .prg_req(prg_req),
     .prg_data(prg_data), .prg_valid(prg_valid),

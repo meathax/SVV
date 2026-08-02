@@ -1,5 +1,11 @@
 # CLAUDE.md — MiSTer core project conventions
 
+The repository-level `AGENTS.md` and `core-debug.toml` are the authoritative
+current contract. This SSV project has one universal `Arcade-SSV` revision and
+one `SSV.rbf`; game-specific behavior is selected by the MRA descriptor at
+runtime. Any older placeholder or Dyna Gear-only note below is historical and
+must not override that contract.
+
 Persistent rules for this repo. These apply to every session, so they do not belong in a
 per-bug prompt. Fill the `<FILL>` placeholders once; after that, per-bug prompts stay short.
 

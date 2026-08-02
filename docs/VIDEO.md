@@ -47,13 +47,17 @@ RGB value at scanout.
 ## Renderer pipeline
 
 1. Cache visible global/local descriptors during vblank and bucket their
-   indices by scanline in M10K memory.
+   indices by scanline in the compact shared line-entry pool. Exact
+   consecutive ordinary descriptors are suppressed at this stage; shadow and
+   tilemap descriptors remain ordered and distinct.
 2. Swap the double line buffer and clear its four 84-word banks in 84 clocks.
 3. Draw scroll-zero background pixels four at a time.
 4. Replay the scanline bucket in original RAM order, interleaving normal
    sprites and tilemap sprites exactly as MAME does.
-5. Elide only consecutive, identical tilemap-group redraws caused by MAME's
-   inclusive 65-line slice overlap; any intervening draw cancels elision.
+5. Elide consecutive, identical ordinary descriptor redraws, and elide only
+   consecutive tilemap-group redraws caused by MAME's inclusive 65-line slice
+   overlap; any intervening draw cancels the corresponding elision. Shadow
+   writes are never elided because they update the existing pixel value.
 6. Resolve shadow writes against the existing 15-bit per-pixel value with
    same-address forwarding.
 7. Resolve palette indices through the live xRGB888 palette during scanout.

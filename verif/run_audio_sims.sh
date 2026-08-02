@@ -51,6 +51,16 @@ verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_es5506_regs \
 verilator-safe status
 verilator-sim-safe -- "$OUT/regs/tb_ssv_es5506_regs" | tee "$OUT/regs/run.log"
 
+echo "=== BUILD/RUN tb_ssv_es5506_ulaw ==="
+mkdir -p "$OUT/ulaw"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_es5506_ulaw \
+  --Mdir "$OUT/ulaw" -o tb_ssv_es5506_ulaw \
+  rtl/ssv_pkg.sv verif/tb_ssv_es5506_ulaw.sv \
+  >"$OUT/ulaw/build.log" 2>&1
+verilator-safe status
+verilator-sim-safe -- "$OUT/ulaw/tb_ssv_es5506_ulaw" | tee "$OUT/ulaw/run.log"
+
 echo "=== BUILD/RUN tb_ssv_es5506_voice ==="
 mkdir -p "$OUT/voice"
 verilator-safe status

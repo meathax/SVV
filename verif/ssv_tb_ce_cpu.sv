@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // MAME-accurate V60 clock enable for SSV benches.
-// Matches Arcade-SSV.sv: 21702/65536 * clk ~= 16 MHz at 48.317307 MHz.
+// Matches Arcade-SSV.sv and the board's 704:315 CPU-to-pixel clock ratio.
 // Wired into realrom/hang/frame TBs with sticky multi-cycle SDRAM acks
 // (see DYNAGEAR_NATURAL_IRQ_SKEW).
 `timescale 1ns/1ps
@@ -10,6 +10,7 @@ module ssv_tb_ce_cpu (
     input  logic rst,
     output logic ce_cpu
 );
+    import ssv_pkg::SSV_CPU_INC;
     logic [15:0] cpu_acc;
     always_ff @(posedge clk) begin
         logic [16:0] cpu_sum;
@@ -17,7 +18,7 @@ module ssv_tb_ce_cpu (
             cpu_acc <= 16'd0;
             ce_cpu  <= 1'b0;
         end else begin
-            cpu_sum = {1'b0, cpu_acc} + 17'd21702;
+            cpu_sum = {1'b0, cpu_acc} + {1'b0, SSV_CPU_INC};
             ce_cpu  <= cpu_sum[16];
             cpu_acc <= cpu_sum[15:0];
         end

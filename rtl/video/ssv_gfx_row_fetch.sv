@@ -47,7 +47,7 @@ state_t state;
 // happy. (A comment line may not begin with the simulator's name either --
 // that is read as a lint pragma.)
 wire [SDR_AW:0] start_record_addr =
-    gfx_record_addr(17'(wrap_code_cfg(cfg, tile_code)), tile_row);
+    gfx_record_addr(wrap_code_cfg(cfg, tile_code), tile_row);
 
 always_ff @(posedge clk) begin
     if (rst) begin
@@ -87,7 +87,7 @@ always_ff @(posedge clk) begin
                     // X against a chip model. Forcing zero there is
                     // load-bearing, not cosmetic.
                     //
-                    // Four-quarter titles (cairblad, drifto94, vasara, vasara2)
+                    // Four-quarter titles (drifto94, vasara, vasara2)
                     // DO populate it, so the choice is now per game rather than
                     // a constant. Reading unwritten memory on a 3-quarter title
                     // would be the same bug in the other direction, which is

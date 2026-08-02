@@ -645,7 +645,11 @@ endfunction
 
 // autoinc step
 function automatic [31:0] dim_step(input [1:0] d);
-    dim_step = (d==2'd0) ? 32'd1 : (d==2'd1) ? 32'd2 : 32'd4;
+    // MAME ReadAMAddress uses moddim=3 for qword lvalues (MOVD and the
+    // MULX/DIVX destination).  Auto-update modes therefore step by eight,
+    // while indexed modes naturally scale by 1<<3 in S_EA_MODE.
+    dim_step = (d==2'd0) ? 32'd1 : (d==2'd1) ? 32'd2 :
+               (d==2'd2) ? 32'd4 : 32'd8;
 endfunction
 
 // ---------------------------------------------------------------------------
@@ -746,7 +750,7 @@ else if (ce) begin
                 // combinational headroom.  Revisit only with a real STA report.
                 logic [2:0] s;
                 s = (delta >= 4) ? 3'd4 : delta[2:0];
-                if (!fb_realigning) begin
+                if (!fb_realigning && fb_prev_valid == 0) begin
                     for (int i = 0; i < 24; i++) fb_prev[i] <= fb[i];
                     fb_prev_base  <= fb_base;
                     fb_prev_valid <= fb_valid;
@@ -871,18 +875,44 @@ else if (ce) begin
 
         // ---- Bcc disp8 (0x60-0x6a,0x6c-0x6f) / disp16 equivalent ----
         8'b0110_????: begin
-            if (cond_true(opcode[3:0]))
-                 pc <= pc + {{24{fb[1][7]}}, fb[1]};
-            else pc <= pc + 2;
-            st <= S_FILL; st_after_fill <= S_DECODE;
+            logic [31:0] branch_target;
+            branch_target = cond_true(opcode[3:0])
+                ? pc + {{24{fb[1][7]}}, fb[1]}
+                : pc + 2;
+            pc <= branch_target;
+            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+                for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
+                fb_valid <= fb_prev_valid;
+                fb_wr    <= fb_prev_valid;
+                fb_base  <= fb_prev_base;
+                fb_realigning <= 1'b0;
+                pf_epoch <= pf_epoch + 4'd1;
+                pf_suppress <= 1'b1;
+                st <= S_DECODE;
+            end else
+                st <= S_FILL;
+            st_after_fill <= S_DECODE;
         end
         8'b0111_????: begin
             logic [15:0] bd16;
+            logic [31:0] branch_target;
             bd16 = fb16(1);
-            if (cond_true(opcode[3:0]))
-                 pc <= pc + {{16{bd16[15]}}, bd16};
-            else pc <= pc + 3;
-            st <= S_FILL; st_after_fill <= S_DECODE;
+            branch_target = cond_true(opcode[3:0])
+                ? pc + {{16{bd16[15]}}, bd16}
+                : pc + 3;
+            pc <= branch_target;
+            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+                for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
+                fb_valid <= fb_prev_valid;
+                fb_wr    <= fb_prev_valid;
+                fb_base  <= fb_prev_base;
+                fb_realigning <= 1'b0;
+                pf_epoch <= pf_epoch + 4'd1;
+                pf_suppress <= 1'b1;
+                st <= S_DECODE;
+            end else
+                st <= S_FILL;
+            st_after_fill <= S_DECODE;
         end
 
         // ---- BSR disp16 (0x48): push return, branch ----
@@ -900,6 +930,7 @@ else if (ce) begin
         // ---- DBcc/TB (0xC6/0xC7): sub-op byte = {cc[2:0], reg[4:0]} ----
         8'hc6, 8'hc7: begin
             logic [3:0] cc4;
+            logic [31:0] branch_target;
             case ({opcode[0], fb[1][7:5]})
                 4'b0000: cc4 = 4'h0; 4'b0001: cc4 = 4'h2; 4'b0010: cc4 = 4'h4;
                 4'b0011: cc4 = 4'h6; 4'b0100: cc4 = 4'h8; 4'b0101: cc4 = 4'ha; // DBR
@@ -914,17 +945,28 @@ else if (ce) begin
                 logic [15:0] bd16;
                 bd16 = fb16(2);
                 if ({opcode[0], fb[1][7:5]} == 4'b1101) begin
-                    if (rf_rdata_a == 0) pc <= pc + {{16{bd16[15]}}, bd16};
-                    else pc <= pc + 4;
+                    branch_target = (rf_rdata_a == 0)
+                        ? pc + {{16{bd16[15]}}, bd16} : pc + 4;
                 end
                 else begin
                     queue_reg_write(fb[1][4:0], rf_rdata_a - 1, 32'hffff_ffff);
-                    if (cond_true(cc4) && (rf_rdata_a - 1) != 0)
-                         pc <= pc + {{16{bd16[15]}}, bd16};
-                    else pc <= pc + 4;
+                    branch_target = (cond_true(cc4) && (rf_rdata_a - 1) != 0)
+                        ? pc + {{16{bd16[15]}}, bd16} : pc + 4;
                 end
             end
-            st <= S_FILL; st_after_fill <= S_DECODE;
+            pc <= branch_target;
+            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+                for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
+                fb_valid <= fb_prev_valid;
+                fb_wr    <= fb_prev_valid;
+                fb_base  <= fb_prev_base;
+                fb_realigning <= 1'b0;
+                pf_epoch <= pf_epoch + 4'd1;
+                pf_suppress <= 1'b1;
+                st <= S_DECODE;
+            end else
+                st <= S_FILL;
+            st_after_fill <= S_DECODE;
         end
 
         // ---- F12 two-operand groups ----
@@ -1536,12 +1578,16 @@ else if (ce) begin
     S_OP2_LD: begin
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 0;
-            dbus_size <= f12_dim2(cur_op);
+            // Extended multiply/divide addresses a qword destination, but
+            // its arithmetic source is the low dword; the high dword is
+            // handled by the dedicated MOVD/DIVX states.  Keep the EA at
+            // dim=3 without issuing unsupported size=3 on the 32-bit port.
+            dbus_size <= f12_fetch_dim2(cur_op);
             dbus_addr <= op2;
         end
         else if (dack) begin
             dbus_req <= 0;
-            op2val   <= dimext(bus_rdata, f12_dim2(cur_op));
+            op2val   <= dimext(bus_rdata, f12_fetch_dim2(cur_op));
             op2val_v <= 1'b1;
             st <= S_EXEC;
         end
@@ -1771,8 +1817,58 @@ else if (ce) begin
 
     // advance PC and refill
     S_NEXT: begin
+        // Fuse the first (at most four-byte) sequential window realignment
+        // into the otherwise-idle retirement state.  S_FILL previously spent
+        // a full extra V60 enable doing this exact 5:1 shift after every normal
+        // instruction.  Twin Eagle II's RAM-test boot averaged 10.9 enables per
+        // instruction and missed its physical three-second watchdog even though
+        // execution was correct.  The shift width remains capped at four—the
+        // established timing-closure guard—while longer instructions finish in
+        // S_FILL exactly as before.
+        st <= S_FILL;
+        if (fb_base == pc && total_len < fb_valid) begin
+            logic [2:0] s;
+            logic [4:0] remaining, next_need;
+            logic [7:0] next_opcode;
+            s = (total_len >= 5'd4) ? 3'd4 : total_len[2:0];
+            remaining = fb_valid - total_len;
+            next_opcode = fb[total_len];
+            next_need = FB_THRESH;
+            casez (next_opcode)
+                8'h00,
+                8'hc8, 8'hc9, 8'hca, 8'hcd: next_need = 5'd1;
+                8'b0110_????:                 next_need = 5'd2;
+                8'b0111_????, 8'h48:          next_need = 5'd3;
+                8'hc6, 8'hc7:                 next_need = 5'd4;
+                8'h2d: begin
+                    if (remaining < 5'd3)
+                        next_need = 5'd3;
+                    else if (fb[total_len + 1'd1][7:5] == 3'b001 &&
+                             fb[total_len + 2'd2] == 8'hf4)
+                        next_need = 5'd11;
+                end
+                default: ;
+            endcase
+            if (!fb_realigning && fb_prev_valid == 0) begin
+                for (int i = 0; i < 24; i++) fb_prev[i] <= fb[i];
+                fb_prev_base  <= fb_base;
+                fb_prev_valid <= fb_valid;
+            end
+            for (int i = 0; i < 24; i++)
+                if (i + s < 24) fb[i] <= fb[i + s];
+            fb_base  <= fb_base + {29'b0, s};
+            fb_valid <= fb_valid - {2'b0, s};
+            fb_wr    <= fb_wr - {2'b0, s};
+            fb_realigning <= (total_len > 5'd4);
+            // With the next instruction already complete in the shifted
+            // window, enter decode directly.  This removes the former
+            // aligned S_FILL dispatch bubble; conservative variable-EA
+            // instructions still require the full 20-byte frontier.
+            if (total_len <= 5'd4 && remaining >= next_need)
+                st <= S_DECODE;
+        end
         pc <= pc + total_len;
-        st <= S_FILL; st_after_fill <= S_DECODE;
+        st_after_fill <= S_DECODE;
     end
 
     // ------------------------------------------------------------------
@@ -3039,7 +3135,8 @@ else if (ce) begin
         pf_busy <= 1'b0;
         if (pf_iss_epoch == pf_epoch
             && pf_addr == fb_base + {27'b0, fb_wr}
-            && !(st == S_FILL && fb_base != pc)) begin
+            && !(st == S_FILL && fb_base != pc)
+            && st != S_NEXT) begin
             if (FAST_IFETCH) begin
                 // append the 8-byte line from the frontier offset to the line end
                 // (1..8 bytes).  s32_core has ALREADY aligned if_data so byte 0 is
@@ -3123,6 +3220,9 @@ endfunction
 
 function automatic [1:0] f12_dim1(input [7:0] op);
     casez (op)
+        // MAME opMOVD: both operands are qword lvalues.  The dimension is
+        // observable in autoincrement/decrement and indexed EA modes.
+        8'h3f: f12_dim1 = 2'd3;
         8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h40, 8'h41, 8'h20, 8'h21,
         8'h38, 8'h39, 8'h50, 8'h51, 8'h80, 8'h81, 8'h88,
         8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1, 8'ha8, 8'hb0, 8'hb1,
@@ -3145,6 +3245,11 @@ function automatic [1:0] f12_dim1(input [7:0] op);
 endfunction
 function automatic [1:0] f12_dim2(input [7:0] op);
     casez (op)
+        // MAME F12DecodeOperands passes moddim=3 for MOVD and for the
+        // MULX/MULUX/DIVX/DIVUX destination lvalue.  This controls address
+        // scaling; the extended arithmetic still fetches its low dword via
+        // f12_fetch_dim2 below.
+        8'h3f, 8'h86, 8'h96, 8'ha6, 8'hb6: f12_dim2 = 2'd3;
         8'h09, 8'h19, 8'h29, 8'h38, 8'h39, 8'h41, 8'h50, 8'h51,
         8'h80, 8'h81, 8'h88, 8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1,
         8'ha8, 8'hb0, 8'hb1, 8'hb8, 8'h89, 8'h99, 8'ha9, 8'hb9,
@@ -3153,6 +3258,13 @@ function automatic [1:0] f12_dim2(input [7:0] op);
         8'h82, 8'h83, 8'h8a, 8'h92, 8'h93, 8'h9a, 8'ha2, 8'ha3, 8'haa,
         8'hb2, 8'hb3, 8'hba, 8'h8b, 8'h9b, 8'hab, 8'hbb: f12_dim2 = 2'd1;
         default: f12_dim2 = 2'd2;
+    endcase
+endfunction
+
+function automatic [1:0] f12_fetch_dim2(input [7:0] op);
+    case (op)
+        8'h86, 8'h96, 8'ha6, 8'hb6: f12_fetch_dim2 = 2'd2;
+        default:                     f12_fetch_dim2 = f12_dim2(op);
     endcase
 endfunction
 

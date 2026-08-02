@@ -1,9 +1,9 @@
 {
   "id": "attract_idle",
   "set": "dynagear",
-  "mame": "0.288",
+  "mame": "0.289",
   "mra": "Dyna Gear.mra",
-  "mra_sha256": "73958e5a9f6dee5f29f0559d3f05ea71c0fb3cf8ff339daffe0ac05ec3195cf3",
+  "mra_sha256": "83d524ad3af62cf958e5ea386184533d64d6b3ee6c5a60d8b6a2f1a69151cebc",
   "rom_zip_sha256": "e0088d91679feaff026de267919700c86243c3823f5a1fb55894e1dbc4f7109d",
   "maincpu_sha256": "c29d3bf37b761aad1f13b01be7da9904c0a975826744b820fdc664c098c66289",
   "sprites_sha256": "5738ad3ac51f70d20702b564169b5516eb475b55af9a656181770461e86eab4f",
@@ -20,8 +20,8 @@
     "active_h": 240
   },
   "stop": {
-    "after_video_enable_frames": 120,
-    "note": "One attract loop window after lockout/video_enable"
+    "after_video_enable_frames": 360,
+    "note": "Current same-run attract and Verilator screenshot gate"
   },
   "outputs": {
     "frame_crc": "sim_output/diff/rtl_attract_idle_frames.crc"

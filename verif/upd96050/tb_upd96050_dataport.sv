@@ -61,7 +61,7 @@ wire [13:0] dbg_pc;
 wire [15:0] dbg_a, dbg_b, dbg_dp, dbg_dr, dbg_sr, dbg_k, dbg_l, dbg_m, dbg_n;
 
 upd96050_st010 dut (
-    .clk(clk), .rst(rst), .ce_dsp(ce),
+    .clk(clk), .rst(rst), .soft_rst(1'b0), .ce_dsp(ce),
     .cpu_addr(cpu_addr), .cpu_be(cpu_be), .cpu_we(cpu_we), .cpu_re(cpu_re),
     .cpu_wdata(cpu_wdata), .cpu_rdata(cpu_rdata), .cpu_sel(cpu_sel),
     .prg_addr(prg_addr), .prg_req(prg_req),
@@ -94,7 +94,8 @@ endtask
 task reset_dsp;
 begin
     ce = 0; rst = 1;
-    repeat (4) @(posedge clk);
+    // Complete the cold-reset 2048-word data-RAM clear before host traffic.
+    repeat (2060) @(posedge clk);
     @(negedge clk); rst = 0;
     @(negedge clk);
 end

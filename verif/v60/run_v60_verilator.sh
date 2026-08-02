@@ -5,11 +5,12 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 ROOT="$PWD"
 CPU="rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv"
-VFLAGS="--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP -Wno-TIMESCALEMOD +define+SIMULATION"
+VFLAGS="--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4 -CFLAGS -D_GLIBCXX_USE_CXX11_ABI=0 -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP -Wno-TIMESCALEMOD +define+SIMULATION"
 
 declare -A TB=(
   [tb_v60_smoke]="SMOKE PASS"
   [tb_v60_directed]="DIRECTED PASS"
+  [tb_v60_frame_stack]="V60 FRAME STACK PASS"
   [tb_v60_fetch]="FETCH PERF PASS"
   [tb_v60_smc]="V60 SMC PASS"
   [tb_v60_long_ea]="LONG EA PASS"
@@ -17,11 +18,14 @@ declare -A TB=(
   [tb_v60_bus_lanes]="V60 BUS LANES PASS"
   [tb_v60_divx]="DIVX PASS"
   [tb_v60_divxmem]="V60 DIVXMEM PASS"
+  [tb_v60_addc_subc]="V60 ADDC SUBC PASS"
   [tb_v60_flags]="V60 FLAGS PASS"
   [tb_v60_incdecmem]="V60 INCDECMEM PASS"
   [tb_v60_rotate]="V60 ROTATE PASS"
   [tb_v60_shaov]="V60 SHAOV PASS"
   [tb_v60_xch]="V60 XCH PASS"
+  [tb_v60_movd]="V60 MOVD PASS"
+  [tb_v60_qword_ea]="V60 QWORD EA PASS"
   [tb_v60_audit]="AUDIT PASS"
   [tb_v60_bits]="BITS PASS"
   [tb_v60_decimal]="DECIMAL PASS"
@@ -40,7 +44,7 @@ declare -A TB=(
 # Verilator can't elaborate testbenches that poke internal enum FSM state.
 ICARUS_ONLY="tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp"
 
-ORDER="tb_v60_smoke tb_v60_directed tb_v60_fetch tb_v60_smc tb_v60_long_ea tb_v60_fetch_wide tb_v60_bus_lanes tb_v60_divx tb_v60_divxmem tb_v60_flags tb_v60_incdecmem tb_v60_rotate tb_v60_shaov tb_v60_xch tb_v60_audit tb_v60_bits tb_v60_decimal tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp tb_v60_fpdecode tb_v60_spidman_xchh tb_v60_spidman_window tb_v60_spidman_gate"
+ORDER="tb_v60_smoke tb_v60_directed tb_v60_frame_stack tb_v60_fetch tb_v60_smc tb_v60_long_ea tb_v60_fetch_wide tb_v60_bus_lanes tb_v60_divx tb_v60_divxmem tb_v60_addc_subc tb_v60_flags tb_v60_incdecmem tb_v60_rotate tb_v60_shaov tb_v60_xch tb_v60_movd tb_v60_qword_ea tb_v60_audit tb_v60_bits tb_v60_decimal tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp tb_v60_fpdecode tb_v60_spidman_xchh tb_v60_spidman_window tb_v60_spidman_gate"
 
 is_icarus() { case " $ICARUS_ONLY " in *" $1 "*) return 0;; *) return 1;; esac; }
 
@@ -62,7 +66,11 @@ for tb in $ORDER; do
       echo "BUILDFAIL $tb  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
     fi
     verilator-safe status
-    out="$(verilator-sim-safe -- "$bdir/$tb" 2>&1)"
+    exe="$bdir/$tb"
+    # Native Windows Verilator emits .exe even when -o is given without the
+    # suffix.  MSYS test runners must pass the real filename to the scheduler.
+    [ -x "$exe.exe" ] && exe="$exe.exe"
+    out="$(verilator-sim-safe -- "$exe" 2>&1)"
   fi
   if echo "$out" | grep -qF "${TB[$tb]}"; then
     extra="$(echo "$out" | grep -E 'FETCH PERF:|LANES|cycles=' | head -1)"
@@ -75,9 +83,11 @@ for tb in $ORDER; do
   fi
 done
 
-if [ -x "$OUTDIR/tb_v60_smc/tb_v60_smc" ]; then
+smc_exe="$OUTDIR/tb_v60_smc/tb_v60_smc"
+[ -x "$smc_exe.exe" ] && smc_exe="$smc_exe.exe"
+if [ -x "$smc_exe" ]; then
   verilator-safe status
-  if verilator-sim-safe -- "$OUTDIR/tb_v60_smc/tb_v60_smc" +CEDIV=3 2>&1 | grep -qF "V60 SMC PASS"; then
+  if verilator-sim-safe -- "$smc_exe" +CEDIV=3 2>&1 | grep -qF "V60 SMC PASS"; then
     echo "PASS  tb_v60_smc(ce=/3)"
     pass=$((pass+1))
   else

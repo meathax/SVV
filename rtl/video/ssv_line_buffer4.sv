@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Four-bank, double-buffered 336-pixel SSV palette-index scanline store.
+// Four-bank, double-buffered 352-pixel SSV palette-index scanline store.
 `timescale 1ns/1ps
 
 module ssv_line_buffer4 (
@@ -21,19 +21,19 @@ module ssv_line_buffer4 (
     output logic        clear_done
 );
 
-localparam logic [8:0] ACTIVE_WIDTH = 9'd336;
-localparam logic [6:0] LAST_WORD = 7'd83;
+localparam logic [8:0] ACTIVE_WIDTH = 9'd352;
+localparam logic [6:0] LAST_WORD = 7'd87;
 
 // Consecutive four-pixel batches contain at most one write for each x[1:0]
-// bank. Tiny 84x15 banks waste a full M10K each, so keep them in MLABs.
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b0 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b1 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b2 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b3 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b0 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b1 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b2 [0:83];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b3 [0:83];
+// bank. Tiny 88x15 banks waste a full M10K each, so keep them in MLABs.
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b0 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b1 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b2 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b3 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b0 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b1 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b2 [0:87];
+(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b3 [0:87];
 
 logic front_select;
 logic clear_select;

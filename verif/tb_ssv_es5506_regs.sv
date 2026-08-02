@@ -4,6 +4,7 @@ module tb_ssv_es5506_regs;
 
 logic clk = 1'b0;
 logic rst = 1'b1;
+logic cold_rst = 1'b1;
 always #5 clk = ~clk;
 
 logic        host_we;
@@ -27,7 +28,7 @@ wire [3:0]   commit_reg;
 wire [31:0]  commit_data;
 
 ssv_es5506_regs dut (
-    .clk, .rst,
+    .clk, .rst, .cold_rst,
     .host_we, .host_re, .host_addr, .host_wdata, .host_rdata,
     .par_data, .irq_set, .irq_voice, .irq_n,
     .current_page, .active_voices, .mode,
@@ -121,6 +122,9 @@ initial begin
 
     repeat (3) @(posedge clk);
     rst = 1'b0;
+    cold_rst = 1'b0;
+    // The cold-reset sweep initializes all 32 voice banks in parallel.
+    repeat (35) @(posedge clk);
     @(posedge clk);
 
     if (current_page !== 7'h00 ||
@@ -179,10 +183,39 @@ initial begin
     read_reg(4'h9, value);
     expect32(value, 32'h0000_ff80, "voice16 K1");
 
+    // A watchdog/software reset restores only the ES5506 device-level mode;
+    // programmed voice registers and PAGE survive it.
+    rst = 1'b1;
+    repeat (3) @(posedge clk);
+    rst = 1'b0;
+    @(posedge clk);
+    if (active_voices !== 5'h1f || mode !== 5'h17) begin
+        $display("FAIL soft reset device defaults");
+        $fatal(1);
+    end
+    read_reg(4'h0, value);
+    expect32(value, 32'h0000_8000, "voice16 CR after soft reset");
+    read_reg(4'h1, value);
+    expect32(value, 32'h0000_0800, "voice16 FC after soft reset");
+    read_reg(4'h2, value);
+    expect32(value, 32'h0000_f550, "voice16 LVOL after soft reset");
+
     // PAGE selects a distinct voice.
     write_reg(4'hf, 32'h0000_0011);
     read_reg(4'h0, value);
     expect32(value, 32'h0000_0003, "voice17 reset CR");
+    read_reg(4'h2, value);
+    expect32(value, 32'h0000_8000, "voice17 reset LVOL");
+    read_reg(4'h4, value);
+    expect32(value, 32'h0000_8000, "voice17 reset RVOL");
+    write_reg(4'hf, 32'h0000_0031);
+    read_reg(4'h1, value);
+    expect32(value, 32'h0000_0000, "voice17 reset START");
+    read_reg(4'h2, value);
+    expect32(value, 32'h0000_0000, "voice17 reset END");
+    read_reg(4'h3, value);
+    expect32(value, 32'h0000_0000, "voice17 reset ACCUM");
+    write_reg(4'hf, 32'h0000_0011);
 
     // IRQV returns the active-low vector and byte-0 read acknowledges it.
     @(negedge clk);
@@ -194,12 +227,26 @@ initial begin
         $display("FAIL IRQ set");
         $fatal(1);
     end
+
+    // A later voice retains CR.IRQ and must not displace an occupied IRQV.
+    // The voice engine retries this event after the host acknowledges voice 18.
+    @(negedge clk);
+    irq_voice = 5'd19;
+    irq_set   = 1'b1;
+    @(negedge clk);
+    irq_set   = 1'b0;
     read_reg(4'he, value);
     expect32(value, 32'h0000_0012, "IRQV snapshot");
     if (irq_n !== 1'b1) begin
         $display("FAIL IRQV acknowledge");
         $fatal(1);
     end
+    @(negedge clk);
+    irq_set   = 1'b1; // voice 19 retry after IRQV became available
+    @(negedge clk);
+    irq_set   = 1'b0;
+    read_reg(4'he, value);
+    expect32(value, 32'h0000_0013, "stacked IRQV promotion");
 
     // PAR and global serial registers are readable on their documented pages.
     read_reg(4'hd, value);

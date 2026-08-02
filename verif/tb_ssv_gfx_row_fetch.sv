@@ -5,14 +5,16 @@
 // between ssv_rom_loader's packing and ssv_gfx_row_decode's consumption.
 
 module tb_ssv_gfx_row_fetch;
+import ssv_pkg::*;
 logic clk = 1'b0;
 always #5 clk = ~clk;
 
 logic rst, start;
+ssv_cfg_t cfg;
 logic [19:0] tile_code;
 logic [2:0] tile_row;
 logic rom_req;
-logic [24:4] rom_addr;
+logic [SDR_AW:4] rom_addr;
 logic [127:0] rom_data;
 logic rom_ack;
 logic busy, done;
@@ -23,7 +25,7 @@ ssv_gfx_row_fetch dut (.*);
 logic req_d;
 integer delay_count;
 integer transaction;
-logic [24:4] expected;
+logic [SDR_AW:4] expected;
 
 always_ff @(posedge clk) begin
     req_d <= rom_req;
@@ -71,10 +73,9 @@ initial begin
     req_d = 1'b0;
     delay_count = 0;
     transaction = 0;
+    cfg = cfg_dynagear();
 
-    // ssv_pkg::gfx_record_addr(2, 3)
-    //   = 0x0100000 + (2 << 7) + (3 << 4) = 0x0100130, >> 4 = 0x10013.
-    expected = 21'h10013;
+    expected = gfx_record_addr(18'd2, 3'd3) >> 4;
 
     repeat (3) @(posedge clk);
     rst <= 1'b0;
@@ -97,6 +98,17 @@ initial begin
                transaction, busy);
         $fatal(1);
     end
+
+    // The same universal fetcher must expose quarter 3 for the four-quarter
+    // profiles instead of applying Dyna Gear's absent-plane rule globally.
+    cfg = cfg_vasara();
+    pulse_start();
+    wait (done);
+    #1;
+    if (plane67 !== 32'hf000_0000)
+        $fatal(1, "four-quarter profile discarded plane67: %h", plane67);
+    if (transaction != 2 || busy)
+        $fatal(1, "four-quarter fetch transaction mismatch %0d", transaction);
 
     $display("PASS tb_ssv_gfx_row_fetch transactions=%0d", transaction);
     $finish;

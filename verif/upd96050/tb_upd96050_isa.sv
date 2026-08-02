@@ -91,7 +91,7 @@ wire  [3:0] dbg_sp;
 wire        p0, p1;
 
 upd96050 dut (
-    .clk(clk), .ce(ce), .rst(rst),
+    .clk(clk), .ce(ce), .rst(rst), .soft_rst(1'b0),
     .prg_addr(prg_addr), .prg_req(prg_req),
     .prg_data(prg_data), .prg_valid(prg_valid),
     .drom_addr(drom_addr), .drom_data(drom_data),
@@ -149,7 +149,9 @@ endtask
 task reset_dsp;
 begin
     ce = 0; rst = 1;
-    repeat (4) @(posedge clk);
+    // Cold reset walks all 2048 inferred data-RAM words to MAME's clean
+    // device-start value before the first instruction issue.
+    repeat (2060) @(posedge clk);
     @(negedge clk); rst = 0;
     @(negedge clk);
 end

@@ -1,9 +1,9 @@
 {
   "id": "coin_start_p1",
   "set": "dynagear",
-  "mame": "0.288",
+  "mame": "0.289",
   "mra": "Dyna Gear.mra",
-  "mra_sha256": "73958e5a9f6dee5f29f0559d3f05ea71c0fb3cf8ff339daffe0ac05ec3195cf3",
+  "mra_sha256": "83d524ad3af62cf958e5ea386184533d64d6b3ee6c5a60d8b6a2f1a69151cebc",
   "maincpu_sha256": "c29d3bf37b761aad1f13b01be7da9904c0a975826744b820fdc664c098c66289",
   "dsw1": "0xFFFF",
   "dsw2": "0xFFFD",

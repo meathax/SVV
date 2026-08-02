@@ -1,5 +1,9 @@
 # Issue contract: Attract frame CRC vs MAME
 
+> Historical investigation below used CPU increment 21702. The current shared
+> profile uses 21701, selected from the PCB's 704:315 CPU-to-pixel clock ratio;
+> current release evidence is tracked in `docs/implementation-status.md`.
+
 ## Issue
 
 Per-frame RGB/IDX CRC streams are now produced for Dyna Gear attract. The

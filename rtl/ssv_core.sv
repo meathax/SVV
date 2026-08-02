@@ -4,9 +4,17 @@
 
 `timescale 1ns/1ps
 
-module ssv_core (
+module ssv_core #(
+    // MAME's unconfigured WATCHDOG_TIMER defaults to exactly three seconds.
+    // clk_sys is the PLL's 48.317307 MHz SSV master domain. Focused benches
+    // override this cycle count rather than synthesizing a frame-based proxy.
+    parameter int unsigned WDOG_TIMEOUT_CYCLES = 3 * 48_317_307
+) (
     input              clk_sys,
+    // rst includes watchdog soft reset. cold_rst excludes watchdog and is
+    // used where MAME/device hardware retains state across /RESET.
     input              rst,
+    input              cold_rst,
     input              ce_cpu,
 
     // Per-game configuration. The Dyna Gear record (ssv_pkg::cfg_dynagear)
@@ -84,9 +92,13 @@ module ssv_core (
     output logic       vb,
     output logic signed [15:0] audio_l,
     output logic signed [15:0] audio_r,
-    // Sticky one-shot: no $210000 kick for 180 frames (~3s @ 60 Hz / FBNeo).
-    // Wrapper ORs into core reset (self-clears when rst returns).
+    // Sticky one-shot after exactly WDOG_TIMEOUT_CYCLES without the correct
+    // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
+    // Cabinet diagnostics, updated from accepted low-byte $21000e writes.
+    output logic [1:0] coin_lockout,
+    output logic [15:0] coin_counter0,
+    output logic [15:0] coin_counter1,
     output logic [31:0] debug_pc,
     output logic [23:0] debug_status
 );
@@ -101,6 +113,8 @@ import ssv_pkg::*;
 `ifdef SIMULATION
 initial if (SDR_LAYOUT_FAULT != 0)
     $fatal(1, "ssv_pkg SDRAM layout is invalid (rule %0d)", SDR_LAYOUT_FAULT);
+initial if (WDOG_TIMEOUT_CYCLES < 1)
+    $fatal(1, "WDOG_TIMEOUT_CYCLES must be positive");
 `endif
 
 logic        c_req, c_we, c_ack;
@@ -160,14 +174,24 @@ wire sel_irqvec  = (a >= 24'h230000) && (a <= 24'h230071);
 wire sel_irqack  = (a >= 24'h240000) && (a <= 24'h240071);
 wire sel_irqen   = (a >= 24'h260000) && (a <= 24'h260001);
 wire sel_sound   = (a >= 24'h300000) && (a <= 24'h30007f);
-wire sel_cpuram  = (a >= 24'h400000) && (a <= 24'h43ffff);
+wire sel_drifto_unknown = cfg.has_drifto_unknown &&
+                          ((a == 24'h510000) || (a == 24'h520000));
+wire sel_cpuram  = (cfg.extra_ram_mode == 2'd1) &&
+                   (a >= 24'h400000) && (a <= 24'h43ffff);
+wire sel_extra_wram = (cfg.extra_ram_mode == 2'd2) &&
+                      (a >= 24'h010000) && (a <= 24'h03ffff);
+wire [16:0] nvram_last_offset = (cfg.nvram_mode == 2'd1) ?
+                                 17'h007ff : 17'h0ffff;
+wire sel_nvram   = cfg.has_nvram && (cfg.nvram_mode != 2'd0) &&
+                   (a >= 24'h580000) &&
+                   (a <= (24'h580000 + {7'd0, nvram_last_offset}));
 // $500008-$500009. The SAM-5127 cartridge carries 3P and 4P connectors with a
 // dedicated I/O-FILTER stage at U30/U31, and this is the only decoded input
 // window unaccounted for -- so this is the prime candidate for where the third
 // and fourth player ports read back. Unproven: Dyna Gear is a 2-player game.
 // `in_extra` is tied high by the wrapper, which is correct for any game that
 // does not read it. See docs/hardware/SSV_PCB_FINDINGS_ACTION_PLAN.md item 1.
-wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
+wire sel_extra   = extra_input_window_cfg(cfg, a);
 // MAME maps the program ROM as `ssv_map(map, rom)` with rom..0xffffff, and in
 // every SSV set rom == 0x1000000 - program_size: $f00000 for a 1 MB program
 // (dynagear, survarts), $e00000 for 2 MB (cairblad, twineag2, ultrax),
@@ -178,7 +202,7 @@ wire sel_extra   = (a >= 24'h500008) && (a <= 24'h500009);
 // 0xF00000 / 0xE00000 / 0xC00000 for 1 / 2 / 4 MB -- MAME's values.
 wire [23:0] rom_window_base = -(24'(cfg.prog_mb) << 20);
 wire sel_rom     = (a >= rom_window_base);
-wire sel_extmem  = sel_xram | sel_cpuram;
+wire sel_extmem  = sel_xram | sel_cpuram | sel_extra_wram | sel_nvram;
 
 // ---------------------------------------------------------------------------
 // ST010 daughterboard, $480000 and $482000-$482fff.
@@ -298,7 +322,9 @@ ssv_palette_ram palette_ram (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst) begin
+    // Scroll/CRTC registers are shared board RAM in MAME and machine_reset()
+    // does not clear them. Only a cold/download reset initializes the array.
+    if (cold_rst) begin
         scroll_q <= 16'd0;
         for (scroll_init_i = 0; scroll_init_i < 64;
              scroll_init_i = scroll_init_i + 1)
@@ -332,8 +358,11 @@ endgenerate
 logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
 logic video_enable;
+wire [8:0] active_width = active_width_cfg(cfg);
+wire [8:0] active_height = active_height_cfg(cfg);
 ssv_video_timing timing (
     .clk(clk_sys), .rst(rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
+    .active_width(active_width), .active_height(active_height),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse)
 );
@@ -347,11 +376,15 @@ always_comb begin
 end
 
 // The descriptor cache is built during vblank and owns the whole of it, but
-// the build has no natural bound worth relying on. Cut it off once the raster
-// reaches the two lines that prepare display rows 0 and 1: past that point a
-// still-busy cache suppresses every line swap below, and since the next vblank
-// re-arms the build it would never recover.
-wire cache_deadline = (vcnt >= SSV_VTOTAL - 2);
+// the build has no natural bound worth relying on. The first visible line is
+// swapped at horizontal blank in raster line 260 (target_y 0), so allow the
+// cache to use that line's active portion and cut it off at the swap point.
+// This recovers one active-line budget for dense scenes without permitting a
+// still-busy cache to suppress a line swap; the next vblank then re-arms the
+// build normally.
+wire cache_deadline = (vcnt > SSV_VTOTAL - 2) ||
+                      ((vcnt == SSV_VTOTAL - 2) &&
+                       (hcnt >= active_width - 1'd1));
 
 // Declared here rather than with the rest of the renderer nets below, because
 // line_buffer_start reads obj_cache_busy and renderer_line_start reads
@@ -364,8 +397,8 @@ wire renderer_busy;
 // target_y==240 swap exposes the already-rendered final visible line; it must
 // not launch another renderer. Lines 0 and 1 are prepared at vblank's tail.
 wire line_buffer_start = video_enable && ce_pixel &&
-                         (hcnt == SSV_HBSTART - 1'd1) &&
-                         (renderer_target_y <= SSV_VBSTART) &&
+                         (hcnt == active_width - 1'd1) &&
+                         (renderer_target_y <= active_height) &&
                          !obj_cache_busy;
 // ...and never while either renderer is still working on the previous line.
 //
@@ -382,13 +415,13 @@ wire line_buffer_start = video_enable && ce_pixel &&
 // still driven by line_buffer_start, and the busy renderer is not prolonged by
 // skipping a start, so the next line starts normally.
 wire renderer_line_start = line_buffer_start &&
-                           (renderer_target_y < SSV_VBSTART) &&
+                           (renderer_target_y < active_height) &&
                            !renderer_busy;
 
 // Look ahead one address to cover the line-buffer/palette read pipeline.  The
 // output observed at coordinate x is the value requested on the preceding
 // pixel clock; x=0 is preloaded throughout horizontal blank.
-wire [8:0] scan_x_ahead = (hcnt < SSV_HBSTART - 1'd1)
+wire [8:0] scan_x_ahead = (hcnt < active_width - 1'd1)
                           ? hcnt + 1'd1 : 9'd0;
 wire line_clear_busy, line_clear_done;
 wire [3:0] renderer_plot_we;
@@ -513,7 +546,8 @@ ssv_irq irqs (
     // Scanline 0 of the visible frame; gated per game by the config.
     .line0_pulse(ce_pixel && (hcnt == 9'd0) && (vcnt == 9'd0)),
     .irq_level1_line0(cfg.irq_level1_line0),
-    .clk(clk_sys), .rst(rst), .vblank_pulse(vblank_pulse),
+    .clk(clk_sys), .rst(rst), .cold_rst(cold_rst),
+    .vblank_pulse(vblank_pulse),
     .vector_we(vector_we), .vector_level(irq_reg_level),
     .vector_data(m_wdata),
     .enable_we(enable_we), .enable_be(m_be), .enable_data(m_wdata),
@@ -523,20 +557,58 @@ ssv_irq irqs (
 );
 
 always_ff @(posedge clk_sys) begin
-    if (rst)
-        video_enable <= 1'b0;
+    if (cold_rst)
+        // MAME init_ssv() starts with video enabled; bit 7 of the lockout
+        // register can subsequently blank it. machine_reset() does not call
+        // init_ssv(), so watchdog soft reset must retain the current value.
+        video_enable <= 1'b1;
     else if (m_req && m_we && (a == 24'h21000e) && m_be[0])
         video_enable <= m_wdata[7];
 end
 
+// MAME derives a live top/left clip from the CRTC visible-area registers at
+// $1c0062/$64 and $1c006a/$6c.  The renderer may safely build the full native
+// line; masking at scanout is equivalent for the externally visible pixels
+// and also honors mid-game blank/window changes without flushing caches.
+logic signed [18:0] crtc_min_x_calc, crtc_min_y_calc;
+logic [8:0] crtc_min_x, crtc_min_y;
+always_comb begin
+    crtc_min_x_calc = 19'(active_width) +
+        (19'($signed({1'b0, scroll[49]})) -
+         19'($signed({1'b0, scroll[50]}))) * 19'sd2;
+    crtc_min_y_calc = 19'(active_height) +
+        19'($signed({1'b0, scroll[53]})) -
+        19'($signed({1'b0, scroll[54]}));
+    if (crtc_min_x_calc <= 0)
+        crtc_min_x = 9'd0;
+    else if (crtc_min_x_calc >= 19'(active_width))
+        crtc_min_x = active_width;
+    else
+        crtc_min_x = crtc_min_x_calc[8:0];
+    if (crtc_min_y_calc <= 0)
+        crtc_min_y = 9'd0;
+    else if (crtc_min_y_calc >= 19'(active_height))
+        crtc_min_y = active_height;
+    else
+        crtc_min_y = crtc_min_y_calc[8:0];
+end
+
 // Line-buffer indices resolve through the live xRGB888 palette.
-wire        video_active = video_enable && !hb && !vb;
+wire crtc_visible = (hcnt >= crtc_min_x) && (hcnt < active_width) &&
+                    (vcnt >= crtc_min_y) && (vcnt < active_height);
+wire video_active = video_enable && crtc_visible && !hb && !vb;
 wire [23:0] core_pixel   = video_active ? palette_video_rgb : 24'h000000;
 
 assign rgb = core_pixel;
 
 function automatic [SDR_AW:0] external_byte_addr(input [23:0] cpu_addr);
-    if (cpu_addr >= 24'h400000)
+    if (cpu_addr >= 24'h580000)
+        external_byte_addr = SDR_NVRAM_BASE + (cpu_addr - 24'h580000);
+    else if ((cfg.extra_ram_mode == 2'd2) &&
+             (cpu_addr >= 24'h010000) && (cpu_addr <= 24'h03ffff))
+        external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h010000);
+    else if ((cfg.extra_ram_mode == 2'd1) &&
+             (cpu_addr >= 24'h400000) && (cpu_addr <= 24'h43ffff))
         external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h400000);
     else
         external_byte_addr = SDR_XRAM_BASE + (cpu_addr - 24'h160000);
@@ -555,40 +627,61 @@ logic [SDR_AW:1] ext_p0_addr_r;
 logic        ack_r;
 logic [15:0] read_mux;
 logic        read_wait;
+// MAME's drifto94_unknown_r() returns machine().rand(). A tiny deterministic
+// LFSR gives the same non-constant hardware-visible contract without pulling
+// in a large PRNG; the descriptor gates it to Drift Out/Storm Blade only.
+logic [15:0] drifto_unknown_lfsr;
+wire [15:0] drifto_unknown_value = drifto_unknown_lfsr;
+
+always_ff @(posedge clk_sys) begin
+    if (rst)
+        drifto_unknown_lfsr <= 16'h1;
+    // Advance once after the completed read.  The V60 holds m_req throughout
+    // the core's wait/ack sequence, so advancing on a held request changes the
+    // value multiple times for one MAME handler transaction.
+    else if (m_req && !m_we && sel_drifto_unknown && ack_r && !ack_r_d)
+        drifto_unknown_lfsr <= {
+            drifto_unknown_lfsr[14:0],
+            drifto_unknown_lfsr[15] ^ drifto_unknown_lfsr[13] ^
+            drifto_unknown_lfsr[12] ^ drifto_unknown_lfsr[10]
+        };
+end
 
 // ---------------------------------------------------------------------------
 // V60 ROM fetch via SDRAM p0, through a small I/D cache (from s32):
-//   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
+//   128 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
 //   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.
 // p0 is shared with the XRAM and $400000 CPU RAM reads — icache fills win.
 // ---------------------------------------------------------------------------
 logic        rom_req_r;
-logic [23:1] rom_addr_r;
+logic [SDR_AW:1] rom_addr_r;
 // Fill words land in this register, and the completed 8-byte line is written
 // to the array in one piece. A per-word bit-select write into the array made
 // Quartus give up on memory inference (warning 10999), so the 32x64 array was
 // built from 2048 flops plus three 64-bit 32:1 read muxes; whole-word writes
 // map to LUTRAM like icache_tag already did.
 logic [63:0] fill_buf;
-(* ramstyle = "MLAB, no_rw_check" *) logic [63:0] icache_data [0:31];
-(* ramstyle = "MLAB, no_rw_check" *) logic [12:0] icache_tag  [0:31]; // addr[20:8]
-logic [31:0] icache_valid;
+(* ramstyle = "MLAB, no_rw_check" *) logic [63:0] icache_data [0:127];
+(* ramstyle = "MLAB, no_rw_check" *) logic [13:0] icache_tag  [0:127]; // offset[21:8]
+logic [127:0] icache_valid;
 
-// MAME: map(0xf00000, 0xffffff).rom().region("maincpu", 0) — top window
-// mirrors the FIRST megabyte (reset stub at 0xFFFFF0 → maincpu 0xFFFF0).
-wire [20:0] rom_byte_a = {1'b0, a[19:0]};
-wire [4:0]  ic_line    = rom_byte_a[7:3];
-wire [12:0] ic_tag     = rom_byte_a[20:8];
+// MAME: map(rom, 0xffffff).rom().region("maincpu", 0), where rom is the
+// descriptor-sized base ($f00000/$e00000/$c00000). Translate the CPU address
+// to the selected set's full 1/2/4 MB image before indexing the cache. The old
+// Dyna-only path truncated every address to 20 bits, so 2 MB and 4 MB sets
+// fetched their reset stub from offset zero and immediately executed garbage.
+wire [21:0] rom_byte_a = a - rom_window_base;
+wire [6:0]  ic_line    = rom_byte_a[9:3];
+wire [13:0] ic_tag     = rom_byte_a[21:8];
 wire        ic_hit     = icache_valid[ic_line] && (icache_tag[ic_line] == ic_tag);
 wire [63:0] ic_ldata   = icache_data[ic_line];
 wire [15:0] ic_word    = ic_ldata[{rom_byte_a[2:1], 4'b0000} +: 16];
 
-// Instruction-fetch lookup (whole 8-byte line). Same romhi mirroring as data.
-wire        if_romhi   = (if_addr[23:20] == 4'hF);
-wire [20:0] if_byte_a  = if_romhi ? {1'b0, if_addr[19:3], 3'b000}
-                                  : {if_addr[20:3], 3'b000};
-wire [4:0]  if_line_ix = if_byte_a[7:3];
-wire [12:0] if_tag_ix  = if_byte_a[20:8];
+// Instruction-fetch lookup (whole 8-byte line), using the same full-window
+// translation as data accesses. The V60 presents a 24-bit address here.
+wire [21:0] if_byte_a  = if_addr - rom_window_base;
+wire [6:0]  if_line_ix = if_byte_a[9:3];
+wire [13:0] if_tag_ix  = if_byte_a[21:8];
 wire        if_hit     = icache_valid[if_line_ix] &&
                          (icache_tag[if_line_ix] == if_tag_ix);
 // Pre-align so byte 0 is the frontier byte (if_addr[2:0] = intra-line offset).
@@ -598,9 +691,9 @@ logic [1:0]  fill_word;
 logic        rom_filling;
 logic        rom_ready;
 logic [15:0] rom_word_r;
-logic [4:0]  fill_line;
-logic [12:0] fill_tag;
-logic [17:0] fill_wbase;
+logic [6:0]  fill_line;
+logic [13:0] fill_tag;
+logic [18:0] fill_wbase;
 logic        fill_isfetch;
 logic [1:0]  fill_dsel;
 logic [2:0]  fill_foff;
@@ -616,14 +709,14 @@ wire icache_p0_busy = rom_filling || rom_req_r || (if_req && !if_served);
 
 assign sdr_p0_req  = ext_p0_req_r | rom_req_r;
 assign sdr_p0_addr = ext_p0_req_r ? ext_p0_addr_r
-                                  : {5'b00000, rom_addr_r[19:1]};
+                                  : rom_addr_r;
 
 always_ff @(posedge clk_sys) begin
     if (rst) begin
         rom_req_r     <= 1'b0;
         rom_filling   <= 1'b0;
         rom_ready     <= 1'b0;
-        icache_valid  <= 32'h0;
+        icache_valid  <= 128'h0;
         if_served     <= 1'b0;
         fill_awaiting <= 1'b0;
         fill_need_req <= 1'b0;
@@ -644,7 +737,7 @@ always_ff @(posedge clk_sys) begin
                 fill_need_req <= 1'b0;
                 fill_awaiting <= 1'b1;
                 rom_req_r     <= 1'b1;
-                rom_addr_r    <= {3'b000, fill_wbase, fill_word};
+                rom_addr_r    <= {5'b00000, fill_wbase, fill_word};
             end
             else if (fill_awaiting && sdr_p0_ack_rise && !ext_p0_req_r) begin
                 fill_buf[{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
@@ -682,12 +775,12 @@ always_ff @(posedge clk_sys) begin
                 fill_foff     <= if_addr[2:0];
                 fill_line     <= if_line_ix;
                 fill_tag      <= if_tag_ix;
-                fill_wbase    <= if_byte_a[20:3];
+                fill_wbase    <= if_byte_a[21:3];
                 fill_word     <= 2'd0;
                 fill_awaiting <= 1'b1;
                 fill_need_req <= 1'b0;
                 rom_req_r     <= 1'b1;
-                rom_addr_r    <= {3'b000, if_byte_a[20:3], 2'b00};
+                rom_addr_r    <= {5'b00000, if_byte_a[21:3], 2'b00};
             end
         end
         // Data ROM read (constants/tables). See !ack_r note above.
@@ -702,13 +795,13 @@ always_ff @(posedge clk_sys) begin
                 fill_isfetch  <= 1'b0;
                 fill_line     <= ic_line;
                 fill_tag      <= ic_tag;
-                fill_wbase    <= rom_byte_a[20:3];
+                fill_wbase    <= rom_byte_a[21:3];
                 fill_dsel     <= rom_byte_a[2:1];
                 fill_word     <= 2'd0;
                 fill_awaiting <= 1'b1;
                 fill_need_req <= 1'b0;
                 rom_req_r     <= 1'b1;
-                rom_addr_r    <= {3'b000, rom_byte_a[20:3], 2'b00};
+                rom_addr_r    <= {5'b00000, rom_byte_a[21:3], 2'b00};
             end
         end
     end
@@ -801,7 +894,8 @@ logic [1:0] st010_rd_cnt;
 
 upd96050_st010 st010 (
     .clk(clk_sys),
-    .rst(rst || !cfg.has_st010),
+    .rst(cold_rst || !cfg.has_st010),
+    .soft_rst(rst && !cold_rst && cfg.has_st010),
     .ce_dsp(st010_ce),
 
     .cpu_addr(m_addr), .cpu_be(m_be),
@@ -869,6 +963,7 @@ wire ce_snd = ce_cpu;
 ssv_es5506_regs sound_registers (
     .clk(clk_sys),
     .rst(rst),
+    .cold_rst(cold_rst),
     .host_we(sound_host_we),
     .host_re(sound_host_re),
     .host_addr(a[6:1]),
@@ -932,7 +1027,11 @@ ssv_es5506_voice sound_voices (
     .eng_wr_env(eng_wr_env),
     .eng_lvol_w(eng_lvol_w), .eng_rvol_w(eng_rvol_w),
     .eng_k1_w(eng_k1_w), .eng_k2_w(eng_k2_w), .eng_ecount_w(eng_ecount_w),
+    .irq_ready(sound_irq_n),
     .eng_irq_set(eng_irq_set), .eng_irq_voice(eng_irq_voice),
+    .host_ecount_write(sound_commit && (sound_commit_page < 7'h20) &&
+                       (sound_commit_reg == 4'h6)),
+    .host_ecount_voice(sound_commit_page[4:0]),
     .sdr_req(sdr_p4_req), .sdr_addr(sdr_p4_addr),
     .sdr_dout(sdr_p4_dout), .sdr_ack(sdr_p4_ack),
     .audio_l(audio_l), .audio_r(audio_r),
@@ -942,12 +1041,11 @@ ssv_es5506_voice sound_voices (
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;
 
-// Watchdog: FBNeo / board ~3s @ 60 Hz = 180 frames without a $210000 access.
-// Count only after video_enable so the long pre-lockout RAM clear cannot
-// self-reset the core before the game starts servicing the port.
-//
-// How the watchdog is kicked -- and whether the board has one at all -- is per
-// game, and getting this wrong is not subtle:
+// MAME's WATCHDOG_TIMER has no SSV-specific override, so watchdog.cpp uses its
+// default attotime::from_seconds(3). Count clk_sys master cycles from reset;
+// video cadence and video_enable are unrelated to this physical timer.
+// How it is kicked -- and whether the board has one at all -- is descriptor
+// data, and getting this wrong is not subtle:
 //   mode 1  read-kick   dynagear, survarts, twineag2, ultrax  (reset16_r)
 //   mode 2  write-kick  vasara, vasara2                       (reset16_w)
 //   mode 0  no device   drifto94, stmblade
@@ -955,27 +1053,64 @@ assign m_ack   = ack_r;
 // stmblade machine configs, so those two have no watchdog. Left unconditional,
 // this counter would reset them forever and never be kicked by vasara.
 logic       ack_r_d;
-logic [8:0] wdog_frame_cnt;
+localparam int WDOG_COUNTER_WIDTH = $clog2(WDOG_TIMEOUT_CYCLES + 1);
+logic [WDOG_COUNTER_WIDTH-1:0] wdog_cycle_cnt;
 wire        wdog_addr_hit = sel_io && (a[4:1] == 4'h0) && ack_r && !ack_r_d;
 wire        wdog_kick = m_req && wdog_addr_hit &&
                         ((cfg.wdog_mode == 2'd1) ? !m_we :
                          (cfg.wdog_mode == 2'd2) ?  m_we : 1'b0);
 
+// MAME ssv_state::lockout_w / lockout_inv_w. Both variants use data bit 1
+// for coin slot 0 and bit 0 for slot 1; only the lockout polarity changes.
+// Counter 0 is driven by bit 3 and counter 1 by bit 2, and bookkeeping counts
+// low-to-high transitions rather than every write that leaves a bit asserted.
+wire lockout_write = m_req && m_we && (a == 24'h21000e) && m_be[0] &&
+                     ack_r && !ack_r_d;
+logic [1:0] coin_counter_drive;
+wire [15:0] in_system_gated = in_system |
+    {14'd0, coin_lockout[1], coin_lockout[0]};
+
+always_ff @(posedge clk_sys) begin
+    // Cabinet bookkeeping and output latches are not cleared by MAME's
+    // machine_reset(); retain them across a watchdog reset.
+    if (cold_rst) begin
+        coin_lockout <= 2'b00; // cabinet starts unlocked
+        coin_counter_drive <= 2'b00;
+        coin_counter0 <= 16'd0;
+        coin_counter1 <= 16'd0;
+    end
+    else if (lockout_write) begin
+        coin_lockout[0] <= cfg.lockout_inverted ?  m_wdata[1] : ~m_wdata[1];
+        coin_lockout[1] <= cfg.lockout_inverted ?  m_wdata[0] : ~m_wdata[0];
+        if (!coin_counter_drive[0] && m_wdata[3])
+            coin_counter0 <= coin_counter0 + 1'd1;
+        if (!coin_counter_drive[1] && m_wdata[2])
+            coin_counter1 <= coin_counter1 + 1'd1;
+        coin_counter_drive <= {m_wdata[2], m_wdata[3]};
+    end
+end
+
 always_ff @(posedge clk_sys) begin
     if (rst) begin
-        wdog_frame_cnt <= 9'd0;
+        wdog_cycle_cnt <= '0;
         wdog_rst       <= 1'b0;
         ack_r_d        <= 1'b0;
     end
     else begin
         ack_r_d <= ack_r;
-        if (wdog_kick)
-            wdog_frame_cnt <= 9'd0;
-        else if (vblank_pulse && video_enable) begin
-            if ((wdog_frame_cnt >= 9'd180) && (cfg.wdog_mode != 2'd0))
+        if (cfg.wdog_mode == 2'd0) begin
+            wdog_cycle_cnt <= '0;
+            wdog_rst <= 1'b0;
+        end
+        else if (wdog_kick) begin
+            wdog_cycle_cnt <= '0;
+        end
+        else if (!wdog_rst) begin
+            if (wdog_cycle_cnt ==
+                WDOG_COUNTER_WIDTH'(WDOG_TIMEOUT_CYCLES - 1))
                 wdog_rst <= 1'b1;
             else
-                wdog_frame_cnt <= wdog_frame_cnt + 9'd1;
+                wdog_cycle_cnt <= wdog_cycle_cnt + 1'd1;
         end
     end
 end
@@ -986,7 +1121,10 @@ always_ff @(posedge clk_sys) begin
         read_wait    <= 1'b0;
         sound_rd_cnt <= 2'd0;
         st010_rd_cnt <= 2'd0;
-        read_mux     <= 16'hffff;
+        // V60 program space is configured with MAME's default unmapped value
+        // of zero.  Mapped active-low input ports still supply 16'hffff when
+        // idle; only genuinely unmapped/nopr reads take this default.
+        read_mux     <= 16'h0000;
     end
     else if (!m_req) begin
         ack_r        <= 1'b0;
@@ -1046,22 +1184,26 @@ always_ff @(posedge clk_sys) begin
                 sel_sprram:  read_mux <= spr_q;
                 sel_palette: read_mux <= pal_q;
                 sel_scroll:  read_mux <= (a == 24'h1c0000)
-                    ? {2'b00, vb, vb, hb, 11'b0} : scroll_q;
+                    ? ssv_video_status(vb, hb) : scroll_q;
                 sel_io: begin
                     unique case (a[4:1])
-                        // MAME survarts/dynagear: watchdog_timer reset16_r.
-                        // Read kicks the 180-frame board timeout (wdog_rst).
-                        4'h0: read_mux <= 16'h0000;
+                        // Only read-kick maps install a readable watchdog at
+                        // $210000.  Vasara is write-only and Drift/STM have no
+                        // device there.  watchdog reset16_r and the V60
+                        // program space's unmapped value are both zero.
+                        4'h0: read_mux <= (cfg.wdog_mode == 2'd1)
+                            ? 16'h0000 : 16'h0000;
                         4'h1: read_mux <= in_dsw1;
                         4'h2: read_mux <= in_dsw2;
                         4'h4: read_mux <= in_p1;
                         4'h5: read_mux <= in_p2;
-                        4'h6: read_mux <= in_system;
-                        default: read_mux <= 16'hffff;
+                        4'h6: read_mux <= in_system_gated;
+                        default: read_mux <= 16'h0000;
                     endcase
                 end
                 sel_extra: read_mux <= in_extra;
-                default:   read_mux <= 16'hffff;
+                sel_drifto_unknown: read_mux <= drifto_unknown_value;
+                default:   read_mux <= 16'h0000;
             endcase
         end
     end

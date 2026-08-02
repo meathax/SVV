@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Raw SSV CRT timing: 42.954545 MHz / 6, 454 x 262, active 336 x 240.
+// Raw SSV CRT timing: 42.954545 MHz / 6, 454 x 262, descriptor active area.
 `timescale 1ns/1ps
 
 module ssv_video_timing #(
-    parameter logic [15:0] PIXEL_INC = 16'd9710
+    parameter logic [15:0] PIXEL_INC = ssv_pkg::SSV_PIXEL_INC
 ) (
     input              clk,
     input              rst,
+    input logic [8:0]  active_width,
+    input logic [8:0]  active_height,
     output logic       ce_pixel,
     // Exactly twice ce_pixel and phase-locked to it, for the line doubler.
     //
@@ -70,7 +72,7 @@ always_ff @(posedge clk) begin
                     vcnt <= 9'd0;
                 else begin
                     vcnt <= vcnt + 1'd1;
-                    if (vcnt == SSV_VBSTART - 1)
+                    if (vcnt == active_height - 1'd1)
                         vblank_pulse <= 1'b1;
                 end
             end
@@ -81,8 +83,8 @@ always_ff @(posedge clk) begin
 end
 
 always_comb begin
-    hblank = (hcnt >= SSV_HBSTART);
-    vblank = (vcnt >= SSV_VBSTART);
+    hblank = (hcnt >= active_width);
+    vblank = (vcnt >= active_height);
 
     // The exact board sync widths are not documented by MAME's set_raw call.
     // These pulses lie wholly in blanking and are suitable for MiSTer output;

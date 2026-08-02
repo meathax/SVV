@@ -6,6 +6,8 @@ always #5 clk = ~clk;
 logic rst;
 logic ce_pixel, hblank, vblank, hsync, vsync, vblank_pulse;
 logic [8:0] hcnt, vcnt;
+logic [8:0] active_width = 9'd336;
+logic [8:0] active_height = 9'd240;
 
 ssv_video_timing #(.PIXEL_INC(16'hffff)) dut (.*);
 

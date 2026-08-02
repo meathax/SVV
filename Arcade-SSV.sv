@@ -165,7 +165,7 @@ assign DDRAM_CLK = clk_ram;
 
 wire [1:0] buttons;
 wire [63:0] status;
-wire ioctl_download, ioctl_wr, ioctl_wait;
+wire ioctl_download, ioctl_upload, ioctl_wr, ioctl_rd, ioctl_wait;
 wire [15:0] ioctl_index;
 wire [26:0] ioctl_addr;
 wire [7:0] ioctl_dout;
@@ -182,6 +182,81 @@ wire  [7:0] hs_data_to_ram, hs_data_from_ram;
 wire        hs_ram_write, hs_configured;
 wire  [7:0] hs_data_to_hps;
 wire        hs_upload, hs_upload_req;
+
+// Descriptor-sized board NVRAM uses MiSTer persistence index 8. hps_io has a
+// single upload request/index/data path, so requests from this bridge and the
+// existing hiscore index-4 client are serialized below.
+wire  [7:0] nv_data_to_hps;
+wire        nv_upload_req, nv_ioctl_wait;
+wire        nv_init_busy, nv_init_done;
+wire        nvram_transfer = (ioctl_download || ioctl_upload) &&
+                             (ioctl_index == 16'd8);
+
+logic hs_upload_req_q, nv_upload_req_q;
+logic hs_upload_pending, nv_upload_pending;
+logic [2:0] upload_arb_state;
+logic       upload_req_to_hps;
+logic [7:0] upload_index_to_hps;
+localparam logic [2:0] UP_IDLE = 3'd0, UP_SIGNAL = 3'd1,
+                       UP_WAIT = 3'd2, UP_ACTIVE = 3'd3,
+                       UP_GAP = 3'd4;
+
+always_ff @(posedge clk_sys) begin
+    if (!pll_locked) begin
+        hs_upload_req_q    <= 1'b0;
+        nv_upload_req_q    <= 1'b0;
+        hs_upload_pending  <= 1'b0;
+        nv_upload_pending  <= 1'b0;
+        upload_arb_state   <= UP_IDLE;
+        upload_req_to_hps  <= 1'b0;
+        upload_index_to_hps <= 8'd4;
+    end
+    else begin
+        hs_upload_req_q <= hs_upload_req;
+        nv_upload_req_q <= nv_upload_req;
+        upload_req_to_hps <= 1'b0;
+
+        if (hs_upload_req && !hs_upload_req_q)
+            hs_upload_pending <= 1'b1;
+        if (nv_upload_req && !nv_upload_req_q)
+            nv_upload_pending <= 1'b1;
+
+        case (upload_arb_state)
+            UP_IDLE: begin
+                // Board NVRAM has priority, but an index-4 edge is retained.
+                if (nv_upload_pending) begin
+                    nv_upload_pending   <= 1'b0;
+                    upload_index_to_hps <= 8'd8;
+                    upload_req_to_hps   <= 1'b1;
+                    upload_arb_state    <= UP_SIGNAL;
+                end
+                else if (hs_upload_pending) begin
+                    hs_upload_pending   <= 1'b0;
+                    upload_index_to_hps <= 8'd4;
+                    upload_req_to_hps   <= 1'b1;
+                    upload_arb_state    <= UP_SIGNAL;
+                end
+            end
+            UP_SIGNAL: upload_arb_state <= UP_WAIT;
+            UP_WAIT: begin
+                // Keep the selected index stable until HPS starts that upload.
+                if (ioctl_upload &&
+                    (ioctl_index[7:0] == upload_index_to_hps))
+                    upload_arb_state <= UP_ACTIVE;
+            end
+            UP_ACTIVE: begin
+                if (!ioctl_upload)
+                    upload_arb_state <= UP_GAP;
+            end
+            UP_GAP: upload_arb_state <= UP_IDLE;
+            default: upload_arb_state <= UP_IDLE;
+        endcase
+    end
+end
+
+assign hs_upload = ioctl_upload && (ioctl_index[7:0] == 8'd4);
+wire [7:0] ioctl_data_to_hps = (ioctl_index[7:0] == 8'd8)
+                                ? nv_data_to_hps : hs_data_to_hps;
 
 // SSV main RAM is 16-bit and the hiscore module speaks bytes. The board is
 // little-endian (the loader packs LE and the golden CRC depends on it), so
@@ -201,11 +276,13 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .clk_sys(clk_sys), .HPS_BUS(HPS_BUS),
     .buttons(buttons), .status(status),
     .ioctl_download(ioctl_download), .ioctl_wr(ioctl_wr),
+    .ioctl_upload(ioctl_upload), .ioctl_rd(ioctl_rd),
     .ioctl_addr(ioctl_addr), .ioctl_dout(ioctl_dout),
     .ioctl_index(ioctl_index), .ioctl_wait(ioctl_wait),
-    // Hiscore save path: index 4 is <MRA name>.nvm.
-    .ioctl_upload(hs_upload), .ioctl_upload_req(hs_upload_req),
-    .ioctl_upload_index(8'd4), .ioctl_din(hs_data_to_hps),
+    // Hiscore index 4 and board NVRAM index 8 share the HPS upload channel.
+    .ioctl_upload_req(upload_req_to_hps),
+    .ioctl_upload_index(upload_index_to_hps),
+    .ioctl_din(ioctl_data_to_hps),
     // H1 hides Autosave on an MRA that carries no hiscore.dat entry.
     // H2 hides the three CRT Adjust amounts while CRT Adjust itself is Off.
     .status_menumask({13'd0, ~status[24], ~hs_configured, 1'b0}),
@@ -241,12 +318,11 @@ assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
 // **48.000 MHz**, and 48.000 / 3 = 16.000 MHz is the V60 clock. The accumulator
 // below targets that from clk_sys.
 //
-// Accuracy note, deliberately NOT changed: at clk_sys = 48.3185 MHz the
-// constant 21702 yields 15.99887 MHz, i.e. 71 ppm slow. 21704 would give
-// 16.00035 MHz (22 ppm). The improvement is real but ~0.007%, and changing the
-// CPU-to-raster phase would invalidate the 950-frame golden CRC that was just
-// re-baselined against MAME. Not worth trading a verified reference for 49 ppm.
-// Revisit only if the golden is being re-cut for another reason.
+// The two board clocks are independent, so their ratio is the observable
+// quantity for gameplay/frame lock: 16 MHz / (42.954545 MHz / 6) = 704/315.
+// SSV_CPU_INC=21701 against SSV_PIXEL_INC=9710 is within 3.7 ppm; the former
+// 21702 value was 42.4 ppm fast relative to video and visibly accumulated an
+// ES5506/frame-boundary phase error in current Dyna Gear lockstep evidence.
 //
 // Pause also stops the CPU while the OSD is open, which is what a player
 // expects from opening a menu mid-game and costs one gate. status[7] remains
@@ -258,7 +334,8 @@ assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
 // feeding game_pause straight back into its `paused` input is a handshake and
 // not a combinational loop.
 wire hs_pause;
-wire game_pause = status[7] | OSD_STATUS | hs_pause;
+wire game_pause = status[7] | OSD_STATUS | hs_pause |
+                  nvram_transfer | nv_init_busy;
 
 logic ce_cpu;
 logic [15:0] cpu_acc;
@@ -269,7 +346,7 @@ always_ff @(posedge clk_sys) begin
         if (!pll_locked) cpu_acc <= 16'd0;
     end
     else begin
-        sum = {1'b0, cpu_acc} + 17'd21702;
+        sum = {1'b0, cpu_acc} + {1'b0, ssv_pkg::SSV_CPU_INC};
         ce_cpu <= sum[16];
         cpu_acc <= sum[15:0];
     end
@@ -293,26 +370,51 @@ wire [26:0] download_max_addr;
 wire loader_reset = ~pll_locked;
 wire video_reset = RESET | status[0] | buttons[1] | ~pll_locked;
 
-// After ROM download, read two known program words from SDRAM before the
-// CPU is released. Expected LE packing matches the loader/sim model:
+// The loader commits the decoded descriptor one cycle after accepting byte
+// 15. Delay that event by a second cycle so the NVRAM bridge samples the new
+// game_cfg, while byte zero independently arms init immediately.
+wire nv_cfg_last_byte = ioctl_download && ioctl_wr &&
+                        (ioctl_index == 16'd1) &&
+                        (ioctl_addr == 27'd15);
+logic nv_cfg_last_q, nv_cfg_commit;
+always_ff @(posedge clk_sys) begin
+    if (loader_reset) begin
+        nv_cfg_last_q <= 1'b0;
+        nv_cfg_commit <= 1'b0;
+    end
+    else begin
+        nv_cfg_last_q <= nv_cfg_last_byte;
+        nv_cfg_commit <= nv_cfg_last_q;
+    end
+end
+
+// After ROM download, read two program words from SDRAM before the CPU is
+// released. The comparison values are a Dyna Gear bring-up signature only;
+// probe completion is universal, but the signature flag is not meaningful for
+// the other nine profiles. Expected LE packing matches the loader/sim model:
 //   addr 0x000000 -> 0x207a (reset stub BR)
 //   addr 0x01f3d0 -> 0x0c7a (BR16 over "12345678")
 logic        probe_done, probe_req, probe_seen;
 logic  [1:0] probe_step;
 logic [15:0] probe_sig0, probe_sig1;
-logic        rom_sig_ok;
+logic        dynagear_rom_sig_ok;
 wire         probe_active = rom_loaded && sdram_ready_sys &&
-                            !ioctl_download && !probe_done;
+                            nv_init_done && !ioctl_download && !probe_done;
 
 wire wdog_rst;
-wire core_reset = video_reset | ioctl_download | ~rom_loaded |
-                  ~sdram_ready_sys | ~probe_done | wdog_rst;
+wire core_cold_reset = video_reset | ioctl_download | ~rom_loaded |
+                       ~sdram_ready_sys | ~nv_init_done | ~probe_done;
+wire core_reset = core_cold_reset | wdog_rst;
 assign LED_USER = ~rom_loaded;
 
 wire ld_wr_req, ld_wr_ack;
+wire ld_ioctl_wait;
 wire [SDR_AW:1] ld_wr_addr;
 wire [15:0] ld_wr_din;
 wire [1:0] ld_wr_be;
+wire st010_drom_we;
+wire [10:0] st010_drom_wa;
+wire [15:0] st010_drom_wd;
 
 // Per-game configuration, parsed by the loader from the MRA's
 // <rom index="1"> block. game_cfg is what the core actually runs on; there is
@@ -328,12 +430,21 @@ ssv_rom_loader loader (
     .clk(clk_sys), .rst(loader_reset), .mem_ready(sdram_ready_sys),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
-    .ioctl_dout(ioctl_dout), .ioctl_wait(ioctl_wait),
+    .ioctl_dout(ioctl_dout), .ioctl_wait(ld_ioctl_wait),
     .sdr_wr_req(ld_wr_req), .sdr_wr_addr(ld_wr_addr),
     .sdr_wr_din(ld_wr_din), .sdr_wr_be(ld_wr_be),
     .sdr_wr_ack(ld_wr_ack), .rom_loaded(rom_loaded),
+    .st010_drom_we(st010_drom_we),
+    .st010_drom_wa(st010_drom_wa), .st010_drom_wd(st010_drom_wd),
     .download_max_addr(download_max_addr)
 );
+
+// While cold-zeroing, descriptor bytes (index 1) must continue to flow, but
+// index 0 and persisted index 8 are held until the exact-sized fill completes.
+wire nv_init_ioctl_wait = nv_init_busy && ioctl_download &&
+                          ((ioctl_index == 16'd0) ||
+                           (ioctl_index == 16'd8));
+assign ioctl_wait = ld_ioctl_wait | nv_ioctl_wait | nv_init_ioctl_wait;
 
 wire core_p0_req;
 wire [SDR_AW:1] core_p0_addr;
@@ -352,7 +463,7 @@ always_ff @(posedge clk_sys) begin
         probe_step <= 2'd0;
         probe_sig0 <= 16'hffff;
         probe_sig1 <= 16'hffff;
-        rom_sig_ok <= 1'b0;
+        dynagear_rom_sig_ok <= 1'b0;
     end
     else if (!probe_done && sdram_ready_sys) begin
         if (p0_ack && probe_seen) begin
@@ -364,7 +475,8 @@ always_ff @(posedge clk_sys) begin
             end
             else begin
                 probe_sig1 <= p0_dout;
-                rom_sig_ok <= (probe_sig0 == 16'h207a) && (p0_dout == 16'h0c7a);
+                dynagear_rom_sig_ok <= (game_cfg.game_id == 4'd0) &&
+                    (probe_sig0 == 16'h207a) && (p0_dout == 16'h0c7a);
                 probe_done <= 1'b1;
             end
         end
@@ -384,26 +496,79 @@ end
 wire p2_req, p2_ack;
 wire [SDR_AW:4] p2_addr;
 wire [127:0] p2_dout;
+wire nv_p3_req, nv_p3_ack;
+wire [SDR_AW:1] nv_p3_addr;
+wire [15:0] nv_p3_dout;
 wire p4_req, p4_ack;
 wire [SDR_AW:1] p4_addr;
 wire [15:0] p4_dout;
+wire p5_req, p5_ack;
+wire [SDR_AW:3] p5_addr;
+wire [63:0] p5_dout;
 
 wire core_wr_req, core_wr_ack;
 wire [SDR_AW:1] core_wr_addr;
 wire [15:0] core_wr_din;
 wire [1:0] core_wr_be;
+wire nv_wr_req, nv_wr_ack;
+wire [SDR_AW:1] nv_wr_addr;
+wire [15:0] nv_wr_din;
+wire [1:0] nv_wr_be;
+wire nv_modified;
 wire sw_req, sw_ack;
 wire [SDR_AW:1] sw_addr;
 wire [15:0] sw_din;
 wire [1:0] sw_be;
-wire loader_owns_write = ld_wr_req;
+wire [1:0] nvram_size_mode = (game_cfg_valid && game_cfg.has_nvram)
+                              ? game_cfg.nvram_mode : 2'd0;
 
-assign sw_req  = loader_owns_write ? ld_wr_req  : core_wr_req;
-assign sw_addr = loader_owns_write ? ld_wr_addr : core_wr_addr;
-assign sw_din  = loader_owns_write ? ld_wr_din  : core_wr_din;
-assign sw_be   = loader_owns_write ? ld_wr_be   : core_wr_be;
+ssv_nvram_bridge #(
+    .SDR_AW(SDR_AW),
+    .NVRAM_BASE(ssv_pkg::SDR_NVRAM_BASE)
+) nvram_bridge (
+    .clk(clk_sys), .rst(loader_reset),
+    .nvram_size_mode(nvram_size_mode),
+    .cfg_commit(nv_cfg_commit),
+    .init_busy(nv_init_busy), .init_done(nv_init_done),
+    .modified(nv_modified), .dirty(),
+    .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload),
+    .ioctl_wr(ioctl_wr), .ioctl_rd(ioctl_rd),
+    .ioctl_index(ioctl_index), .ioctl_addr(ioctl_addr),
+    .ioctl_dout(ioctl_dout), .ioctl_din(nv_data_to_hps),
+    .ioctl_wait(nv_ioctl_wait), .ioctl_upload_req(nv_upload_req),
+    .sdr_ready(sdram_ready_sys),
+    .sdr_wr_req(nv_wr_req), .sdr_wr_addr(nv_wr_addr),
+    .sdr_wr_din(nv_wr_din), .sdr_wr_be(nv_wr_be),
+    .sdr_wr_ack(nv_wr_ack),
+    .sdr_rd_req(nv_p3_req), .sdr_rd_addr(nv_p3_addr),
+    .sdr_rd_dout(nv_p3_dout), .sdr_rd_ack(nv_p3_ack)
+);
+
+wire loader_owns_write = ld_wr_req;
+wire nvram_owns_write = !loader_owns_write && nv_wr_req;
+
+assign sw_req  = loader_owns_write ? ld_wr_req  :
+                 nvram_owns_write  ? nv_wr_req  : core_wr_req;
+assign sw_addr = loader_owns_write ? ld_wr_addr :
+                 nvram_owns_write  ? nv_wr_addr : core_wr_addr;
+assign sw_din  = loader_owns_write ? ld_wr_din  :
+                 nvram_owns_write  ? nv_wr_din  : core_wr_din;
+assign sw_be   = loader_owns_write ? ld_wr_be   :
+                 nvram_owns_write  ? nv_wr_be   : core_wr_be;
 assign ld_wr_ack   = loader_owns_write ? sw_ack : 1'b0;
-assign core_wr_ack = loader_owns_write ? 1'b0 : sw_ack;
+assign nv_wr_ack   = nvram_owns_write ? sw_ack : 1'b0;
+assign core_wr_ack = (!loader_owns_write && !nvram_owns_write) ? sw_ack : 1'b0;
+
+// Only a completed core write in the exact descriptor-selected physical
+// NVRAM range marks persistence dirty. Loader/zero-fill/index-8 writes do not.
+wire [SDR_AW:1] nvram_word_limit = ssv_pkg::SDR_NVRAM_BASE[SDR_AW:1] +
+    ((nvram_size_mode == 2'd1) ? SDR_AW'(1024) :
+     (nvram_size_mode == 2'd2) ? SDR_AW'(32768) : SDR_AW'(0));
+assign nv_modified = core_wr_req && core_wr_ack &&
+                     ((nvram_size_mode == 2'd1) ||
+                      (nvram_size_mode == 2'd2)) &&
+                     (core_wr_addr >= ssv_pkg::SDR_NVRAM_BASE[SDR_AW:1]) &&
+                     (core_wr_addr < nvram_word_limit);
 
 // The 128 MB module fitted on this board is TWO 32Mx16 devices, not one
 // 64Mx16 part: SDRAM_nCS selects between them and DQML/DQMH are shorted to
@@ -424,9 +589,10 @@ sdram sdram (
     .p0_req(p0_req), .p0_addr(p0_addr), .p0_dout(p0_dout), .p0_ack(p0_ack),
     .p1_req(1'b0), .p1_addr('0), .p1_dout(), .p1_ack(),
     .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
-    .p3_req(1'b0), .p3_addr('0), .p3_dout(), .p3_ack(),
+    .p3_req(nv_p3_req), .p3_addr(nv_p3_addr),
+    .p3_dout(nv_p3_dout), .p3_ack(nv_p3_ack),
     .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack),
-    .p5_req(1'b0), .p5_addr('0), .p5_dout(), .p5_ack()
+    .p5_req(p5_req), .p5_addr(p5_addr), .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
 // MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Test,Service,Start,Coin
@@ -494,9 +660,23 @@ wire service_button = joy_p1[11] | joy_p2[11];
 wire coin1_button = joy_p1[13];
 wire coin2_button = joy_p2[13];
 // MAME SYSTEM ($21000c): COIN1, COIN2, SERVICE1, TILT, TEST
-wire [15:0] system_port = {8'hff,
+wire [15:0] system_port_live = {8'hff,
     ~{3'b000, test_button, 1'b0, service_button,
       coin2_button, coin1_button}};
+// Vasara/Vasara 2 replace SYSTEM bits 3 (Tilt) and 4 (Test) with
+// IP_ACTIVE_LOW IPT_UNKNOWN in MAME. Their released/fixed level is therefore
+// high regardless of the cabinet Test chord; other descriptors retain the
+// live normal SYSTEM port.
+wire [15:0] system_port = game_cfg.system_input_mode
+                        ? (system_port_live | 16'h0018)
+                        : system_port_live;
+
+// Descriptor modes distinguish the decoded-but-unpopulated Dyna Gear window
+// from Survival Arts' real six-button wiring. A non-decoded or idle window is
+// driven released; the core separately gates the address decode for mode 0.
+wire [15:0] extra_input_port = (game_cfg.extra_input_mode == 2'd2)
+                             ? extra_port(joy_p1, joy_p2)
+                             : 16'hffff;
 
 // ---------------------------------------------------------------------------
 // DIP switches, from the MRA.
@@ -534,10 +714,15 @@ wire core_ce, core_hs, core_vs, core_hb, core_vb;
 wire signed [15:0] core_audio_l, core_audio_r;
 wire [31:0] debug_pc;
 wire [23:0] debug_status;
+// Cabinet bookkeeping diagnostics: visible to simulation/SignalTap without
+// changing the game's input protocol or consuming an OSD status field.
+wire [1:0] coin_lockout_diag;
+wire [15:0] coin_counter0_diag, coin_counter1_diag;
 
 ssv_core core (
     .cfg(game_cfg),
-    .clk_sys(clk_sys), .rst(core_reset), .ce_cpu(ce_cpu),
+    .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
+    .ce_cpu(ce_cpu),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack && !probe_active),
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr),
@@ -545,19 +730,25 @@ ssv_core core (
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
     .sdr_wr_din(core_wr_din), .sdr_wr_be(core_wr_be),
     .sdr_wr_ack(core_wr_ack),
+    .sdr_p5_req(p5_req), .sdr_p5_addr(p5_addr),
+    .sdr_p5_dout(p5_dout), .sdr_p5_ack(p5_ack),
+    .st010_drom_we(st010_drom_we), .st010_drom_wa(st010_drom_wa),
+    .st010_drom_wd(st010_drom_wd),
     .sdr_p4_req(p4_req), .sdr_p4_addr(p4_addr),
     .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
     .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
     .in_system(system_port),
-    .in_extra(game_cfg.has_add_buttons ? extra_port(joy_p1, joy_p2)
-                                       : 16'hffff),
+    .in_extra(extra_input_port),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
     .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
+    .coin_lockout(coin_lockout_diag),
+    .coin_counter0(coin_counter0_diag),
+    .coin_counter1(coin_counter1_diag),
     .debug_pc(debug_pc), .debug_status(debug_status)
 );
 
@@ -905,12 +1096,13 @@ wire renderer_overrun = debug_status[16];
 assign LED_DISK = {1'b1, renderer_overrun};
 
 // Boot diagnostics that only ssv_diag_video ever consumed. They are kept
-// because they are cheap and are what a bring-up bisect reaches for first --
-// rom_sig_ok in particular is the one bit that says the ROM landed in SDRAM
-// intact. Sunk here so removing their reader does not leave Quartus warning
-// about dangling nets.
+// because they are cheap and are what a bring-up bisect reaches for first.
+// dynagear_rom_sig_ok checks two Dyna-specific words; other descriptors use
+// probe_done only and must not interpret this flag as a universal media hash.
+// Sunk here so removing their reader does not leave Quartus warnings about
+// dangling nets.
 wire unused_debug = &{1'b0, debug_pc, debug_status, download_max_addr,
-                      probe_sig0, probe_sig1, rom_sig_ok};
+                      probe_sig0, probe_sig1, dynagear_rom_sig_ok};
 
 wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,

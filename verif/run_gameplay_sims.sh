@@ -15,7 +15,7 @@ VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         +define+SIMULATION)
 
 CORE=(
-  rtl/ssv_pkg.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv
+  rtl/ssv_pkg.sv rtl/mem/sdram.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv
   rtl/common/s32_big_dpram.sv
   rtl/video/ssv_palette_ram.sv rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv rtl/video/ssv_gfx_row_decode.sv

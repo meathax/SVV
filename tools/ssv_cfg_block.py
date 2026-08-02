@@ -11,6 +11,8 @@ ssv_pkg::ssv_cfg_t. Byte 15 is the negated sum of bytes 0..14, so a truncated
 or reordered block is rejected rather than half-applied.
 """
 
+import ast
+import operator
 import re
 
 # ---------------------------------------------------------------------------
@@ -57,23 +59,29 @@ import re
 # ---------------------------------------------------------------------------
 
 
+# The universal release profile is deliberately limited to the graphics
+# geometries used by tools/ssv_supported_sets.py.  Keep these constraints here
+# so both descriptor generation and its focused tests reject an accidental
+# expansion to an unqualified MAME set.
+SUPPORTED_GFX_MB = (12, 16, 24, 32)
+ODD_TILE_FACTORS = (1, 3)
+
+
 def decompose_tiles(tiles):
-    """tiles -> (k, mul3), where tiles == (3 << k) or (1 << k).
+    """tiles -> (k, factor_code), where tiles == ODD_TILE_FACTORS[code] << k.
 
     MAME wraps sprite codes with `code % gfxelement->elements()` -- a true
-    modulo -- and elements() = sprites_region / 128. Across the nine SSV
-    targets that is 0x18000, 0x20000, 0x30000 or 0x40000, and three of those
-    are 3*2^k rather than powers of two, which a plain bit-mask gets wrong.
+    modulo -- and elements() = sprites_region / 128.  The ten-set manifest
+    needs only power-of-two and 3*power-of-two tile counts.  Encoding the odd
+    factor selects the shared small constant-modulo path in RTL.
     """
     k, n = 0, tiles
     while n % 2 == 0:
         n //= 2
         k += 1
-    if n == 1:
-        return k, 0
-    if n == 3:
-        return k, 1
-    raise ValueError("tile count 0x%x is neither 2^k nor 3*2^k" % tiles)
+    if n not in ODD_TILE_FACTORS:
+        raise ValueError("tile count 0x%x is not a qualified factor(1/3)*2^k" % tiles)
+    return k, ODD_TILE_FACTORS.index(n)
 
 
 def _fn_body(src, name, args="()"):
@@ -137,6 +145,21 @@ def parse_inits(src):
     return {n: resolve_init(src, n) for n in sorted(names)}
 
 
+def _addrmap_bodies(src, map_name, seen=None):
+    """Return a map and the base maps it calls, most-derived first."""
+    seen = set() if seen is None else seen
+    if not map_name or map_name in seen:
+        return []
+    seen.add(map_name)
+    body = _fn_body(src, map_name, "(address_map &map)")
+    if not body:
+        return []
+    out = [body]
+    for call in re.finditer(r"^\s*(\w+)\(map(?:\s*,[^;]*)?\);", body, re.M):
+        out.extend(_addrmap_bodies(src, call.group(1), seen))
+    return out
+
+
 def watchdog_mode(src, map_name):
     """0 = no watchdog, 1 = read-kick, 2 = write-kick -- from the ADDRESS MAP.
 
@@ -145,25 +168,96 @@ def watchdog_mode(src, map_name):
     this looked. Some maps carry `.nopr()` with the watchdog commented out
     (drifto94/stmblade), which reads as no device.
     """
-    body = _fn_body(src, map_name, "(address_map &map)")
-    if not body:
+    for body in _addrmap_bodies(src, map_name):
+        for line in body.splitlines():
+            if "0x210000" not in line:
+                continue
+            code = line.split("//")[0]
+            if "reset16_w" in code:
+                return 2
+            if "reset16_r" in code:
+                return 1
+            return 0        # nopr() in a derived map overrides its base
+    return 0
+
+
+def _input_bodies(src, ports_name, seen=None):
+    seen = set() if seen is None else seen
+    if not ports_name or ports_name in seen:
+        return []
+    seen.add(ports_name)
+    m = re.search(r"INPUT_PORTS_START\(\s*%s\s*\)(.*?)INPUT_PORTS_END" %
+                  re.escape(ports_name), src, re.S)
+    if not m:
+        return []
+    body = m.group(1)
+    out = [body]
+    for inc in re.finditer(r"PORT_INCLUDE\(\s*(\w+)\s*\)", body):
+        out.extend(_input_bodies(src, inc.group(1), seen))
+    return out
+
+
+def extra_input_mode(src, map_name, ports_name):
+    """0 none, 1 decoded/idle, 2 decoded six-button input window."""
+    decoded = any("0x500008" in body for body in _addrmap_bodies(src, map_name))
+    if not decoded:
         return 0
-    for line in body.splitlines():
-        if "0x210000" not in line:
-            continue
-        code = line.split("//")[0]
-        if "reset16_w" in code:
-            return 2
-        if "reset16_r" in code:
-            return 1
-        return 0            # nopr() or otherwise no watchdog device
+    for body in _input_bodies(src, ports_name):
+        for section in re.split(r"(?=PORT_(?:START|MODIFY)\s*\()", body):
+            if '"ADD_BUTTONS"' in section and re.search(r"IPT_BUTTON[456]", section):
+                return 2
+    return 1
+
+
+def system_input_mode(src, ports_name):
+    """0 normal; 1 MAME fixes SYSTEM Test/Tilt bits high as unknown."""
+    for body in _input_bodies(src, ports_name):
+        for section in re.split(r"(?=PORT_(?:START|MODIFY)\s*\()", body):
+            if '"SYSTEM"' not in section:
+                continue
+            fixed_unknown = set()
+            for line in section.splitlines():
+                m = re.search(r"PORT_BIT\(\s*(0x[0-9a-fA-F]+).*IPT_UNKNOWN", line)
+                if m:
+                    fixed_unknown.add(int(m.group(1), 16))
+            if 0x0008 in fixed_unknown and 0x0010 in fixed_unknown:
+                return 1
     return 0
 
 
 def has_add_buttons(src, map_name):
-    """True when the address map decodes $500008 (the extra-input window)."""
-    body = _fn_body(src, map_name, "(address_map &map)")
-    return "0x500008" in body
+    """Legacy compatibility helper: whether $500008 is decoded at all."""
+    return any("0x500008" in body for body in _addrmap_bodies(src, map_name))
+
+
+def has_nvram(src, map_name):
+    """True when the address map decodes Cairblad's $580000 NVRAM window."""
+    return any("0x580000" in body for body in _addrmap_bodies(src, map_name))
+
+
+def nvram_mode(src, map_name):
+    """Return the exact MAME NVRAM window size: 0, 2 KiB, or 64 KiB."""
+    for body in _addrmap_bodies(src, map_name):
+        if re.search(r"0x580000\s*,\s*0x5807ff\)\.ram", body):
+            return 1
+        if re.search(r"0x580000\s*,\s*0x58ffff\)\.ram", body):
+            return 2
+    return 0
+
+
+def extra_ram_mode(src, map_name):
+    """Return the descriptor-selected extra CPU RAM map.
+
+    MAME's ``.ram()`` and ``.nopw()`` are intentionally distinguished.  The
+    latter is a write sink in Drift Out/STM Blade, not backing RAM that the
+    universal core should expose to the CPU.
+    """
+    for body in _addrmap_bodies(src, map_name):
+        if re.search(r"0x400000\s*,\s*0x43ffff\)\.ram\s*\(", body):
+            return 1
+        if re.search(r"0x010000\s*,\s*0x03ffff\)\.ram\s*\(", body):
+            return 2
+    return 0
 
 
 def has_st010(regions):
@@ -180,34 +274,134 @@ def has_st010(regions):
     return any(r['name'] == 'st010' for r in regions)
 
 
-def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_loaded,
-                    ens_valid, ens_map, flags, wdog):
+def has_drifto_unknown(src, map_name):
+    """True for drifto94_map's MAME random-read test windows."""
+    return any("0x510000" in body and "drifto94_unknown_r" in body and
+               "0x520000" in body for body in _addrmap_bodies(src, map_name))
+
+
+def lockout_inverted(src, map_name):
+    """Descriptor fact only; the core does not yet gate coin inputs."""
+    return any("lockout_inv_w" in body for body in _addrmap_bodies(src, map_name))
+
+
+_BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+           ast.Div: operator.floordiv, ast.FloorDiv: operator.floordiv}
+
+
+def _const_expr(text):
+    """Evaluate the integer-only arithmetic MAME uses in set_visarea()."""
+    def visit(node):
+        if isinstance(node, ast.Expression):
+            return visit(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = visit(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
+            return _BINOPS[type(node.op)](visit(node.left), visit(node.right))
+        raise ValueError("non-constant geometry expression %r" % text)
+    return visit(ast.parse(text.strip(), mode="eval"))
+
+
+def visible_geometry(src, config_name, depth=0):
+    """Return MAME's configured visible width/height, following config calls."""
+    if depth > 8:
+        raise ValueError("machine-config inheritance too deep at %s" % config_name)
+    body = _fn_body(src, config_name, "(machine_config &config)")
+    if not body:
+        raise ValueError("no machine config body for %s" % config_name)
+    start = body.find("set_visarea(")
+    if start >= 0:
+        begin = start + len("set_visarea(")
+        depth_paren, end = 1, begin
+        while end < len(body) and depth_paren:
+            if body[end] == "(":
+                depth_paren += 1
+            elif body[end] == ")":
+                depth_paren -= 1
+            end += 1
+        args, part, nested = [], [], 0
+        for char in body[begin:end - 1]:
+            if char == "(":
+                nested += 1
+            elif char == ")":
+                nested -= 1
+            if char == "," and nested == 0:
+                args.append("".join(part))
+                part = []
+            else:
+                part.append(char)
+        args.append("".join(part))
+        if len(args) != 4:
+            raise ValueError("set_visarea in %s has %d arguments" %
+                             (config_name, len(args)))
+        x0, x1, y0, y1 = (_const_expr(v) for v in args)
+        return x1 - x0 + 1, y1 - y0 + 1
+    for inc in re.finditer(r"^\s*(\w+)\(config\);", body, re.M):
+        try:
+            return visible_geometry(src, inc.group(1), depth + 1)
+        except ValueError:
+            pass
+    raise ValueError("no set_visarea reachable from %s" % config_name)
+
+
+def graphics_quarters(gfx_region, gfx_load_end):
+    """Whether ROM data reaches the fourth logical graphics quarter."""
+    return 4 if gfx_load_end > (gfx_region * 3) // 4 else 3
+
+
+def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
+                    sample_mb, ens_valid, ens_map, flags, wdog,
+                    visible_width, visible_height):
     """Assemble the 16-byte block. Raises if a field will not fit."""
-    k, mul3 = decompose_tiles(gfx_region // 128)
-    quarters = 4 if gfx_loaded >= gfx_region else 3
+    k, factor_code = decompose_tiles(gfx_region // 128)
+    quarters = graphics_quarters(gfx_region, gfx_load_end)
     prog_mb = prog_size >> 20
     gfx_mb = gfx_region >> 20
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
-    if gfx_mb > 63:
-        raise ValueError("graphics region %d MB does not fit gfx_mb" % gfx_mb)
+    if gfx_mb not in SUPPORTED_GFX_MB:
+        raise ValueError("graphics region %d MB is outside the ten-set profile" %
+                         gfx_mb)
+    if visible_width & 1 or not 2 <= visible_width <= 510:
+        raise ValueError("visible width %d is not an encodable even width" % visible_width)
+    if not 1 <= visible_height <= 255:
+        raise ValueError("visible height %d does not fit" % visible_height)
 
     b = [0] * 16
     b[0] = 0x53                 # magic 'S'
-    b[1] = 1                    # version
+    b[1] = 2                    # version
     b[2] = prog_mb
     b[3] = gfx_mb
     b[4] = k
-    b[5] = mul3
+    b[5] = factor_code
     b[6] = quarters
     b[7] = ens_map & 0xFF       # 2 bits per ES5506 CR bank -> stream slot
     b[8] = ens_valid & 0x0F
     b[9] = ((1 if flags.get("tile_code_identity") else 0) |
             (2 if flags.get("irq_level1_line0") else 0) |
-            (4 if flags.get("has_add_buttons") else 0) |
-            (8 if flags.get("has_st010") else 0))
-    b[10] = wdog & 0x03
+            # Bit 2 is reserved zero in the ten-set descriptor ABI.
+            (8 if flags.get("has_st010") else 0) |
+            (16 if flags.get("has_drifto_unknown") else 0) |
+            (32 if flags.get("lockout_inverted") else 0) |
+            ((flags.get("extra_input_mode", 0) & 0x03) << 6))
+    extra_mode = flags.get("extra_ram_mode", 0)
+    if extra_mode not in (0, 1, 2):
+        raise ValueError("unsupported extra RAM mode %r" % (extra_mode,))
+    nvram_size_mode = flags.get("nvram_mode", 0)
+    if nvram_size_mode not in (0, 1, 2):
+        raise ValueError("unsupported NVRAM mode %r" % (nvram_size_mode,))
+    b[10] = ((wdog & 0x03) |
+             (4 if flags.get("has_nvram") else 0) |
+             ((extra_mode & 0x03) << 3) |
+             (32 if flags.get("system_input_mode") else 0) |
+             ((nvram_size_mode & 0x03) << 6))
     b[11] = game_id & 0x0F
+    b[12] = sample_mb & 0x3F
+    b[13] = visible_width // 2
+    b[14] = visible_height
     b[15] = (-sum(b[:15])) & 0xFF
     return b
 

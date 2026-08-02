@@ -54,7 +54,7 @@ ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
 ssv_core dut (
     .cfg(ssv_pkg::cfg_dynagear()),
-    .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
+    .clk_sys(clk_sys), .rst(rst), .cold_rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -88,13 +88,13 @@ always_ff @(posedge clk_sys) begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1;
             p0_byte = {sdr_p0_addr, 1'b0};
-            if (p0_byte < SDR_GFX_BASE)
+            if (p0_byte >= SDR_XRAM_BASE && p0_byte < SDR_SAMPLES_BASE)
+                sdr_p0_dout <= external_ram[(p0_byte - SDR_XRAM_BASE) >> 1];
+            else if (p0_byte < SDR_XRAM_BASE)
                 sdr_p0_dout <= {
                     main_rom[p0_byte[19:0] + 1],
                     main_rom[p0_byte[19:0]]
                 };
-            else if (p0_byte >= SDR_XRAM_BASE && p0_byte < SDR_SAMPLES_BASE)
-                sdr_p0_dout <= external_ram[(p0_byte - SDR_XRAM_BASE) >> 1];
             else
                 sdr_p0_dout <= 16'hffff;
             p0_hold <= 4'd2;

@@ -41,6 +41,7 @@ module tb_upd96050_window;
 reg clk = 0;
 always #10 clk = ~clk;
 reg rst = 1;
+reg soft_rst = 0;
 reg ce  = 0;
 
 //--------------------------------------------------------------------------
@@ -67,7 +68,7 @@ wire [13:0] dbg_pc;
 wire [15:0] dbg_a, dbg_b, dbg_dp, dbg_dr, dbg_sr, dbg_k, dbg_l, dbg_m, dbg_n;
 
 upd96050_st010 dut (
-    .clk(clk), .rst(rst), .ce_dsp(ce),
+    .clk(clk), .rst(rst), .soft_rst(soft_rst), .ce_dsp(ce),
     .cpu_addr(cpu_addr), .cpu_be(cpu_be), .cpu_we(cpu_we), .cpu_re(cpu_re),
     .cpu_wdata(cpu_wdata), .cpu_rdata(cpu_rdata), .cpu_sel(cpu_sel),
     .prg_addr(prg_addr), .prg_req(prg_req),
@@ -91,6 +92,15 @@ begin
 end
 endtask
 
+task reset_dsp_soft;
+begin
+    ce = 0; soft_rst = 1;
+    repeat (2) @(posedge clk);
+    @(negedge clk); soft_rst = 0;
+    @(negedge clk);
+end
+endtask
+
 integer ii;
 task clr;
 begin
@@ -101,7 +111,8 @@ endtask
 task reset_dsp;
 begin
     ce = 0; rst = 1;
-    repeat (4) @(posedge clk);
+    // Complete the cold-reset 2048-word data-RAM clear before host traffic.
+    repeat (2060) @(posedge clk);
     @(negedge clk); rst = 0;
     @(negedge clk);
 end
@@ -148,7 +159,9 @@ begin
     clr;
     prom[0] = LDW({5'd0, w}, 4'd4);     // LD DP, w
     prom[1] = MOV(4'd15, 4'd1);         // A = dataRAM[DP]
-    reset_dsp;
+    // Rewind DSP execution without erasing the RAM image being inspected.
+    // This is MAME's device_reset retention contract, not device_start.
+    reset_dsp_soft;
     step; step;
     v = dbg_a;
 end

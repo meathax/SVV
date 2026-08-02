@@ -15,7 +15,7 @@
 //     a 32-bit BIG-endian region read as read_dword(pc) >> 8.
 //
 // Get either backwards and the DSP executes plausible garbage. So the SDRAM
-// model here is filled through ssv_pkg::st010_stream_dest() -- the same function
+// model here is filled through ssv_pkg::st010_stream_dest_cfg() -- the same function
 // the loader calls -- and the expected instruction is rebuilt from the raw
 // st010.bin bytes, not from anything the fetcher produces.
 //
@@ -71,7 +71,8 @@ initial begin
     // Byte pair k -> one 16-bit word, packed little-endian by the loader
     // (sdr_wr_din = {odd byte, even byte}), at the loader's own destination.
     for (k = 0; k < 2*NINSN; k++) begin
-        dest = st010_stream_dest(STREAM_ST010 + 27'(2*k));
+        dest = st010_stream_dest_cfg(
+            cfg_dynagear(), STREAM_ST010 + 27'(2*k));
         mem16[dest[SDR_AW:1]] = {rom[2*k+1], rom[2*k]};
     end
 end

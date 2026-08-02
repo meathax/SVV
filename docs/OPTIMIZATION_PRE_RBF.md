@@ -22,6 +22,12 @@ Setup slack, worst corner (Slow 1100 mV −40 C):
 four corners.** Worst hold is +0.100 ns. `releases/SSV.rbf` is staged
 (SHA256 `846c7b02…a48e21`).
 
+These fit and timing numbers predate the universal pooled line-entry table and
+are therefore historical evidence, not release evidence for the current RTL.
+The current 65,536-entry pool is steered to MLAB to protect the nearly-full
+M10K budget; a fresh Quartus fit is still required after all ten attract gates
+pass.
+
 The `ascal` `o_vlastcpt` fix closed the HDMI domain by itself under the
 codified Fast Fit profile — a +0.513 ns swing attributable to the RTL change
 rather than to placement effort, which is why the escalation was deliberately
@@ -44,6 +50,7 @@ from 11 to 21.
 | `ascal i_dpram` → `ramstyle "MLAB"` | −4 M10K (32×128 DDR staging FIFO was 4 blocks for 4,096 bits; read port is on the 100 MHz `avl_clk`) | fit needed to confirm |
 | `AUTO_SHIFT_REGISTER_RECOGNITION OFF` kept; `FITTER_EFFORT`/router effort left on the codified Fast Fit + NORMAL profile | The `ascal` fix deletes the add+compare chain that caused the miss, so it should close without spending fitter effort — and proving that is better information. Escalation held in reserve. | fit needed to confirm |
 | `tools/report_worst_timing.tcl` emits per-clock worst paths | The global worst list is all `ascal`, which hid the core's own margin | — |
+| Universal pooled `line_entries` (65,536 × 7 bits) steered to `MLAB` | Avoids spending the remaining M10Ks on the frame-wide table; accepts an ALM/mux trade that must be measured | Fresh current-source Verilator model builds cleanly; Quartus fit pending |
 
 ## Earlier changes (26 Jul, still in force)
 
@@ -82,7 +89,7 @@ floor for this memory map**, and the memory map is board-accurate.
 
 | Change | Expected | Why it is safe |
 |---|---|---|
-| `line_page_starts` (240×77) `ramstyle` M10K → **MLAB** | **−2 M10K**, +~32 MLAB cells | Shares `line_count_addr`, its access shape *and* its read/write states with `line_counts` three lines above, which has been MLAB all along. The `no_rw_check` argument documented there covers it unchanged |
+| `line_page_starts` (240×180 with the universal 2048-entry descriptor cache) `ramstyle` M10K → **MLAB** | **−2 M10K**, MLAB cost to confirm | Shares `line_count_addr`, its access shape *and* its read/write states with `line_counts` three lines above, which has been MLAB all along. The `no_rw_check` argument documented there covers it unchanged; the wider universal metadata table must be checked in the next fit. |
 | `descriptor_cache` split into **`_lo[52:0]` + `_hi[127:53]`** | up to **−4 M10K** | Lever 4 below. Same bits, same addresses, same cycle — a packing hint, not a capacity change |
 
 The split point is **53, not the natural 64**. Bits 106..127 are dead, so a 64/64 split

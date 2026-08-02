@@ -52,6 +52,18 @@ function automatic [15:0] system_port(
     system_port = {8'hff, ~{3'b000, test_btn, 1'b0, service, coin2, coin1}};
 endfunction
 
+function automatic [15:0] system_port_cfg(
+    input [15:0] live_port, input bit fixed_test_tilt
+);
+    system_port_cfg = fixed_test_tilt ? (live_port | 16'h0018) : live_port;
+endfunction
+
+function automatic [15:0] extra_port_cfg(
+    input logic [1:0] mode, input [31:0] j1, input [31:0] j2
+);
+    extra_port_cfg = (mode == 2'd2) ? extra_port(j1, j2) : 16'hffff;
+endfunction
+
 // DIP switches now come straight from the MRA on ioctl index 254; the wrapper
 // no longer translates anything, so these mirror the whole of what it does.
 function automatic [15:0] dsw1_port(input [7:0] sw0);
@@ -102,6 +114,12 @@ initial begin
     expect16("P2 B4", extra_port(32'd0, 32'h80), 16'hFFEF);
     expect16("P2 B6", extra_port(32'd0, 32'h200), 16'hFFBF);
     expect16("EXTRA IDLE", extra_port(32'd0, 32'd0), 16'hFFFF);
+    expect16("EXTRA mode none", extra_port_cfg(2'd0, 32'h380, 32'h380),
+             16'hFFFF);
+    expect16("EXTRA mode decoded-idle", extra_port_cfg(2'd1, 32'h380, 32'h380),
+             16'hFFFF);
+    expect16("EXTRA mode six-button", extra_port_cfg(2'd2, 32'h380, 32'h380),
+             16'hFF88);
 
     // DB15 SNAC pad maps onto the same joy numbering.
     expect16("DB15 UP", player_port(db15_to_joy(16'h0008)), 16'hFF7F);
@@ -165,6 +183,10 @@ initial begin
     expect16("SYS COIN2", system_port(0, 1, 0, 0), 16'hFFFD);
     expect16("SYS SERVICE", system_port(0, 0, 1, 0), 16'hFFFB);
     expect16("SYS TEST", system_port(0, 0, 0, 1), 16'hFFEF);
+    expect16("SYS normal TEST live",
+             system_port_cfg(system_port(0, 0, 0, 1), 1'b0), 16'hFFEF);
+    expect16("SYS Vasara TEST/TILT fixed high",
+             system_port_cfg(system_port(0, 0, 0, 1), 1'b1), 16'hFFFF);
 
     // ---------------------------------------------------------------------
     // DIP switches. These constants are NOT derived from Arcade-SSV.sv -- they

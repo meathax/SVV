@@ -122,14 +122,14 @@ task automatic send_byte(input [26:0] a, input [7:0] d);
     end
 endtask
 
-// 16-byte config block, Dyna Gear, version 1 (see tools/ssv_cfg_block.py).
+// 16-byte config block, Dyna Gear, version 2 (see tools/ssv_cfg_block.py).
 task automatic send_cfg;
     logic [7:0] b [0:15];
     integer i, sum;
     begin
-        b[0]=8'h53; b[1]=8'd1; b[2]=8'd1;  b[3]=8'd16; b[4]=8'd17; b[5]=8'd0;
-        b[6]=8'd3;  b[7]=8'd0; b[8]=8'd4;  b[9]=8'd4;  b[10]=8'd1; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd0; b[14]=8'd0;
+        b[0]=8'h53; b[1]=8'd2; b[2]=8'd1;  b[3]=8'd16; b[4]=8'd17; b[5]=8'd0;
+        b[6]=8'd3;  b[7]=8'd0; b[8]=8'd4;  b[9]=8'h40; b[10]=8'h09; b[11]=8'd0;
+        b[12]=8'd0; b[13]=8'd168; b[14]=8'd240;
         sum = 0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = (-sum) & 8'hFF;

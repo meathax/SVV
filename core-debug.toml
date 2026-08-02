@@ -1,0 +1,50 @@
+schema_version = 1
+
+[core]
+name = "SSV"
+platform = "MiSTer"
+top = "Arcade-SSV.sv"
+profile = "one universal SSV.rbf selected by MRA descriptors"
+status_file = "docs/implementation-status.md"
+coverage_file = "docs/GAME_COVERAGE.md"
+manifest = "tools/ssv_supported_sets.py"
+
+[reference]
+emulator = "MAME"
+version = "0.288 pinned contract; current mame0289 checkout SSV drivers byte-identical"
+source_root = "D:\\Arcade\\AI\\MAMESOURCE\\mame"
+driver_files = ["src/mame/seta/ssv.cpp", "src/mame/seta/ssv_v.cpp"]
+known_imperfect = []
+
+[commands]
+validate_profile = "python tools/verify_ssv_universal_profile.py --require-roms"
+validate_python = "python -m py_compile tools/gen_ssv_mras.py tools/ssv_cfg_block.py tools/ssv_supported_sets.py tools/verify_ssv_universal_profile.py"
+focused_tests = "wsl.exe bash -lc \"cd /mnt/d/Arcade/AI/SVV && export PATH=/home/meath/.local/bin:/usr/local/bin:/usr/bin:/bin && TMPDIR=/mnt/d/Arcade/AI/SVV/tmp/verilator bash verif/run_bringup_sims.sh\""
+audio_tests = "wsl.exe bash -lc \"cd /mnt/d/Arcade/AI/SVV && export PATH=/home/meath/.local/bin:/usr/local/bin:/usr/bin:/bin && TMPDIR=/mnt/d/Arcade/AI/SVV/tmp/verilator bash verif/run_audio_sims.sh\""
+reference_gameplay = "wsl.exe bash -lc \"cd /mnt/d/Arcade/AI/SVV && export PATH=/home/meath/.local/bin:/usr/local/bin:/usr/bin:/bin && TMPDIR=/mnt/d/Arcade/AI/SVV/tmp/verilator bash verif/run_gameplay_sims.sh\""
+all_set_profile_audit = "python tools/verify_ssv_universal_profile.py --require-roms"
+quartus_build = "powershell -File tools/build-ssv.ps1 -QuartusRoot D:\\Q17"
+
+[permissions]
+quartus_build = "explicit-user-authorization-and-exclusive-project-slot"
+private_media = "local-rom-archives-required; never commit"
+
+[artifacts]
+private = ["rom/", "keys/", "disks/", "nvram/"]
+generated = ["tmp/", "sim_output/", "verif/captures/", "verif/traces/"]
+preserve_between_runs = ["db/", "incremental_db/", ".simcache/"]
+
+[trace]
+schema = "bounded-completed-bus-transactions"
+compare_units = ["cpu", "device", "address", "data", "lanes", "rw", "ack"]
+
+[video]
+native_width = 336
+native_height = 240
+rotation = "set-selected; framework presentation remains shared"
+capture_format = "P6"
+
+[verification]
+attract_gate = "current universal-model Verilator run: 360 post-video-enable frames, REQUIRE_ATTRACT, zero renderer overruns"
+screenshot_gate = "the same Verilator run must emit a non-empty P6 PPM/PNG capture at an attract frame"
+mame_screenshots_count = false

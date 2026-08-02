@@ -60,7 +60,7 @@ logic booted;
 
 ssv_core dut (
     .cfg(ssv_pkg::cfg_dynagear()),
-    .clk_sys(clk_sys), .rst(rst), .ce_cpu(ce_cpu),
+    .clk_sys(clk_sys), .rst(rst), .cold_rst(rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -92,7 +92,7 @@ function automatic logic [63:0] v60_state_hash;
     end
 endfunction
 
-// Production fractional CE (+21702) via ssv_tb_ce_cpu. Sticky multi-cycle
+// Production fractional CE (shared SSV_CPU_INC) via ssv_tb_ce_cpu. Sticky multi-cycle
 // acks keep ext_done visible across CE gaps (see DYNAGEAR_NATURAL_IRQ_SKEW).
 ssv_tb_ce_cpu u_ce (.clk(clk_sys), .rst(rst), .ce_cpu(ce_cpu));
 
@@ -114,16 +114,16 @@ always_ff @(posedge clk_sys) begin
         if (sdr_p0_req && !p0_seen) begin
             p0_seen <= 1;
             p0_byte_addr = {sdr_p0_addr, 1'b0};
-            if (p0_byte_addr < SDR_GFX_BASE)
+            if (p0_byte_addr >= SDR_XRAM_BASE &&
+                p0_byte_addr < SDR_SAMPLES_BASE) begin
+                ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
+                sdr_p0_dout <= external_ram[ext_index];
+            end
+            else if (p0_byte_addr < SDR_XRAM_BASE)
                 sdr_p0_dout <= {
                     rom_bytes[p0_byte_addr[19:0] + 1],
                     rom_bytes[p0_byte_addr[19:0]]
                 };
-            else if (p0_byte_addr >= SDR_XRAM_BASE &&
-                     p0_byte_addr < SDR_SAMPLES_BASE) begin
-                ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
-                sdr_p0_dout <= external_ram[ext_index];
-            end
             else
                 sdr_p0_dout <= 16'hffff;
             ack_hold <= 4'd2;

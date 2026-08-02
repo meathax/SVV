@@ -525,11 +525,14 @@ That is an exact match for the hardware symptom: a static frame showing stale
 buffer content, with everything the renderer never wrote reading back as
 cleared index 0.
 
-Fix: `cache_deadline` (asserted by `ssv_core` for `vcnt >= SSV_VTOTAL-2`, the
-two lines that prepare display rows 0 and 1) forces `BUILD_ADVANCE` to publish
-the partial cache and release `cache_busy`, raising `cache_overflow` — which
-feeds `renderer_overrun` and therefore the overrun LED. One frame of degraded
-sprites, flagged, instead of a permanent freeze.
+Fix: `cache_deadline` forces `BUILD_ADVANCE` to publish the partial cache and
+release `cache_busy`, raising `cache_overflow` — which feeds
+`renderer_overrun` and therefore the overrun LED. The universal renderer now
+allows the build through the active portion of raster line 260 and asserts the
+deadline at that line's horizontal-blank swap point; this preserves the
+containment guarantee while reclaiming one line of useful build time for dense
+profiles. One frame of degraded sprites, flagged, instead of a permanent
+freeze.
 
 Regression test: `tb_ssv_cached_sprite_renderer` builds a sprite list that
 never terminates itself and asserts the deadline mid-build. **Observed to fail
@@ -543,12 +546,14 @@ this pass measures the build against its window:
 CACHE_BUILD max=44020 cycles (frame 527) deadline_aborts=0
 ```
 
-The window is lines 240–259, i.e. 20 lines × 454 pixels at 6.749 `clk_sys` per
-pixel (`PIXEL_INC` 9710/65536) = **61,284 cycles**. So the worst frame in the
-validated window already consumed **72% of the budget, leaving 17,264 cycles
-of margin**. That is not a comfortable design point for something whose failure
-mode is a permanent freeze — a walk 40% longer than the observed peak is enough
-to fall off the cliff, and the cliff had no floor.
+The original window was lines 240–259, i.e. 20 lines × 454 pixels at 6.749
+`clk_sys` per pixel (`PIXEL_INC` 9710/65536) = **61,284 cycles**. The current
+universal pooled renderer has measured a dense Survival Arts build at 61,306
+cycles, so the line-260 active portion is deliberately part of the budget;
+the exact post-fix margin remains a required Verilator measurement. That is
+not a comfortable design point for something whose failure mode is a permanent
+freeze — the deadline remains a containment mechanism, not a substitute for a
+timing-clean final fit.
 
 Note this is a containment fix. It converts an unrecoverable freeze into a
 visible, flagged degradation — it does not explain *why* a build would overrun

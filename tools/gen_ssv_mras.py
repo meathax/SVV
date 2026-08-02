@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""Generate MRA files for the Sammy-published SSV titles from MAME's ssv.cpp.
+"""Generate MRA files for the locally qualified SSV parent sets from MAME.
 
 Everything in the output is derived from MAME source -- ROM names, CRCs, load
 order, region sizes, DIP switch names/values/defaults and the game metadata.
-Nothing is hand-transcribed, because twelve sets of forty-odd CRCs is exactly
+Nothing is hand-transcribed, because ten sets of forty-odd CRCs is exactly
 where hand-transcription goes wrong.
 
   python tools/gen_ssv_mras.py path/to/ssv.cpp mra/
 
-SCOPE WARNING, and it is not a small one: of these sets the SSV core can
-currently run ONLY dynagear. rtl/mem/ssv_rom_loader.sv takes a fixed stream --
-1 MB program, then graphics as three 4 MB quarters, then 4 MB of samples -- and
-every other title here has a different graphics geometry, a bigger sample bank,
-or hardware the core does not implement (mahjong matrix, dial, trackball, tile
-descrambling). These MRAs describe the ROM sets correctly; they will not boot
-until the loader is generalised. Each generated file says so in its <about>.
+The universal profile and this generator cover exactly the sets named in
+``ssv_supported_sets.py``.  The repository owner keeps parent archives for
+those sets; unrelated MAME entries are deliberately outside this workflow.
 """
 
 import re
@@ -23,11 +19,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ssv_cfg_block as cfgblk
-
-# Every set in the driver, discovered from the GAME() lines rather than
-# hardcoded, so a MAME update that adds an SSV title is picked up by re-running
-# this instead of by remembering to edit a list.
-SETS = None
+from ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
 
 # The core's CONF_STR J1 list is fixed at six entries, so an MRA cannot add a
 # button the core does not expose. Games with more buttons than this are noted
@@ -126,8 +118,17 @@ def parse_rom_start(src, setname):
     return regions
 
 
-def emit_region(region, indent='    '):
-    """Turn one MAME region into MRA <part>/<interleave> lines, padding gaps."""
+def emit_region(region, indent='    ', stream_end=None):
+    """Turn one MAME region into MRA parts, including required erased tails.
+
+    MAME regions are often ``ROMREGION_ERASE00`` and have an erased tail
+    after the last physical ROM. The universal loader consumes the populated
+    graphics quarters as a sequential stream, so that tail is significant
+    whenever it lies inside those quarters (for example Storm Blade's 6 MiB
+    quarter contains 4.5 MiB of ROM and 1.5 MiB of erase). Do not append the
+    fourth quarter for a three-quarter profile; the caller supplies the exact
+    sequential endpoint.
+    """
     out, pos = [], 0
     loads = sorted(region['loads'], key=lambda x: x['offset'])
     i = 0
@@ -167,7 +168,20 @@ def emit_region(region, indent='    '):
                        % (indent, xml_escape(ld['name']), ld['crc']))
         pos += ld['size']
         i += 1
+    if stream_end is not None and pos < stream_end:
+        out.append('%s<part repeat="0x%x">00</part>'
+                   % (indent, stream_end - pos))
+        pos = stream_end
     return out, pos
+
+
+def region_load_end(region):
+    """Highest byte populated by MAME loads, accounting for byte lanes."""
+    ends = []
+    for ld in region['loads']:
+        span = ld['size'] * 2 if ld['kind'] == 'ROM_LOAD16_BYTE' else ld['size']
+        ends.append(ld['offset'] + span)
+    return max(ends, default=0)
 
 
 def parse_dips(src, portsname, _seen=None):
@@ -233,6 +247,19 @@ def parse_dips(src, portsname, _seen=None):
             dips.append({'port': port, 'mask': mask, 'default': mask - on,
                          'name': 'Service Mode',
                          'settings': [(mask - on, 'Off'), (on, 'On')]})
+            cur = None
+            continue
+        implicit = re.search(
+            r'PORT_DIP(UNUSED|UNKNOWN)_DIPLOC\(\s*(0x[0-9a-fA-F]+)\s*,'
+            r'\s*(0x[0-9a-fA-F]+)', line)
+        if implicit:
+            mask = int(implicit.group(2), 16)
+            default = int(implicit.group(3), 16) & mask
+            dips.append({
+                'port': port, 'mask': mask, 'default': default,
+                'name': implicit.group(1).title(),
+                'settings': [(default, 'Off'), (default ^ mask, 'On')],
+            })
             cur = None
             continue
         s = re.search(r'PORT_DIPSETTING\(\s*(0x[0-9a-fA-F]+)\s*,\s*(.*?)\s*\)\s*$',
@@ -334,9 +361,6 @@ def ensoniq_banks(regions):
     return valid, bmap
 
 
-# Sets the core can currently run. Order fixes game_id.
-SUPPORTED = ['dynagear']
-
 def main():
     src_path, out_dir = sys.argv[1], sys.argv[2]
     src = open(src_path, encoding='utf-8', errors='replace').read()
@@ -356,9 +380,12 @@ def main():
                              'rot': m.group(8), 'maker': m.group(9),
                              'desc': m.group(10)}
 
-    order = [m.group(1) for m in
-             re.finditer(r'^GAME\(\s*\d+\??\s*,\s*(\w+)', src, re.M)]
+    # The supported-set manifest is authoritative.  Do not generate tempting
+    # but unqualified descriptors for every SSV entry merely because MAME has
+    # a ROM definition for it.
+    order = list(SUPPORTED_SETS)
     written = 0
+    cfg_failures = []
     for setname in order:
         g = games.get(setname)
         if not g:
@@ -382,6 +409,7 @@ def main():
         st010 = [r for r in regions if r['name'] == 'st010']
 
         body, offsets, aliases = [], [], []
+        sample_stream_bytes = 0
         cursor = 0
         for label, group in (('program', prog), ('graphics', gfx),
                              ('samples', samp), ('st010', st010)):
@@ -394,22 +422,27 @@ def main():
                     aliases.append('%s aliases %s' % (region['name'], srcname))
                 if not region['loads']:
                     continue
-                lines, size = emit_region(region)
+                stream_end = None
+                if label == 'graphics':
+                    # Preserve erased holes through the descriptor-selected
+                    # endpoint. Storm Blade is the qualified case that needs
+                    # explicit zero tails in its three populated quarters.
+                    load_end = region_load_end(region)
+                    quarters = cfgblk.graphics_quarters(region['size'], load_end)
+                    stream_end = (region['size'] if quarters == 4 else
+                                  (region['size'] * 3) // 4)
+                lines, size = emit_region(region, stream_end=stream_end)
                 body.extend(lines)
                 cursor += size
+                if label == 'samples':
+                    sample_stream_bytes += size
             offsets.append('%s 0x%07X-0x%07X' % (label, start, cursor - 1))
 
         default, dip_lines, dip_skipped = dips_to_mra(
             parse_dips(src, g['ports']))
         names, defaults = BUTTONS.get(setname, BUTTONS_DEFAULT)
 
-        supported = setname in SUPPORTED
-        about = ('Runs on the SSV core.' if supported else
-                 'NOT YET SUPPORTED by the SSV core: rtl/mem/ssv_rom_loader.sv '
-                 'takes a fixed Dyna Gear stream (1 MB program, graphics as '
-                 'three 4 MB quarters, 4 MB samples) and this set does not '
-                 'match it. The ROM description below is correct and will work '
-                 'once the loader is generalised.')
+        about = 'Runs on the SSV core.'
 
         out = ['<misterromdescription>',
                '  <!-- Generated by tools/gen_ssv_mras.py from MAME ssv.cpp.',
@@ -426,9 +459,18 @@ def main():
                '  <year>%s</year>' % g['year'],
                '  <manufacturer>%s</manufacturer>' % xml_escape(g['maker']),
                '  <rbf>SSV</rbf>']
-        if g['rot'] != 'ROT0':
-            out.append('  <!-- MAME rotation %s; the core does not rotate. -->'
-                       % g['rot'])
+        # The core emits the board's native raster. Presentation rotation is
+        # MRA metadata, not a synthesizable/game-name branch. SSV only uses
+        # ROT0 and ROT270, but fail loudly if MAME adds another orientation so
+        # a generated MRA can never silently ship with the wrong cabinet view.
+        rotation = {
+            'ROT0': 'horizontal',
+            'ROT270': 'vertical (ccw)',
+        }.get(g['rot'])
+        if rotation is None:
+            raise ValueError('unsupported MAME rotation %s for %s' %
+                             (g['rot'], setname))
+        out.append('  <rotation>%s</rotation>' % rotation)
         zipname = (g['parent'] if g['parent'] != '0' else setname)
         zips = setname + '.zip'
         if g['parent'] != '0':
@@ -437,31 +479,58 @@ def main():
         # loader cannot place index-0 bytes without knowing the layout, and it
         # discards them until this block validates (rtl/mem/ssv_rom_loader.sv).
         cfg_bytes = None
+        flags = {}
         try:
             gfx_region = gfx[0]['size'] if gfx else 0
-            gfx_loaded = sum(l['size'] for r in gfx for l in r['loads'])
+            gfx_mb = gfx_region >> 20
+            if gfx_mb not in cfgblk.SUPPORTED_GFX_MB:
+                raise ValueError(
+                    "graphics region %d MB is outside the ten-set profile" %
+                    gfx_mb)
+            gfx_load_end = max((region_load_end(r) for r in gfx), default=0)
             prog_size = prog[0]['size'] if prog else 0
             ens_valid, ens_map = ensoniq_banks(regions)
             flags = cfgblk.resolve_init(src, g['init'])
             amap = cfgblk.resolve_addrmap(src, g['machine'])
-            flags['has_add_buttons'] = (
-                cfgblk.has_add_buttons(src, amap) if amap else False)
+            flags['extra_input_mode'] = (
+                cfgblk.extra_input_mode(src, amap, g['ports']) if amap else 0)
+            flags['system_input_mode'] = cfgblk.system_input_mode(src, g['ports'])
+            flags['has_nvram'] = (
+                cfgblk.has_nvram(src, amap) if amap else False)
+            flags['nvram_mode'] = (
+                cfgblk.nvram_mode(src, amap) if amap else 0)
+            flags['extra_ram_mode'] = (
+                cfgblk.extra_ram_mode(src, amap) if amap else 0)
             wdog = cfgblk.watchdog_mode(src, amap) if amap else 0
             flags['has_st010'] = cfgblk.has_st010(regions)
+            flags['has_drifto_unknown'] = (
+                cfgblk.has_drifto_unknown(src, amap) if amap else False)
+            flags['lockout_inverted'] = (
+                cfgblk.lockout_inverted(src, amap) if amap else False)
+            visible_width, visible_height = cfgblk.visible_geometry(
+                src, g['machine'])
             cfg_bytes = cfgblk.build_cfg_bytes(
-                SUPPORTED.index(setname) if setname in SUPPORTED else 15,
-                prog_size, gfx_region, gfx_loaded,
-                ens_valid, ens_map, flags, wdog)
+                SUPPORTED_SET_IDS.get(setname, 15),
+                prog_size, gfx_region, gfx_load_end,
+                sample_stream_bytes >> 20,
+                ens_valid, ens_map, flags, wdog,
+                visible_width, visible_height)
         except Exception as exc:
             # A set whose geometry this core cannot describe gets no config
             # block, so the loader refuses it outright rather than running on
             # silently wrong numbers.
             print('  no config for %s: %s' % (setname, exc))
+            cfg_failures.append((setname, str(exc)))
         if cfg_bytes:
             out.extend(cfgblk.cfg_rom_block(cfg_bytes))
         out.append('  <rom index="0" zip="%s">' % zips)
         out.extend(body)
         out.append('  </rom>')
+        nvram_bytes = {1: 2048, 2: 65536}.get(flags.get('nvram_mode', 0))
+        if cfg_bytes and nvram_bytes:
+            # Index 8 is the SSV profile's native persistence stream. Keep it
+            # away from MiSTer's conventional hiscore index 4.
+            out.append('  <nvram index="8" size="%d"/>' % nvram_bytes)
         if dip_lines:
             out.append('  <switches default="%s" base="16">' % default)
             out.extend(dip_lines)
@@ -484,6 +553,12 @@ def main():
         print('%-10s -> %s' % (setname, os.path.basename(path)))
         written += 1
     print('%d MRA files written to %s' % (written, out_dir))
+    if written != len(order):
+        raise SystemExit("generated %d of %d MAME GAME entries" %
+                         (written, len(order)))
+    if cfg_failures:
+        raise SystemExit("descriptor parser failed for: %s" %
+                         "; ".join("%s (%s)" % item for item in cfg_failures))
 
 
 if __name__ == '__main__':

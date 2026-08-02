@@ -176,9 +176,10 @@ Nothing in the photographs can settle these. They need a board.
 - **No renderer changes.** Nothing in the photographs contradicts it, and it is CRC-locked to
   MAME across 950 frames plus pixel-exact at eight sampled character-select frames. Changing
   it on the strength of a photograph would trade a verified reference for a guess.
-- **No CPU clock ppm "fix".** 21702 → 21704 would improve 71 ppm to 22 ppm, but shifts the
-  CPU-to-raster phase and invalidates the golden CRC. Recorded in `Arcade-SSV.sv` as a
-  deliberate non-change; revisit only if the golden is being re-cut anyway.
+- **CPU/pixel ratio correction is now evidence-driven.** The earlier 21702-versus-21704
+  absolute-clock comparison used stale PLL math. Current lockstep exposed an ES5506 group at
+  the frame boundary, and the shared 21701 CPU increment against pixel increment 9710 reduces
+  board-ratio error from +42.4 ppm to about -3.7 ppm without wider adders or extra state.
 - **No speculative Seta custom modelling.** Until that QFP is identified there is nothing to
   model against.
 

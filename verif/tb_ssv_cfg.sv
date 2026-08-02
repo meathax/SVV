@@ -4,8 +4,8 @@
 //
 // MAME wraps a sprite tile code with `code % gfxelement->elements()` -- a true
 // MODULO, not a mask (src/mame/seta/ssv.cpp, ssv_v.cpp). elements() is the
-// declared sprites region divided by 128, and for the nine target titles that
-// is 0x18000, 0x20000, 0x30000 or 0x40000. Three of those are 3*2^k, so the
+// declared sprites region divided by 128, and for the ten manifest entries that
+// is 0x18000, 0x20000, 0x30000 or 0x40000. Two of those are 3*2^k, so the
 // core's original `wrap_code = code[16:0]` mask is wrong for them in both
 // width and wrap rule.
 //
@@ -31,20 +31,18 @@ typedef struct {
     int unsigned region;      // MAME sprites ROM_REGION size, bytes
     int unsigned elements;    // region / 128
     int unsigned k;
+    int unsigned factor;
     bit          mul3;
 } game_t;
 
-// region/128 = tiles; k and mul3 decompose it as (mul3 ? 3<<k : 1<<k).
-game_t games [0:8] = '{
-    '{"ultrax",   32'h0C00000, 32'h18000, 15, 1'b1},
-    '{"dynagear", 32'h1000000, 32'h20000, 17, 1'b0},
-    '{"survarts", 32'h1800000, 32'h30000, 16, 1'b1},
-    '{"twineag2", 32'h1800000, 32'h30000, 16, 1'b1},
-    '{"stmblade", 32'h1800000, 32'h30000, 16, 1'b1},
-    '{"cairblad", 32'h2000000, 32'h40000, 18, 1'b0},
-    '{"drifto94", 32'h2000000, 32'h40000, 18, 1'b0},
-    '{"vasara",   32'h2000000, 32'h40000, 18, 1'b0},
-    '{"vasara2",  32'h2000000, 32'h40000, 18, 1'b0}
+// Every graphics size in the authoritative ten-set manifest. Unqualified
+// MAME geometries are intentionally not accepted by this release-profile test.
+// region/128 = odd_factor << k.
+game_t games [0:3] = '{
+    '{"12 MiB", 32'h0C00000, 32'h18000, 15, 3, 1'b1},
+    '{"16 MiB", 32'h1000000, 32'h20000, 17, 1, 1'b0},
+    '{"24 MiB", 32'h1800000, 32'h30000, 16, 3, 1'b1},
+    '{"32 MiB", 32'h2000000, 32'h40000, 18, 1, 1'b0}
 };
 
 function automatic ssv_cfg_t cfg_for(input int unsigned k, input bit mul3);
@@ -78,11 +76,11 @@ endtask
 
 initial begin
     // 1. Decomposition self-check: the table must actually describe the size.
-    for (int g = 0; g < 9; g++) begin
-        int unsigned m = games[g].mul3 ? (3 << games[g].k) : (1 << games[g].k);
+    for (int g = 0; g < 4; g++) begin
+        int unsigned m = games[g].factor << games[g].k;
         if (m != games[g].elements) begin
             errors++;
-            $display("FAIL %s: (mul3?3:1)<<k = %0x but elements = %0x",
+            $display("FAIL %s: factor<<k = %0x but elements = %0x",
                      games[g].name, m, games[g].elements);
         end
         if (games[g].region / 128 != games[g].elements) begin
@@ -93,7 +91,7 @@ initial begin
     end
 
     // 2. The modulo itself.
-    for (int g = 0; g < 9; g++) begin
+    for (int g = 0; g < 4; g++) begin
         ssv_cfg_t c = cfg_for(games[g].k, games[g].mul3);
         int unsigned e = games[g].elements;
 
@@ -125,26 +123,130 @@ initial begin
         end
     end
 
-    // 4. Prove this bench DISCRIMINATES. A test that passes against both the
+    // 4. The raster-status read is a MAME-visible part of the shared map.
+    // Cairblad polls this register during boot; its exact bit positions are
+    // not the same as the compact internal timing signals.
+    if (ssv_video_status(1'b0, 1'b0) !== 16'h0000 ||
+        ssv_video_status(1'b0, 1'b1) !== 16'h0800 ||
+        ssv_video_status(1'b1, 1'b0) !== 16'h3000 ||
+        ssv_video_status(1'b1, 1'b1) !== 16'h3800) begin
+        errors++;
+        $display("FAIL raster status encoding");
+    end
+    checked += 4;
+
+    // 5. The extra-button window is descriptor-selected, matching MAME's
+    // survarts_map() rather than being a global address alias. Check both sides
+    // of the optional path at the shared predicate used by ssv_core.
+    begin
+        if (extra_input_window_cfg(cfg_survartsu(), 24'h500008) !== 1'b1 ||
+            cfg_dynagear().extra_input_mode !== 2'd1 ||
+            cfg_survartsu().extra_input_mode !== 2'd2 ||
+            extra_input_window_cfg(cfg_survartsu(), 24'h50000a) !== 1'b0 ||
+            extra_input_window_cfg(cfg_cairblad(), 24'h500008) !== 1'b0 ||
+            extra_input_window_cfg(cfg_vasara(), 24'h500009) !== 1'b0) begin
+            errors++;
+            $display("FAIL descriptor-gated extra-input window");
+        end
+        checked += 6;
+    end
+
+    // 6. The MAME map-specific extra CPU RAM windows are descriptor data:
+    // Dyna/Survival use $400000, Twin Eagle/Ultra X use $010000, and the
+    // remaining maps do not expose backing RAM in either location.
+    begin
+        if (cfg_dynagear().extra_ram_mode !== 2'd1 ||
+            cfg_survartsu().extra_ram_mode !== 2'd1 ||
+            cfg_cairblad().extra_ram_mode !== 2'd0 ||
+            cfg_vasara().extra_ram_mode !== 2'd0 ||
+            cfg_drifto94().extra_ram_mode !== 2'd0 ||
+            cfg_stmblade().extra_ram_mode !== 2'd0 ||
+            cfg_twineag2().extra_ram_mode !== 2'd2 ||
+            cfg_ultrax(1'b0).extra_ram_mode !== 2'd2 ||
+            cfg_ultrax(1'b1).extra_ram_mode !== 2'd2) begin
+            errors++;
+            $display("FAIL descriptor extra CPU RAM mode");
+        end
+        checked += 9;
+    end
+
+    // 7. Drift Out/Storm Blade expose MAME's random-read test windows at
+    // $510000/$520000; the other universal descriptors must not alias them.
+    begin
+        if (cfg_dynagear().has_drifto_unknown !== 1'b0 ||
+            cfg_cairblad().has_drifto_unknown !== 1'b0 ||
+            cfg_drifto94().has_drifto_unknown !== 1'b1 ||
+            cfg_stmblade().has_drifto_unknown !== 1'b1 ||
+            cfg_twineag2().has_drifto_unknown !== 1'b0 ||
+            cfg_ultrax(1'b0).has_drifto_unknown !== 1'b0) begin
+            errors++;
+            $display("FAIL descriptor Drift Out random-read windows");
+        end
+        checked += 6;
+    end
+
+    // 8. NVRAM window size is also descriptor-selected: Cairblad has 64 KiB,
+    // Drift Out/STM Blade have 2 KiB, and the other qualified sets have none.
+    begin
+        if (cfg_dynagear().nvram_mode !== 2'd0 ||
+            cfg_cairblad().nvram_mode !== 2'd2 ||
+            cfg_drifto94().nvram_mode !== 2'd1 ||
+            cfg_stmblade().nvram_mode !== 2'd1 ||
+            cfg_twineag2().nvram_mode !== 2'd0 ||
+            cfg_ultrax(1'b0).nvram_mode !== 2'd0) begin
+            errors++;
+            $display("FAIL descriptor NVRAM window size");
+        end
+        checked += 6;
+    end
+
+
+    // 9. Descriptor-visible geometry and Vasara's fixed-high system-input
+    // wiring are source-derived and must not leak into other profiles.
+    begin
+        if (active_width_cfg(cfg_dynagear()) !== 9'd336 ||
+            active_height_cfg(cfg_dynagear()) !== 9'd240 ||
+            active_width_cfg(cfg_cairblad()) !== 9'd338 ||
+            active_width_cfg(cfg_stmblade()) !== 9'd352 ||
+            active_width_cfg(cfg_twineag2()) !== 9'd336 ||
+            active_width_cfg(cfg_ultrax(1'b0)) !== 9'd336 ||
+            active_width_cfg(cfg_ultrax(1'b1)) !== 9'd336 ||
+            // cfg_for_game() is the universal frame/visual bench path. Keep
+            // its IDs in parity with the direct descriptor constructors.
+            active_width_cfg(cfg_for_game(4'd7)) !== 9'd336 ||
+            active_width_cfg(cfg_for_game(4'd8)) !== 9'd336 ||
+            active_width_cfg(cfg_for_game(4'd9)) !== 9'd336 ||
+            active_height_cfg(cfg_drifto94()) !== 9'd238 ||
+            cfg_vasara().system_input_mode !== 1'b1 ||
+            cfg_vasara2().system_input_mode !== 1'b1 ||
+            cfg_drifto94().system_input_mode !== 1'b0 ||
+            cfg_dynagear().system_input_mode !== 1'b0) begin
+            errors++;
+            $display("FAIL descriptor geometry/system-input mode");
+        end
+        checked += 15;
+    end
+
+    // 10. Prove this bench DISCRIMINATES. A test that passes against both the
     //    old behaviour and the new one is worthless, and CLAUDE.md requires a
     //    regression test to have been observed failing without the fix. Rather
     //    than rely on having run it at the right commit, show here that the
     //    superseded `code[16:0]` mask disagrees with the modulo on every
     //    non-power-of-two title -- so had the mask still been in place,
     //    section 2 above would have failed.
-    for (int g = 0; g < 9; g++) begin
+    for (int g = 0; g < 4; g++) begin
         int unsigned e = games[g].elements;
         int unsigned disagreements = 0;
         for (int unsigned code = 0; code < 32'h100000; code += 1021) begin
             logic [17:0] old_mask = 18'(code[16:0]);
             if (old_mask !== 18'(code % e)) disagreements++;
         end
-        if (games[g].mul3 && disagreements == 0) begin
+        if (games[g].factor != 1 && disagreements == 0) begin
             errors++;
             $display("FAIL %s: old mask agrees with modulo everywhere -- this bench cannot detect the bug it exists for",
                      games[g].name);
         end
-        if (!games[g].mul3 && games[g].k == 17 && disagreements != 0) begin
+        if (games[g].factor == 1 && games[g].k == 17 && disagreements != 0) begin
             errors++;
             $display("FAIL dynagear: old mask should be exactly equivalent");
         end

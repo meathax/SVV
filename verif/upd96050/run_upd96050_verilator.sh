@@ -24,8 +24,9 @@ declare -A TB=(
   [tb_upd96050_isa]="UPD96050 ISA PASS"
   [tb_upd96050_window]="UPD96050 WINDOW PASS"
   [tb_upd96050_dataport]="UPD96050 DATAPORT PASS"
+  [tb_upd96050_reset_retention]="UPD96050 RESET RETENTION PASS"
 )
-ORDER="tb_upd96050_isa tb_upd96050_window tb_upd96050_dataport"
+ORDER="tb_upd96050_isa tb_upd96050_window tb_upd96050_dataport tb_upd96050_reset_retention"
 
 # The ISA bench is re-run with a stalling program fetch, which is what an
 # SDRAM-backed program ROM behaves like. Same expected output.
@@ -38,11 +39,13 @@ for tb in $ORDER; do
   src="verif/upd96050/${tb}.sv"
   [ -f "$src" ] || { echo "SKIP  $tb (no file)"; continue; }
   bdir="$OUTDIR/$tb"; mkdir -p "$bdir"
-  if ! nice -n 19 verilator $VFLAGS --top-module "$tb" --Mdir "$bdir" \
+  verilator-safe status
+  if ! verilator-safe $VFLAGS --top-module "$tb" --Mdir "$bdir" \
         -o "$tb" $RTL "$src" > "$bdir.log" 2>&1; then
     echo "BUILDFAIL $tb  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
   fi
-  out="$(nice -n 19 "$bdir/$tb" $SIMARGS 2>&1)"
+  verilator-safe status
+  out="$(verilator-sim-safe -- "$bdir/$tb" $SIMARGS 2>&1)"
   if echo "$out" | grep -qF "${TB[$tb]}"; then
     echo "PASS  $tb   $(echo "$out" | grep -E '[0-9]+ passed' | head -1)"
     pass=$((pass+1))
@@ -55,7 +58,8 @@ done
 
 # Re-run the ISA suite with a stalled fetch port, reusing the built binary.
 if [ -x "$OUTDIR/tb_upd96050_isa/tb_upd96050_isa" ]; then
-  out="$(nice -n 19 "$OUTDIR/tb_upd96050_isa/tb_upd96050_isa" $SIMARGS \
+  verilator-safe status
+  out="$(verilator-sim-safe -- "$OUTDIR/tb_upd96050_isa/tb_upd96050_isa" $SIMARGS \
          +PRGLAT=$EXTRA_ISA_LAT 2>&1)"
   if echo "$out" | grep -qF "UPD96050 ISA PASS"; then
     echo "PASS  tb_upd96050_isa(PRGLAT=$EXTRA_ISA_LAT)   $(echo "$out" | grep -E '[0-9]+ passed' | head -1)"

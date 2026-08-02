@@ -62,15 +62,18 @@ module ssv_cached_sprite_renderer #(
 
 localparam logic [11:0] LAST_GLOBAL = 12'hffc;
 localparam logic [16:0] LAST_LOCAL  = 17'h1fffc;
-localparam logic  [8:0] LAST_PIXEL  = 9'd335;
+wire [8:0] LAST_PIXEL = ssv_pkg::active_width_cfg(cfg) - 1'd1;
+wire [8:0] ACTIVE_HEIGHT = ssv_pkg::active_height_cfg(cfg);
 localparam integer CACHE_ADDR_WIDTH = $clog2(CACHE_ENTRIES);
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_COUNT_VALUE = CACHE_ENTRIES;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
     CACHE_ENTRIES - 1;
-// Dense Dyna Gear story/gameplay scanlines exceed 64 real sprite descriptors.
-// Keep headroom so valid sprites are not silently dropped.
-// Index as y*LINE_SLOTS+slot (not a shifted concat) so non-power-of-two depths
-// do not overrun the packed table.
+// Dense SSV scenes can exceed 128 real sprite descriptors on one scanline
+// (Survival Arts reaches more than 512 in its title scene). The first pass
+// counts each visible descriptor occurrence per line; a prefix pass assigns
+// compact bases; and a final pass writes the occurrences into one shared pool.
+// This keeps dense lines possible without reserving a fixed 240*LINE_SLOTS
+// table full of empty scanline slots.
 //
 // 96 was measured insufficient. A two-player dense-gameplay run of
 // `coin_start_2p_dense` (1800 post-VE frames, 431,760 scanlines) reported
@@ -78,33 +81,20 @@ localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
 //   C3_OCC max=96 at_cap=51        <- line_counts saturated, i.e. the cap hit
 //   C3_DEM max=101 over_cap=31     <- true demand, and 31 lines DROPPED
 //
-// where C3_DEM is the uncapped shadow count at the bottom of this file. So 31
-// scanline-instances silently discarded their 97th and later descriptors. 128
-// covers the measured 101 with 27 slots spare and, being a power of two, also
-// turns the `bucket_y * LINE_SLOTS` and `target_y_latched * LINE_SLOTS`
-// multiplies into shifts.
-//
-// Cost: line_entries goes 240*96=23040 to 240*128=30720 words of 7 bits, i.e.
-// 23 to 30 M10K at the 1024x10 packing Quartus chose, so +7 blocks.
-// line_counts and line_page_starts gain one bit of LINE_COUNT_WIDTH each and
-// do not change block count (line_page_starts is 240 x 15 fields, 105 -> 120
-// bits, both 3 blocks at 256x40).
-//
-// Note this REMOVES an accidental safety valve: the cap was also limiting how
-// much work one line could ask of the renderer. The worst 2P line already ran
-// 2441 clk_sys of the ~3064 a line allows, so the overrun counters must be
-// re-checked whenever this number goes up.
-localparam integer LINE_SLOTS = 128;
-localparam integer LINE_SLOT_WIDTH = $clog2(LINE_SLOTS);
+// The pool is sized for the measured universal-profile occurrence census.
+// Entries store only the descriptor's low page bits; per-line page starts
+// reconstruct the upper cache-page bits, as in the original compact table.
+// LINE_SLOTS is a per-line guard; LINE_POOL_ENTRIES is the frame-wide bound.
+localparam integer LINE_SLOTS = CACHE_ENTRIES;
+localparam integer LINE_POOL_ENTRIES = 65536;
+localparam integer LINE_POOL_ADDR_WIDTH = $clog2(LINE_POOL_ENTRIES);
+localparam integer LINE_POOL_COUNT_WIDTH = LINE_POOL_ADDR_WIDTH + 1;
+// Keep one additional carry bit in capacity checks. The allocator itself is
+// wide enough for the configured pool, but a wrapped end address would turn a
+// real overflow into a false in-range result before the bounds guard runs.
+localparam integer LINE_POOL_SUM_WIDTH = LINE_POOL_COUNT_WIDTH + 1;
 localparam integer LINE_COUNT_WIDTH = $clog2(LINE_SLOTS + 1);
-localparam integer LINE_TABLE_WORDS = 240 * LINE_SLOTS;
-localparam integer LINE_ADDR_WIDTH = $clog2(LINE_TABLE_WORDS);
 localparam logic [LINE_COUNT_WIDTH-1:0] LINE_SLOTS_VALUE = LINE_SLOTS;
-// Cache descriptors are appended in monotonically increasing address order.
-// Keep only seven low bits in the large per-line table and record the first
-// slot belonging to each 128-entry cache page.  Eleven 7-bit boundaries cover
-// pages 1..11; page 0 is implicit.  This preserves all 96 entries while
-// avoiding the third M10K depth slice on four descriptor-address bits.
 localparam integer LINE_ENTRY_LOW_WIDTH = 7;
 localparam integer LINE_ENTRY_PAGE_SIZE = 1 << LINE_ENTRY_LOW_WIDTH;
 localparam integer LINE_PAGE_WIDTH = CACHE_ADDR_WIDTH - LINE_ENTRY_LOW_WIDTH;
@@ -112,6 +102,7 @@ localparam integer LINE_PAGE_BOUNDARIES =
     (CACHE_ENTRIES + LINE_ENTRY_PAGE_SIZE - 1) / LINE_ENTRY_PAGE_SIZE - 1;
 localparam integer LINE_PAGE_META_WIDTH =
     LINE_PAGE_BOUNDARIES * LINE_COUNT_WIDTH;
+localparam integer LINE_ADDR_WIDTH = LINE_POOL_ADDR_WIDTH;
 
 typedef enum logic [5:0] {
     IDLE,
@@ -122,6 +113,10 @@ typedef enum logic [5:0] {
     BUILD_LOCAL_2, BUILD_LOCAL_3, BUILD_EVALUATE,
     BUILD_STORE,
     BUILD_BUCKET_READ, BUILD_BUCKET_WRITE, BUILD_ADVANCE,
+    BUILD_PREFIX_READ, BUILD_PREFIX_WRITE,
+    BUILD_REINDEX_READ, BUILD_REINDEX_WAIT, BUILD_REINDEX_EVAL,
+    BUILD_REINDEX_STORE, BUILD_REINDEX_BUCKET_READ,
+    BUILD_REINDEX_BUCKET_WRITE,
     RENDER_COUNT_READ, RENDER_COUNT_WAIT,
     RENDER_LINE_READ, RENDER_READ, RENDER_DECODE, RENDER_PREP,
     RENDER_EVAL,
@@ -150,6 +145,20 @@ logic [CACHE_ADDR_WIDTH:0] cache_render_index;
 logic [127:0] cache_q;
 logic [127:0] cache_decode_q;
 logic cache_pending;
+// Consecutive copies of the same ordinary (non-shadow, non-tilemap)
+// descriptor write the same pens to the same pixels.  Keep one descriptor of
+// look-behind so dense title lists do not spend a full graphics fetch on an
+// idempotent draw.  Shadow operations are deliberately excluded because a
+// repeated shadow darkens the prior result again, and tilemaps have their own
+// group-aware suppression below.
+logic [127:0] last_render_descriptor;
+logic        last_render_descriptor_valid;
+// Build-time counterpart to the render-time duplicate suppression above.
+// Consecutive identical ordinary descriptors are idempotent in MAME draw
+// order, so keeping one copy avoids filling every affected scanline bucket
+// with reset-list duplicates before the renderer ever sees them.
+logic [127:0] build_last_descriptor;
+logic        build_last_descriptor_valid;
 // After storing the last cache slot, finish its line buckets then stop.
 logic cache_stop_after_bucket;
 // One array, not two. The 128-bit form was measured at 22 M10K; splitting it
@@ -165,44 +174,36 @@ logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
 logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
-(* ramstyle = "M10K, no_rw_check" *)
-logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_TABLE_WORDS-1];
-// M10K, reversing the earlier MLAB choice, because the resource balance this
-// array was tuned against has inverted.
-//
-// The original note said MLAB cost "about 32 MLAB cells" against two M10K
-// blocks, and chose MLAB because M10K was the scarce resource at 532/553 with
-// ALM at 82%. The first half of that was an underestimate. The fitter charges
-// this array 751.3 ALM -- 480 in LUTRAM cells, 236.8 for mux_rib:rd_mux and 5
-// for the write decoder -- because 240 deep by 77 wide needs eight MLABs of
-// depth by four of width, and a 240-entry read mux on top.
-//
-// Meanwhile the design has moved the other way: the last fit came back at 92%
-// ALM, and quartus_sta then ran out of memory before it could produce a timing
-// report at all. Dropping the stock video chain freed block RAM but little
-// logic, so ALM is now the binding resource and M10K is not. Two blocks for
-// 751 ALM is the right way round at this operating point.
-//
-// The access shape and the no_rw_check argument are unchanged from the note on
-// line_counts above; only the storage choice moves. line_counts itself stays
-// MLAB: the fitter charges it 103 ALM, so trading it for a whole M10K would be
-// close to break-even rather than a win.
-(* ramstyle = "M10K, no_rw_check" *)
+// The universal compact pool is frame-wide (65,536 entries), rather than the
+// old 240-line fixed table. Keeping this depth in M10K would consume most of
+// the remaining block budget on the Cyclone V. It has one read address per
+// render cycle and one build-time write address, so steer it to MLAB instead;
+// the later Quartus fit must confirm the expected ALM trade and timing.
+(* ramstyle = "MLAB, no_rw_check" *)
+logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_POOL_ENTRIES-1];
+// Page-boundary metadata is read and written with the same single-address
+// schedule as line_counts. Keep it in MLAB: it is frame-local bookkeeping,
+// not a throughput memory, and spending M10Ks here competes directly with the
+// descriptor and pooled-entry tables.
+(* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_starts [0:239];
+(* ramstyle = "MLAB, no_rw_check" *)
+logic [LINE_POOL_ADDR_WIDTH-1:0] line_bases [0:239];
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
+logic [LINE_POOL_ADDR_WIDTH-1:0] line_base_q;
+logic [LINE_POOL_COUNT_WIDTH-1:0] line_pool_alloc;
+logic [CACHE_ADDR_WIDTH:0] cache_scan_index;
+logic [127:0] cache_scan_q;
 logic [7:0] clear_y;
 logic [7:0] bucket_y, bucket_last_y;
 logic [CACHE_ADDR_WIDTH-1:0] bucket_descriptor;
+logic [LINE_COUNT_WIDTH-1:0] render_line_count;
+logic [LINE_COUNT_WIDTH-1:0] render_line_slot;
 logic [LINE_ADDR_WIDTH-1:0] line_entry_addr;
 logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entry_q;
 logic [LINE_PAGE_WIDTH-1:0] line_entry_page_q;
-logic [LINE_COUNT_WIDTH-1:0] render_line_count;
-logic [LINE_COUNT_WIDTH-1:0] render_line_slot;
 logic [LINE_PAGE_META_WIDTH-1:0] render_line_pages;
 logic [7:0] build_first_y, build_last_y;
-logic build_screen_visible_q;
-logic [7:0] build_first_y_q, build_last_y_q;
-logic [127:0] cache_write_data_q;
 
 
 
@@ -494,6 +495,7 @@ wire [15:0] build_offset_y =
     offset_word(sprite_offsets, build_offset_index + 1'd1);
 logic [1:0] build_xbits, build_ybits;
 logic [3:0] build_xnum, build_ynum;
+logic [3:0] build_depth;
 logic [6:0] build_height;
 logic build_tilemap;
 logic build_screen_visible;
@@ -564,6 +566,8 @@ always_comb begin
                                     : global_w0[11:10];
     build_ybits = local_control[14] ? local_w3[11:10]
                                     : global_w0[9:8];
+    build_depth = local_control[14] ? local_w2[15:12]
+                                   : global_w0[15:12];
     build_xnum = 4'd1 << build_xbits;
     build_ynum = 4'd1 << build_ybits;
     build_height = {build_ynum, 3'd0};
@@ -622,10 +626,11 @@ always_comb begin
             build_first_y = 8'd0;
         else
             build_first_y = build_tilemap_sy[7:0];
-        build_last_y = (build_tilemap_bottom > 18'sd240) ? 8'd239 :
+        build_last_y = (build_tilemap_bottom > $signed({9'd0, ACTIVE_HEIGHT}))
+                     ? ACTIVE_HEIGHT[7:0] - 1'd1 :
                        build_tilemap_bottom[7:0] - 1'd1;
         build_screen_visible = build_tilemap_active &&
-                               (build_tilemap_sy < 17'sd240) &&
+                               (build_tilemap_sy < $signed({8'd0, ACTIVE_HEIGHT})) &&
                                (build_tilemap_bottom > 18'sd0);
     end
     else begin
@@ -633,22 +638,26 @@ always_comb begin
             build_first_y = 8'd0;
         else
             build_first_y = build_sy[7:0];
-        build_last_y = (build_bottom > 18'sd240) ? 8'd239 :
+        build_last_y = (build_bottom > $signed({9'd0, ACTIVE_HEIGHT}))
+                     ? ACTIVE_HEIGHT[7:0] - 1'd1 :
                        build_bottom[7:0] - 1'd1;
-        build_screen_visible = (build_sx < 17'sd336) &&
+        build_screen_visible = (build_sx < $signed({8'd0, LAST_PIXEL}) + 17'sd1) &&
                                (build_right > 18'sd0) &&
-                               (build_sy < 17'sd240) &&
+                               (build_sy < $signed({8'd0, ACTIVE_HEIGHT})) &&
                                (build_bottom > 18'sd0);
     end
 end
 
-wire cache_we = (state == BUILD_STORE) &&
-                build_screen_visible_q &&
-                (cache_write_count < CACHE_COUNT_VALUE);
 wire [127:0] cache_write_data = {
     tilemaps_offsy, global_w0, global_w2, global_w3,
     local_w0, local_w1, local_w2, local_w3
 };
+wire build_is_duplicate = build_last_descriptor_valid &&
+                          (cache_write_data == build_last_descriptor) &&
+                          !build_tilemap && !build_depth[3];
+wire build_accept = build_screen_visible && !build_is_duplicate &&
+                    (cache_write_count < CACHE_COUNT_VALUE);
+wire cache_we = (state == BUILD_EVALUATE) && build_accept;
 
 function automatic logic [LINE_PAGE_WIDTH-1:0] line_page_for_slot(
     input logic [LINE_PAGE_META_WIDTH-1:0] starts,
@@ -657,32 +666,14 @@ function automatic logic [LINE_PAGE_WIDTH-1:0] line_page_for_slot(
     integer page_i;
     begin
         line_page_for_slot = '0;
-        for (page_i = 1; page_i <= LINE_PAGE_BOUNDARIES; page_i = page_i + 1) begin
+        for (page_i = 1; page_i <= LINE_PAGE_BOUNDARIES;
+             page_i = page_i + 1) begin
             if (starts[(page_i - 1) * LINE_COUNT_WIDTH +:
                        LINE_COUNT_WIDTH] <= slot)
                 line_page_for_slot = LINE_PAGE_WIDTH'(page_i);
         end
     end
 endfunction
-
-logic [LINE_PAGE_META_WIDTH-1:0] line_page_write_data;
-logic line_page_write;
-integer line_page_write_index;
-always_comb begin
-    line_page_write_data = line_page_q;
-    line_page_write = 1'b0;
-    line_page_write_index = 0;
-    if (bucket_descriptor[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] != 0) begin
-        line_page_write_index =
-            bucket_descriptor[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] - 1'b1;
-        if (line_page_q[line_page_write_index * LINE_COUNT_WIDTH +:
-                        LINE_COUNT_WIDTH] == LINE_SLOTS_VALUE) begin
-            line_page_write_data[line_page_write_index * LINE_COUNT_WIDTH +:
-                                 LINE_COUNT_WIDTH] = line_count_q;
-            line_page_write = 1'b1;
-        end
-    end
-end
 
 wire [LINE_COUNT_WIDTH-1:0] line_entry_read_slot =
     (state == RENDER_PREP) ? render_line_slot + 2'd2 :
@@ -693,6 +684,33 @@ wire [LINE_PAGE_WIDTH-1:0] line_entry_read_page =
 wire [CACHE_ADDR_WIDTH-1:0] line_entry_descriptor = {
     line_entry_page_q, line_entry_q
 };
+
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_write_data;
+logic line_page_write;
+integer line_page_write_index;
+always_comb begin
+    line_page_write_data = line_page_q;
+    line_page_write = 1'b0;
+    line_page_write_index = 0;
+    if (cache_scan_index[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] != 0) begin
+        line_page_write_index =
+            cache_scan_index[CACHE_ADDR_WIDTH-1:LINE_ENTRY_LOW_WIDTH] - 1'b1;
+        if (line_page_q[line_page_write_index * LINE_COUNT_WIDTH +:
+                        LINE_COUNT_WIDTH] == LINE_SLOTS_VALUE) begin
+            line_page_write_data[line_page_write_index * LINE_COUNT_WIDTH +:
+                                 LINE_COUNT_WIDTH] = line_count_q;
+            line_page_write = 1'b1;
+        end
+    end
+end
+
+wire [LINE_POOL_SUM_WIDTH-1:0] reindex_pool_addr =
+    {{(LINE_POOL_SUM_WIDTH-LINE_POOL_ADDR_WIDTH){1'b0}},
+     line_bases[bucket_y]} +
+    {{(LINE_POOL_SUM_WIDTH-LINE_COUNT_WIDTH){1'b0}}, line_count_q};
+wire [LINE_POOL_SUM_WIDTH-1:0] line_pool_end =
+    {1'b0, line_pool_alloc} +
+    {{(LINE_POOL_SUM_WIDTH-LINE_COUNT_WIDTH){1'b0}}, line_count_q};
 
 // NOTE on `no_rw_check` for these tables: the unconditional reads below use
 // the same address as the BUILD_CLEAR_LINES / BUILD_BUCKET_WRITE writes, so a
@@ -707,38 +725,74 @@ wire [CACHE_ADDR_WIDTH-1:0] line_entry_descriptor = {
 // If a future change ever samples line_count_q one cycle earlier, this
 // attribute becomes a live sim-versus-silicon divergence.
 always_ff @(posedge clk) begin
-    line_count_q <= line_counts[line_count_addr];
-    line_page_q <= line_page_starts[line_count_addr];
-    if (state == BUILD_CLEAR_LINES) begin
-        line_counts[line_count_addr] <= '0;
-        line_page_starts[line_count_addr] <=
-            {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+    if (rst) begin
+        line_count_q <= '0;
+        line_base_q <= '0;
+        line_pool_alloc <= '0;
+        line_entry_q <= '0;
+        line_entry_page_q <= '0;
+        line_page_q <= '0;
+        cache_scan_q <= '0;
     end
-    else if ((state == BUILD_BUCKET_WRITE) &&
-             (line_count_q < LINE_SLOTS_VALUE)) begin
-        line_counts[line_count_addr] <= line_count_q + 1'd1;
-        if (line_page_write)
-            line_page_starts[line_count_addr] <= line_page_write_data;
-    end
+    else begin
+        line_count_q <= line_counts[line_count_addr];
+        line_base_q <= line_bases[line_count_addr];
+        line_page_q <= line_page_starts[line_count_addr];
+        if ((state == IDLE) && (cache_start || cache_pending))
+            line_pool_alloc <= '0;
+        if (state == BUILD_CLEAR_LINES) begin
+            line_counts[line_count_addr] <= '0;
+            line_page_starts[line_count_addr] <=
+                {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+        end
+        else if (state == BUILD_BUCKET_WRITE) begin
+            if (line_count_q < LINE_SLOTS_VALUE)
+                line_counts[bucket_y] <= line_count_q + 1'd1;
+        end
+        else if (state == BUILD_PREFIX_WRITE) begin
+            line_bases[line_count_addr] <= line_pool_alloc[
+                LINE_POOL_ADDR_WIDTH-1:0];
+            line_counts[line_count_addr] <= '0;
+            line_page_starts[line_count_addr] <=
+                {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+            line_pool_alloc <= line_pool_alloc + line_count_q;
+        end
+        else if ((state == BUILD_REINDEX_BUCKET_WRITE) &&
+                 (line_count_q < LINE_SLOTS_VALUE) &&
+                 (reindex_pool_addr < LINE_POOL_ENTRIES)) begin
+            line_counts[bucket_y] <= line_count_q + 1'd1;
+            line_entries[reindex_pool_addr[LINE_POOL_ADDR_WIDTH-1:0]] <=
+                cache_scan_index[LINE_ENTRY_LOW_WIDTH-1:0];
+            if (line_page_write)
+                line_page_starts[bucket_y] <= line_page_write_data;
+        end
 
-    // Fetch the first entry explicitly.  During PREP, use the registered next
-    // line entry to prefetch the following descriptor and simultaneously read
-    // the entry after it.  ADVANCE can then transfer cache_q directly into the
-    // decode register without an otherwise-idle decode state.
-    if ((state == RENDER_LINE_READ) ||
-        (state == RENDER_DECODE) ||
-        ((state == RENDER_PREP) &&
-         (render_line_slot + 2'd2 < render_line_count))) begin
-        line_entry_q <= line_entries[line_entry_addr];
-        line_entry_page_q <= line_entry_read_page;
+        if ((state == RENDER_LINE_READ) ||
+            (state == RENDER_DECODE) ||
+            ((state == RENDER_PREP) &&
+             (render_line_slot + 2'd2 < render_line_count)))
+            line_entry_q <= line_entries[line_entry_addr];
+        if ((state == RENDER_LINE_READ) ||
+            (state == RENDER_DECODE) ||
+            ((state == RENDER_PREP) &&
+             (render_line_slot + 2'd2 < render_line_count)))
+            line_entry_page_q <= line_entry_read_page;
+        // RENDER_READ fetches the first descriptor.  The steady-state loop
+        // reaches RENDER_PREP with the next pooled line entry already in
+        // line_entry_q, so fetch that descriptor here for RENDER_ADVANCE.
+        // Without this prefetch every slot after zero reuses cache_q[0] and
+        // the ordinary-descriptor duplicate filter drops the whole line.
+        if ((state == RENDER_READ) ||
+            ((state == RENDER_PREP) &&
+             (render_line_slot + 1'd1 < render_line_count)))
+            cache_q <= descriptor_cache[line_entry_descriptor];
+        if (state == BUILD_REINDEX_READ)
+            cache_scan_q <= descriptor_cache[
+                cache_scan_index[CACHE_ADDR_WIDTH-1:0]];
+        if (cache_we)
+            descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
+                <= cache_write_data;
     end
-    if ((state == RENDER_READ) ||
-        ((state == RENDER_PREP) &&
-         (render_line_slot + 1'd1 < render_line_count)))
-        cache_q <= descriptor_cache[line_entry_descriptor];
-    if (cache_we)
-        descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
-            <= cache_write_data_q;
 end
 
 ssv_gfx_row_fetch fetch (
@@ -787,13 +841,9 @@ wire tile_pf_flip_y_next = tile_pf_attr[14] ^
 always_comb begin
     spr_addr = {5'd0, global_base};
     unique case (state)
-        BUILD_GLOBAL_0: spr_addr = {5'd0, global_base} + 1'd1;
-        BUILD_GLOBAL_1: spr_addr = {5'd0, global_base} + 2'd2;
-        BUILD_GLOBAL_2: spr_addr = {5'd0, global_base} + 2'd3;
+        BUILD_GLOBAL_0: spr_addr = {5'd0, global_base} + 2'd2;
         BUILD_LOCAL_WAIT: spr_addr = local_base;
-        BUILD_LOCAL_0: spr_addr = local_base + 1'd1;
-        BUILD_LOCAL_1: spr_addr = local_base + 2'd2;
-        BUILD_LOCAL_2: spr_addr = local_base + 2'd3;
+        BUILD_LOCAL_0: spr_addr = local_base + 2'd2;
         TILE_ROW_ADDR, TILE_ROW_WAIT:
             spr_addr = ({9'd0, tile_mode[7:0]} << 9) + tile_map_y[8:0];
         TILE_CODE_ADDR, TILE_CODE_WAIT: spr_addr = tile_word_addr;
@@ -852,24 +902,24 @@ always_ff @(posedge clk) begin
         cache_read_index <= '0;
         cache_render_index <= '0;
         cache_decode_q <= '0;
+        last_render_descriptor <= '0;
+        last_render_descriptor_valid <= 1'b0;
+        build_last_descriptor <= '0;
+        build_last_descriptor_valid <= 1'b0;
         cache_busy <= 1'b0;
         cache_ready <= 1'b0;
         cache_overflow <= 1'b0;
         cache_pending <= 1'b0;
         cache_stop_after_bucket <= 1'b0;
-        build_screen_visible_q <= 1'b0;
-        build_first_y_q <= 8'd0;
-        build_last_y_q <= 8'd0;
-        cache_write_data_q <= 128'd0;
         clear_y <= 8'd0;
         line_count_addr <= 8'd0;
         bucket_y <= 8'd0;
         bucket_last_y <= 8'd0;
         bucket_descriptor <= '0;
-        line_entry_addr <= '0;
         render_line_count <= '0;
         render_line_slot <= '0;
-        render_line_pages <= {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+        line_entry_addr <= '0;
+        render_line_pages <= '0;
         target_y_latched <= 9'd0;
         sprite_code <= 20'd0;
         sprite_xnum <= 4'd0;
@@ -951,7 +1001,23 @@ always_ff @(posedge clk) begin
             endcase
         end
 
-        unique case (state)
+        // The raster deadline is a level for only the tail of one scanline.
+        // Sampling it solely in BUILD_ADVANCE lets a long bucket/prefix/
+        // reindex operation miss the whole window, keep cache_busy asserted
+        // throughout visible display, and suppress every line-buffer swap in
+        // ssv_core. Apply the containment at every active build phase.
+        if (cache_busy && cache_deadline) begin
+`ifdef SIMULATION
+            $display("CACHE_OVR deadline state=%0d count=%0d writes=%0d",
+                     state, cache_count, cache_write_count);
+`endif
+            cache_count <= cache_write_count;
+            cache_ready <= 1'b1;
+            cache_overflow <= 1'b1;
+            cache_busy <= 1'b0;
+            state <= IDLE;
+        end
+        else unique case (state)
             IDLE: begin
                 busy <= 1'b0;
                 cache_busy <= 1'b0;
@@ -962,6 +1028,7 @@ always_ff @(posedge clk) begin
                     cache_ready <= 1'b0;
                     cache_overflow <= 1'b0;
                     cache_stop_after_bucket <= 1'b0;
+                    build_last_descriptor_valid <= 1'b0;
                     cache_busy <= 1'b1;
                     cache_pending <= 1'b0;
                     state <= BUILD_CLEAR_LINES;
@@ -996,23 +1063,15 @@ always_ff @(posedge clk) begin
             BUILD_GLOBAL_WAIT: state <= BUILD_GLOBAL_0;
             BUILD_GLOBAL_0: begin
                 global_w0 <= spr_data;
+                global_w1 <= spr_data_next;
                 state <= BUILD_GLOBAL_1;
             end
             BUILD_GLOBAL_1: begin
-                global_w1 <= spr_data;
-                state <= BUILD_GLOBAL_2;
-            end
-            BUILD_GLOBAL_2: begin
                 global_w2 <= spr_data;
-                state <= BUILD_GLOBAL_3;
-            end
-            BUILD_GLOBAL_3: begin
-                global_w3 <= spr_data;
+                global_w3 <= spr_data_next;
                 if (global_w1[15]) begin
-                    cache_count <= cache_write_count;
-                    cache_ready <= 1'b1;
-                    cache_busy <= 1'b0;
-                    state <= IDLE;
+                    line_count_addr <= 8'd0;
+                    state <= BUILD_PREFIX_READ;
                 end
                 else begin
                     // Enter the local loop unconditionally, even when the
@@ -1027,54 +1086,60 @@ always_ff @(posedge clk) begin
                     state <= BUILD_LOCAL_WAIT;
                 end
             end
+            // Paired reads no longer enter these phases. If a diagnostic
+            // force lands here, restart this descriptor from its even base.
+            BUILD_GLOBAL_2: state <= BUILD_GLOBAL_WAIT;
+            BUILD_GLOBAL_3: state <= BUILD_GLOBAL_WAIT;
 
             BUILD_LOCAL_WAIT: state <= BUILD_LOCAL_0;
             BUILD_LOCAL_0: begin
                 local_w0 <= spr_data;
+                local_w1 <= spr_data_next;
                 state <= BUILD_LOCAL_1;
             end
             BUILD_LOCAL_1: begin
-                local_w1 <= spr_data;
-                state <= BUILD_LOCAL_2;
-            end
-            BUILD_LOCAL_2: begin
                 local_w2 <= spr_data;
-                state <= BUILD_LOCAL_3;
-            end
-            BUILD_LOCAL_3: begin
-                local_w3 <= spr_data;
+                local_w3 <= spr_data_next;
                 if (local_index == 0)
-                    tilemaps_offsy <= spr_data;
+                    tilemaps_offsy <= spr_data_next;
                 state <= BUILD_EVALUATE;
             end
+            // Paired reads no longer enter these phases. If a diagnostic
+            // force lands here, restart this descriptor from its even base.
+            BUILD_LOCAL_2: state <= BUILD_LOCAL_WAIT;
+            BUILD_LOCAL_3: state <= BUILD_LOCAL_WAIT;
 
             BUILD_EVALUATE: begin
-                build_screen_visible_q <= build_screen_visible;
-                build_first_y_q <= build_first_y;
-                build_last_y_q <= build_last_y;
-                cache_write_data_q <= cache_write_data;
-                state <= BUILD_STORE;
-            end
-
-            BUILD_STORE: begin
-                if (build_screen_visible_q &&
-                    (cache_write_count < CACHE_COUNT_VALUE)) begin
+                if (build_accept) begin
                     // Write+bucket every accepted slot, including the last;
                     // stop after that entry's buckets so it is not orphaned.
                     // Because the stop fires exactly as the count reaches
                     // CACHE_COUNT_VALUE, the "already full" arm below is
                     // unreachable in practice and is kept only as a guard.
                     cache_write_count <= cache_write_count + 1'd1;
+                    build_last_descriptor <= cache_write_data;
+                    build_last_descriptor_valid <= 1'b1;
                     bucket_descriptor <=
                         cache_write_count[CACHE_ADDR_WIDTH-1:0];
-                    bucket_y <= build_first_y_q;
-                    bucket_last_y <= build_last_y_q;
-                    line_count_addr <= build_first_y_q;
+                    bucket_y <= build_first_y;
+                    bucket_last_y <= build_last_y;
+                    line_count_addr <= build_first_y;
                     cache_stop_after_bucket <=
                         (cache_write_count == CACHE_LAST_VALUE);
                     state <= BUILD_BUCKET_READ;
                 end
-                else if (build_screen_visible_q) begin
+                else if (build_screen_visible && build_is_duplicate) begin
+                    // The render-time duplicate check already establishes
+                    // that an identical ordinary descriptor has no visible
+                    // effect when repeated consecutively. Skip its cache
+                    // slot and continue walking the MAME list.
+                    state <= BUILD_ADVANCE;
+                end
+                else if (build_screen_visible) begin
+`ifdef SIMULATION
+                    $display("CACHE_OVR cache_capacity state=%0d count=%0d writes=%0d",
+                             state, cache_count, cache_write_count);
+`endif
                     cache_count <= cache_write_count;
                     cache_ready <= 1'b1;
                     cache_overflow <= 1'b1;
@@ -1086,32 +1151,35 @@ always_ff @(posedge clk) begin
                 end
             end
 
-            BUILD_BUCKET_READ: state <= BUILD_BUCKET_WRITE;
+            // Retained to preserve subsequent state encodings. Normal paired
+            // builds commit directly in BUILD_EVALUATE.
+            BUILD_STORE: state <= BUILD_EVALUATE;
+
+            BUILD_BUCKET_READ: begin
+                // Prime the synchronous count/page read for the first line,
+                // then point the read port at the next line while WRITE uses
+                // the registered current result.
+                if (bucket_y != bucket_last_y)
+                    line_count_addr <= line_count_addr + 1'd1;
+                state <= BUILD_BUCKET_WRITE;
+            end
 
             BUILD_BUCKET_WRITE: begin
-                if (line_count_q < LINE_SLOTS_VALUE) begin
-                    line_entries[
-                        (bucket_y * LINE_SLOTS) +
-                        line_count_q[LINE_SLOT_WIDTH-1:0]
-                    ] <= bucket_descriptor[LINE_ENTRY_LOW_WIDTH-1:0];
-                end
-                else begin
+                if (line_count_q >= LINE_SLOTS_VALUE) begin
+`ifdef SIMULATION
+                    $display("CACHE_OVR bucket_capacity y=%0d count=%0d writes=%0d",
+                             bucket_y, line_count_q, cache_write_count);
+`endif
                     cache_overflow <= 1'b1;
                 end
                 if (bucket_y == bucket_last_y) begin
                     if (cache_stop_after_bucket) begin
-                        // Every descriptor up to here was stored, but the
-                        // scan is being abandoned at the ceiling, so anything
-                        // still left in the sprite list is dropped. Report it:
-                        // cache_overflow means "list truncated", not "write
-                        // failed". Same flag is raised above when one scanline
-                        // needs more than LINE_SLOTS descriptors.
-                        cache_count <= CACHE_COUNT_VALUE;
-                        cache_ready <= 1'b1;
-                        cache_overflow <= 1'b1;
-                        cache_busy <= 1'b0;
+                        // The descriptor cache is full. Finish the first pass
+                        // and build the compact pooled index before publishing
+                        // it to the renderer.
+                        line_count_addr <= 8'd0;
                         cache_stop_after_bucket <= 1'b0;
-                        state <= IDLE;
+                        state <= BUILD_PREFIX_READ;
                     end
                     else begin
                         state <= BUILD_ADVANCE;
@@ -1120,7 +1188,7 @@ always_ff @(posedge clk) begin
                 else begin
                     bucket_y <= bucket_y + 1'd1;
                     line_count_addr <= line_count_addr + 1'd1;
-                    state <= BUILD_BUCKET_READ;
+                    state <= BUILD_BUCKET_WRITE;
                 end
             end
 
@@ -1136,14 +1204,7 @@ always_ff @(posedge clk) begin
                 // forever. Publishing a partial cache degrades one frame's
                 // sprites and raises cache_overflow (wired to the overrun LED)
                 // instead of latching the whole core into a dead display.
-                if (cache_deadline) begin
-                    cache_count <= cache_write_count;
-                    cache_ready <= 1'b1;
-                    cache_overflow <= 1'b1;
-                    cache_busy <= 1'b0;
-                    state <= IDLE;
-                end
-                else if ((local_index < global_w0[4:0]) &&
+                if ((local_index < global_w0[4:0]) &&
                     ((local_base + 17'd4) <= LAST_LOCAL)) begin
                     local_index <= local_index + 1'd1;
                     local_base <= local_base + 3'd4;
@@ -1154,10 +1215,104 @@ always_ff @(posedge clk) begin
                     state <= BUILD_GLOBAL_WAIT;
                 end
                 else begin
+                    line_count_addr <= 8'd0;
+                    state <= BUILD_PREFIX_READ;
+                end
+            end
+
+            BUILD_PREFIX_READ: state <= BUILD_PREFIX_WRITE;
+
+            BUILD_PREFIX_WRITE: begin
+                if (line_pool_end > LINE_POOL_ENTRIES) begin
+`ifdef SIMULATION
+                    $display("CACHE_OVR prefix line=%0d alloc=%0d count=%0d end=%0d",
+                             line_count_addr, line_pool_alloc, line_count_q,
+                             line_pool_end);
+`endif
+                    cache_overflow <= 1'b1;
+                end
+                if (line_count_addr == 8'd239) begin
+                    cache_scan_index <= '0;
+                    state <= BUILD_REINDEX_READ;
+                end
+                else begin
+                    line_count_addr <= line_count_addr + 1'd1;
+                    state <= BUILD_PREFIX_READ;
+                end
+            end
+
+            BUILD_REINDEX_READ: state <= BUILD_REINDEX_WAIT;
+
+            BUILD_REINDEX_WAIT: begin
+                tilemaps_offsy <= cache_scan_q[127:112];
+                global_w0 <= cache_scan_q[111:96];
+                global_w2 <= cache_scan_q[95:80];
+                global_w3 <= cache_scan_q[79:64];
+                local_w0 <= cache_scan_q[63:48];
+                local_w1 <= cache_scan_q[47:32];
+                local_w2 <= cache_scan_q[31:16];
+                local_w3 <= cache_scan_q[15:0];
+                state <= BUILD_REINDEX_EVAL;
+            end
+
+            BUILD_REINDEX_EVAL: begin
+                if (build_screen_visible) begin
+                    bucket_y <= build_first_y;
+                    bucket_last_y <= build_last_y;
+                    line_count_addr <= build_first_y;
+                    state <= BUILD_REINDEX_BUCKET_READ;
+                end
+                else if (cache_scan_index + 1'd1 < cache_write_count) begin
+                    cache_scan_index <= cache_scan_index + 1'd1;
+                    state <= BUILD_REINDEX_READ;
+                end
+                else begin
                     cache_count <= cache_write_count;
                     cache_ready <= 1'b1;
                     cache_busy <= 1'b0;
                     state <= IDLE;
+                end
+            end
+
+            // Retained to preserve subsequent state encodings. Normal second
+            // pass entries commit directly in BUILD_REINDEX_EVAL.
+            BUILD_REINDEX_STORE: state <= BUILD_REINDEX_EVAL;
+
+            BUILD_REINDEX_BUCKET_READ: begin
+                // Same read-ahead schedule as the first pass: one priming
+                // cycle, then one pooled line occurrence per clock.
+                if (bucket_y != bucket_last_y)
+                    line_count_addr <= line_count_addr + 1'd1;
+                state <= BUILD_REINDEX_BUCKET_WRITE;
+            end
+
+            BUILD_REINDEX_BUCKET_WRITE: begin
+                if ((line_count_q >= LINE_SLOTS_VALUE) ||
+                    (reindex_pool_addr >= LINE_POOL_ENTRIES)) begin
+`ifdef SIMULATION
+                    $display("CACHE_OVR reindex line=%0d count=%0d base=%0d addr=%0d scan=%0d",
+                             bucket_y, line_count_q,
+                             line_bases[bucket_y], reindex_pool_addr,
+                             cache_scan_index);
+`endif
+                    cache_overflow <= 1'b1;
+                end
+                if (bucket_y == bucket_last_y) begin
+                    if (cache_scan_index + 1'd1 < cache_write_count) begin
+                        cache_scan_index <= cache_scan_index + 1'd1;
+                        state <= BUILD_REINDEX_READ;
+                    end
+                    else begin
+                        cache_count <= cache_write_count;
+                        cache_ready <= 1'b1;
+                        cache_busy <= 1'b0;
+                        state <= IDLE;
+                    end
+                end
+                else begin
+                    bucket_y <= bucket_y + 1'd1;
+                    line_count_addr <= line_count_addr + 1'd1;
+                    state <= BUILD_REINDEX_BUCKET_WRITE;
                 end
             end
 
@@ -1169,8 +1324,8 @@ always_ff @(posedge clk) begin
                     render_line_slot <= '0;
                     render_line_pages <= line_page_q;
                     line_entry_addr <= LINE_ADDR_WIDTH'(
-                        target_y_latched[7:0] * LINE_SLOTS
-                    );
+                        line_base_q);
+                    last_render_descriptor_valid <= 1'b0;
                     state <= RENDER_LINE_READ;
                 end
                 else begin
@@ -1233,7 +1388,17 @@ always_ff @(posedge clk) begin
                 state <= RENDER_EVAL;
             end
             RENDER_EVAL: begin
-                if (prep_tilemap) begin
+                if (last_render_descriptor_valid &&
+                    (cache_decode_q == last_render_descriptor) &&
+                    !calc_tilemap && !calc_depth[3]) begin
+                    state <= RENDER_ADVANCE;
+`ifdef SIMULATION
+                    sim_duplicate_skips <= sim_duplicate_skips + 1;
+`endif
+                end
+                else if (prep_tilemap) begin
+                    last_render_descriptor <= cache_decode_q;
+                    last_render_descriptor_valid <= 1'b1;
                     if (prep_tilemap_active &&
                         ($signed({1'b0, target_y_latched}) >=
                          prep_tilemap_sy) &&
@@ -1280,7 +1445,9 @@ always_ff @(posedge clk) begin
                 end
                 else if ((eval_line_rel >= 0) &&
                          (eval_line_rel <
-                          $signed({1'b0, prep_height}))) begin
+                         $signed({1'b0, prep_height}))) begin
+                    last_render_descriptor <= cache_decode_q;
+                    last_render_descriptor_valid <= 1'b1;
                     render_tilemap <= 1'b0;
                     last_was_tilemap <= 1'b0;
                     sprite_code <= prep_code;
@@ -1299,6 +1466,8 @@ always_ff @(posedge clk) begin
                     state <= RENDER_SPRITE_PREP;
                 end
                 else begin
+                    last_render_descriptor <= cache_decode_q;
+                    last_render_descriptor_valid <= 1'b1;
                     state <= RENDER_ADVANCE;
                 end
             end
@@ -1516,21 +1685,28 @@ end
 // -------------------------------------------------------------------------
 integer sim_line_demand [0:239];
 integer sim_line_demand_max;
+integer sim_line_demand_total;
 integer sim_line_demand_i;
+integer sim_duplicate_skips;
 
 initial begin
     for (sim_line_demand_i = 0; sim_line_demand_i < 240;
          sim_line_demand_i = sim_line_demand_i + 1)
         sim_line_demand[sim_line_demand_i] = 0;
     sim_line_demand_max = 0;
+    sim_line_demand_total = 0;
+    sim_duplicate_skips = 0;
 end
 
 always_ff @(posedge clk) begin
     if (state == BUILD_CLEAR_LINES) begin
         sim_line_demand[line_count_addr] <= 0;
+        if (line_count_addr == 0)
+            sim_line_demand_total <= 0;
     end
     else if (state == BUILD_BUCKET_WRITE) begin
         sim_line_demand[bucket_y] <= sim_line_demand[bucket_y] + 1;
+        sim_line_demand_total <= sim_line_demand_total + 1;
         if (sim_line_demand[bucket_y] + 1 > sim_line_demand_max)
             sim_line_demand_max <= sim_line_demand[bucket_y] + 1;
     end

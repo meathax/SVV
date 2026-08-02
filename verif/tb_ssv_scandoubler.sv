@@ -58,6 +58,7 @@ logic       av_hb, av_vb, av_hs, av_vs, vbp;
 // that at a constant 907 ticks per line where 908 is required.
 ssv_video_timing #(.PIXEL_INC(PIXEL_INC)) u_timing (
     .clk(clk), .rst(rst),
+    .active_width(9'd336), .active_height(9'd240),
     .ce_pixel(av_ce), .ce_pix_x2(ce_pix_x2),
     .hcnt(hcnt), .vcnt(vcnt),
     .hblank(av_hb), .vblank(av_vb),

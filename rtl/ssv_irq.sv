@@ -4,7 +4,10 @@
 
 module ssv_irq (
     input              clk,
+    // A watchdog/machine reset clears only pending causes in MAME. IRQ masks
+    // and vector RAM are programmed board state and survive until cold reset.
     input              rst,
+    input              cold_rst,
     input              vblank_pulse,
     // Scanline-0 pulse, and whether this board raises IRQ level 1 on it.
     // MAME's init_ssv_irq1 sets m_interrupt_ultrax for ultrax and twineag2;
@@ -32,14 +35,46 @@ module ssv_irq (
 );
 
 logic [2:0] vectors [0:7];
+logic       irq_asserted;
+logic       irq_state_update;
+logic [7:0] requested_after_events;
 integer i;
 
+// MAME's SSV controller refreshes the CPU input line when a cause is raised
+// or acknowledged.  Writing the enable mask alone does not retroactively
+// assert a cause that was already pending.  Vasara relies on this ordering:
+// it enables levels 2/3 before disabling PSW.IE and only then clears pending
+// causes and initializes vector RAM.  A purely combinational
+// (requested & enabled) output vectors through uninitialized slot zero.
+always_comb begin
+    requested_after_events = requested;
+    irq_state_update = 1'b0;
+    if (ack_we) begin
+        requested_after_events[ack_level] = 1'b0;
+        irq_state_update = 1'b1;
+    end
+    // Event set wins over a simultaneous software acknowledge.
+    if (vblank_pulse) begin
+        requested_after_events[3] = 1'b1;
+        irq_state_update = 1'b1;
+    end
+    if (line0_pulse && irq_level1_line0) begin
+        requested_after_events[1] = 1'b1;
+        irq_state_update = 1'b1;
+    end
+end
+
 always_ff @(posedge clk) begin
-    if (rst) begin
+    if (cold_rst) begin
         requested <= 8'h00;
         enabled   <= 8'h00;
+        irq_asserted <= 1'b0;
         for (i = 0; i < 8; i = i + 1)
             vectors[i] <= 3'd0;
+    end
+    else if (rst) begin
+        requested <= 8'h00;
+        irq_asserted <= 1'b0;
     end
     else begin
         // Clear first, set second: a $240000 ack that lands on the same
@@ -58,6 +93,9 @@ always_ff @(posedge clk) begin
         if (line0_pulse && irq_level1_line0)
             requested[1] <= 1'b1;
 
+        if (irq_state_update)
+            irq_asserted <= |(requested_after_events & enabled);
+
         if (vector_we)
             vectors[vector_level] <= vector_data[2:0];
 
@@ -71,7 +109,7 @@ always_ff @(posedge clk) begin
 end
 
 always_comb begin
-    irq_n      = ~(|(requested & enabled));
+    irq_n      = ~irq_asserted;
     irq_vector = 8'h00;
     // MAME searches pending levels from 0 through 7 and uses the first one.
     if      (requested[0]) irq_vector = {5'b0, vectors[0]};

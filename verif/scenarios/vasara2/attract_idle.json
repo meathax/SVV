@@ -1,0 +1,29 @@
+{
+  "id": "attract_idle",
+  "set": "vasara2",
+  "mame": "0.288",
+  "mra": "Vasara 2 (set 1).mra",
+  "mra_sha256": "14f0bfd2796639bd5e848b03e295a2e9f01a275aa32eea11b268ba8450a56b6e",
+  "rom_zip_sha256": "f1032fb6d0aee00554e45969eed146047a1e46199f49d1fadb3fff7b109b76d4",
+  "maincpu_sha256": "122976ed8a011522995211ea120cee112f5dfe3335d3785190b1482defdb8497",
+  "sprites_sha256": "93c48bb701f73ae262901388fbc735b0152ab8ba151d3b4c1fd145131c0e5ea4",
+  "dsw1": "0x00FF",
+  "dsw2": "0x00FF",
+  "inputs": {
+    "in_p1": "0xFFFF",
+    "in_p2": "0xFFFF",
+    "in_system": "0xFFFF",
+    "in_extra": "0xFFFF"
+  },
+  "geometry": {
+    "active_w": 336,
+    "active_h": 240
+  },
+  "stop": {
+    "after_video_enable_frames": 120,
+    "note": "Parent-set attract comparison and Verilator screenshot gate"
+  },
+  "outputs": {
+    "frame_crc": "sim_output/diff/vasara2_attract_idle_frames.crc"
+  }
+}

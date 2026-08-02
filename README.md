@@ -1,7 +1,8 @@
 # SSV MiSTer FPGA Core
 
 Work-in-progress MiSTer FPGA implementation of the Sammy, Seta, and Visco
-(SSV) arcade platform. The initial target is Sammy's **Dyna Gear**.
+(SSV) arcade platform. One universal `SSV.rbf` contains all shared and optional
+hardware paths; each MRA selects its board geometry at runtime.
 
 ## Legal notice
 
@@ -13,6 +14,10 @@ No copyrighted game ROMs are included. Place locally owned ROM archives under
 Full audit and sim-first path to attract/gameplay:
 [`docs/DYNAGEAR_CORE_AUDIT.md`](docs/DYNAGEAR_CORE_AUDIT.md),
 [`docs/DYNAGEAR_GAMEPLAY_PLAN.md`](docs/DYNAGEAR_GAMEPLAY_PLAN.md).
+The pinned MAME contract and current deterministic baseline are recorded in
+[`docs/DYNAGEAR_REFERENCE_CONTRACT.md`](docs/DYNAGEAR_REFERENCE_CONTRACT.md).
+The single-profile set list and hardware-feature matrix are recorded in
+[`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md).
 
 The synthesizable Dyna Gear bring-up now includes:
 
@@ -55,6 +60,35 @@ Sim gameplay gates (attract frame-0 CRC, soak, coin/start schedule, input
 matrix, ES5506 PCM peak) are wired through `verif/run_gameplay_sims.sh`.
 Full attract-loop CRC match and physical MiSTer play testing remain open, so
 this is not yet a playable release.
+
+## Visual Verilator checkpoints
+
+The persistent checkpointable visual launcher is:
+
+```powershell
+# Interactive: F5 or Ctrl+S saves on the next completed native frame.
+.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear -Detached
+
+# Gameplay-proof chunks include an immutable RTL-owned input journal.
+.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear `
+    -Checkpoint .\sim_output\checkpoints\dynagear-gameplay.vltsv `
+    -InputJournal .\sim_output\checkpoints\dynagear-gameplay.inputs `
+    -ProofMode gameplay -SaveFrame 50
+.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear `
+    -Checkpoint .\sim_output\checkpoints\dynagear-gameplay.vltsv `
+    -Restore .\sim_output\checkpoints\dynagear-gameplay.vltsv `
+    -InputJournal .\sim_output\checkpoints\dynagear-gameplay.inputs `
+    -ProofMode gameplay -SaveFrame 100
+```
+
+This is a separate external-clock `--no-timing --savable` build. It writes a
+binary `.vltsv` only after a completed native framebuffer boundary and closes
+the visible process after an automated chunk. The legacy timing visual build
+still reports F5 as unavailable. A checkpoint is simulator state, not gameplay
+proof; final qualification still requires the current Verilator gameplay gate
+and matched reference evidence. Gameplay checkpoints carry a versioned sidecar
+binding the archive, build, media, scenario, proof target, and canonical input
+journal; a pre-journal checkpoint cannot be promoted into a matched proof.
 
 ## Build
 

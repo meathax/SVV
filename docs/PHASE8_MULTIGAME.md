@@ -1,7 +1,13 @@
-# Phase 8 — nine-game support
+# Phase 8 — universal SSV profile
 
-Target: Change Air Blade, Drift Out '94, Dyna Gear, Storm Blade, Survival Arts,
-Twin Eagle II, Ultra X Weapons, Vasara, Vasara 2.
+This is the historical implementation record. The current cross-chat
+contract is `AGENTS.md`, `core-debug.toml`, `docs/GAME_COVERAGE.md`, and
+`docs/implementation-status.md`. All work stays in the single universal
+profile; there are no per-game RBFs or compile-time game forks.
+
+Target: the ten authoritative manifest entries `dynagear`, `cairblad`, `vasara`,
+`vasara2`, `drifto94`, `stmblade`, `survartsu`, `twineag2`, `ultrax`, and
+`ultraxg`.
 
 All per-game facts below were read out of
 `D:\Arcade\AI\MAMESOURCE\mame\src\mame\seta\ssv.cpp`, not inferred.
@@ -12,28 +18,36 @@ All per-game facts below were read out of
 
 `ssv_pkg::ssv_cfg_t` carries what cannot be derived from the ROM stream:
 program size, graphics region size, tile-code modulus (`gfx_code_k`,
-`gfx_code_mul3`), populated quarter count, ES5506 `bank_map`/`bank_valid`,
+`gfx_code_mul3`), populated quarter count, visible geometry, ES5506
+`bank_map`/`bank_valid`,
 `tile_code_identity` (`init_ssv` vs `init_ssv_tilescram`), `irq_level1_line0`
-(`init_ssv_irq1`), `has_add_buttons` (`$500008`), and `wdog_mode`.
+(`init_ssv_irq1`), `extra_input_mode`, `system_input_mode`, lockout polarity,
+and `wdog_mode`.
 
-`cfg_dynagear()` is the reference record and reproduces the previously
-hardwired behaviour exactly. It is plumbed through `ssv_core`, both renderers,
-`ssv_gfx_row_fetch`, the top level and every bench; nothing reads a hardwired
-per-game constant on that path any more.
+Descriptor byte 5 retains its ABI location, but only bit 0 is decoded: zero
+selects factor 1 and one selects factor 3. The ten-set generator and verifier
+reject factors 5/7 and graphics regions outside 12, 16, 24, or 32 MiB.
 
-**Cost: ~0 logic today** — the record is a compile-time constant, so the
-generalisation is free until a second game supplies a different one.
+`cfg_dynagear()` remains the reference record for unit tests, while production
+configuration is decoded from the MRA index-1 descriptor by
+`rtl/mem/ssv_rom_loader.sv`. It is plumbed through `ssv_core`, both renderers,
+`ssv_gfx_row_fetch`, the top level, and every bench; no supported game relies
+on a hardwired per-game constant on that path.
 
-### Tile-code wrapping — a real bug for six of the nine titles
+The record is runtime descriptor state, not a compile-time game selection.
+Resource cost therefore belongs to the one shared universal path and must be
+measured in synthesis rather than inferred from any individual set.
+
+### Tile-code wrapping — a real bug for five of the ten entries
 
 MAME wraps sprite codes with `code % gfxelement->elements()`, a **true modulo**,
 and `elements()` = sprites region / 128:
 
 | set | region | elements | decomposition |
 |---|---:|---:|---|
-| ultrax | 0x0C00000 | 0x18000 | **3 × 2^15** |
+| ultrax / ultraxg | 0x0C00000 | 0x18000 | **3 × 2^15** |
 | dynagear | 0x1000000 | 0x20000 | 2^17 |
-| survarts / twineag2 / stmblade | 0x1800000 | 0x30000 | **3 × 2^16** |
+| survartsu / twineag2 / stmblade | 0x1800000 | 0x30000 | **3 × 2^16** |
 | cairblad / drifto94 / vasara / vasara2 | 0x2000000 | 0x40000 | 2^18 |
 
 The core's `wrap_code = code[16:0]` mask was correct **only** for Dyna Gear.
@@ -45,8 +59,8 @@ code % (3<<k) == ((code >> k) % 3) << k | code[k-1:0]
 
 and `code >> k` is at most 5 bits, so the modulo is a small LUT, not a divider.
 
-**Verified** by `verif/tb_ssv_cfg.sv`: 12,418 checks against a reference modulo
-across all nine titles, sweeping the full 20-bit code space and deliberately
+**Covered** by `verif/tb_ssv_cfg.sv` against a reference modulo across all four
+manifest graphics geometries, sweeping the full 20-bit code space and deliberately
 including codes above `elements()` — the only region where masking and modulo
 differ.
 
@@ -71,8 +85,9 @@ after the generalisation.
 `plane67` was a hardwired `32'd0`, load-bearing because a three-quarter title
 never writes those bytes and reading them returns X against a chip model. It is
 now `cfg.gfx_quarters == 4 ? rom_data[127:96] : 32'd0`, so the four-quarter
-titles (cairblad, drifto94, vasara, vasara2) can use it while Dyna Gear keeps
-the guard. Opening it unconditionally would be the same bug in reverse.
+titles (drifto94, vasara, vasara2) can use it while Dyna Gear and Cairblad keep
+the three-quarter guard. Opening it unconditionally would be the same bug in
+reverse.
 
 ### ES5506 bank population is per game
 
@@ -80,6 +95,16 @@ The voice engine gated on `cr[15:14] != 2'b10` ("only bank 2 is populated for
 Dyna Gear"). It now gates on `cfg.bank_valid[cr[15:14]]`. `bank_map` is in the
 record to honour MAME's `ROM_COPY` aliases (twineag2, ultrax alias banks 2/3
 onto 0/1) by address rather than by duplicating sample data.
+
+`CR_CMPD` is also implemented once in the shared voice path. Its decoder is
+the OTTO equation used by MAME's ES5506 device, not a generic telephony u-law
+lookup. `verif/tb_ssv_es5506_ulaw.sv` checks source-derived values across the
+exponent and sign boundaries, while `verif/tb_ssv_es5506_voice.sv` checks
+positive and negative compressed samples after filtering and mixing. Full
+real-set compressed-audio qualification remains part of the matrix gate. The
+same register path now applies MAME's cold-reset voice defaults (`CR=3`,
+`LVOL/RVOL=0x8000`, all other fields zero) without erasing those banks during a
+watchdog device reset; `verif/tb_ssv_es5506_regs.sv` covers the retention edge.
 
 ### Program window and watchdog are per game
 
@@ -97,18 +122,19 @@ The watchdog now has three modes, and this is not cosmetic:
 
 MAME's `WATCHDOG_TIMER` first appears at `ssv.cpp:2513`, *after* the drifto94
 and stmblade machine configs — those boards have no watchdog. Left as it was,
-the unconditional 180-frame counter would have reset them forever and would
-never have been kicked by vasara.
+an unconditional watchdog would reset them forever and a read-only strobe
+would never be kicked by vasara.
 
-`verif/tb_ssv_watchdog.sv` is parameterised by mode and all three pass,
-including a **wrong-direction** phase: a read must not kick a write-kick board
-and vice versa. That is the half that matters — a core that read-kicks
-regardless would pass a naive kick test on vasara and then reset in play.
+MAME leaves the timer interval at `watchdog_timer_device`'s exact three-second
+default. The RTL therefore counts `clk_sys` master cycles from reset rather
+than approximating it as 180 post-video frames. `WDOG_TIMEOUT_CYCLES` is
+parameterised so `verif/tb_ssv_watchdog.sv` can cheaply cover all three modes,
+the exact boundary, and the decisive **wrong-direction** phase.
 
 ### Per-game region sizes
 
 The SDRAM slots carried Dyna Gear's sizes, so the larger titles would not have
-fit. They are now sized for the worst case across the nine (program 4 MB,
+fit. They are now sized for the worst case across the ten entries (program 4 MB,
 graphics 32 MB, samples 8 MB), with graphics occupying exactly bank 1.
 High-water 104 MB of 128 MB, no overlaps, graphics base still 16-byte aligned.
 
@@ -136,35 +162,41 @@ hardwired `in_extra` to `16'hffff`.
 `J1` is now ten entries (`B1..B6, Test, Service, Start, Coin`), which renumbers
 every joystick bit, so `CONF_STR`, `player_port`, `db15_to_joy`, the
 test/service/coin taps, `in_extra`, the input-matrix bench's *mirror* of all of
-that, and the `<buttons>` list in all 33 MRAs moved together. B3 is a real
+that, and the `<buttons>` list in the ten manifest MRAs moved together. B3 is a real
 button now; SSV's port always carried it and Dyna Gear simply never presses it.
 
-`in_extra` is gated on `cfg.has_add_buttons`, so every other title still reads
-the idle `16'hffff` it read before -- an ungated port would change what those
-games see at an address their program may still probe.
+`extra_input_mode` distinguishes an absent decode, Dyna Gear's decoded but
+idle port, and Survival Arts' live B4-B6 wiring. `system_input_mode` separately
+keeps Vasara/Vasara 2 Test and Tilt fixed high while normal profiles retain
+live cabinet inputs.
+
+The shared `$21000e` handler follows MAME's `lockout_w` and `lockout_inv_w`:
+reset starts unlocked, the descriptor selects polarity, locked active-low coin
+inputs are forced released, and both bookkeeping diagnostics increment only
+on rising counter-drive edges. No game-name branch is used.
 
 `verif/tb_ssv_input_matrix.sv` passes, including the inverted assertion: it used
 to prove B3 was unreachable, and now proves the full low byte goes active.
 
 ## Phase 8 is complete.
 
-## Not done
+## Remaining qualification work
 
 | item | note |
 |---|---|
-| MRA `<rom index="1">` config path in the loader | The record exists and is plumbed everywhere; nothing parses it from the download yet, so `cfg` is still the compile-time `cfg_dynagear()`. This is the remaining gate on actually selecting a game. |
-| Compressed ES5506 samples | `CR_CMPD` voices still output silence. Measured 0 running compressed voices on Dyna Gear, so this is a pure multi-game item. |
-| IRQ level 1 at scanline 0 | Needed by twineag2 and ultrax (`init_ssv_irq1`); breaks cairblad, hence the config bit — which exists but is not yet consumed by `ssv_irq`. |
-| Tile-code expansion table | `init_ssv` bitswap vs cairblad's identity `init_ssv_tilescram`; `tile_code_identity` is in the record but not yet consumed. |
-| `tools/gen_ssv_mras.py` | Still gates `supported = setname == 'dynagear'`. Needs the machine-config/address-map/init parsers, the config blob, graphics tail padding and the hiscore entry. |
-| V60 opcode gaps | `0x59`, `0x5B`, `0x5D` partial. Dyna Gear's boot does not need them; eight other programs might. Mitigate with a sticky "unimplemented opcode" status bit rather than prediction. |
+| MRA `<rom index="1">` config path in the loader | **Done.** Descriptor bytes are validated, decoded, and used for ROM placement and runtime feature selection. |
+| IRQ level 1 at scanline 0 | **Done in shared RTL.** `cfg.irq_level1_line0` is consumed by `rtl/ssv_irq.sv`; per-set gameplay qualification remains open. |
+| Tile-code expansion table | **Done in shared RTL.** Both renderers consume `cfg.tile_code_identity`; modulo coverage is in `verif/tb_ssv_cfg.sv`. |
+| `tools/gen_ssv_mras.py` | **Done for the qualified matrix.** The authoritative manifest, descriptor generation, and profile audit are in `tools/ssv_supported_sets.py`, `tools/gen_ssv_mras.py`, and `tools/verify_ssv_universal_profile.py`. |
+| Compressed ES5506 samples | **Shared path implemented; focused-tested.** The MAME/OTTO decoder is centralized in `ssv_pkg`, with table-value and post-mixer polarity regressions; full real-set/matrix qualification remains open. |
+| V60 opcode gaps | **Open qualification boundary.** Any implementation is shared CPU RTL and must be covered before promoting additional sets. |
 
-## Not reachable without new silicon
+## Optional hardware status
 
 **Drift Out '94, Twin Eagle II and Storm Blade require an ST010 (NEC
 uPD96050)** — `UPD96050(config, m_dsp, 10000000)` at `ssv.cpp:2468/2642/2755`,
 with `ROM_REGION(0x11000, "st010")` mapped at `$480000` and its data RAM at
-`$482000-$482fff`. That is Phase 9 and is a CPU core in its own right
-(~2000 ALM, 4–8 M10K estimated). Six of the nine titles are reachable without
-it; Storm Blade may be substantially playable without the DSP, and the first
-deliverable there should be a measurement of how far it gets, not a fix.
+`$482000-$482fff`. The shared uPD96050 implementation is now present in the
+universal source profile and descriptor-gated for those sets. Remaining work
+is real-set boot/gameplay evidence, not a separate profile or RBF. Future DSP
+fixes must stay in shared `rtl/cpu/upd96050/` RTL.

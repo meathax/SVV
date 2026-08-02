@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Fixed Dyna Gear index-0 stream (the MRA is unchanged by the repack):
-//   0x0000000..0x00fffff  V60 program (16-bit interleaved by the MRA)
-//   0x0100000..0x0cfffff  graphics, 3 x 4 MB MAME quarters
-//   0x0d00000..0x10fffff  ES5506 sample ROM
+// Per-game index-0 stream: program, populated graphics quarters, concatenated
+// ES5506 banks, then an optional ST010 image.
 //
 // SDRAM destinations (ssv_pkg):
 //   program  -> 0x0000000 identity
-//   graphics -> 0x0100000, repacked into one aligned 16-byte record per
-//               16-pixel tile row (Q0|Q1|Q2|pad), so ssv_gfx_row_fetch reads
-//               a whole row with one 128-bit p2 burst. 16 MB.
-//   samples  -> SDR_SAMPLES_BASE = 0x1160000, above XRAM and CPU RAM. The
-//               graphics region grew into the gap the samples vacated.
+//   graphics -> SDR_GFX_BASE, repacked into one aligned 16-byte record per
+//               16-pixel tile row (Q0|Q1|Q2|Q3), so ssv_gfx_row_fetch reads
+//               a whole row with one 128-bit p2 burst.
+//   samples  -> SDR_SAMPLES_BASE in SDRAM bank 3, isolated from CPU, graphics,
+//               and optional ST010 traffic.
 
 `timescale 1ns/1ps
 
@@ -54,14 +52,21 @@ logic       index0_seen;
 // Per-game configuration, MRA <rom index="1">, 16 bytes little-endian.
 //
 //   0  magic 'S' (0x53)      8  bank_valid
-//   1  version (1)           9  flags0: b0 tile_code_identity
+//   1  version (2)           9  flags0: b0 tile_code_identity
 //   2  prog_mb                        b1 irq_level1_line0
-//   3  gfx_mb                         b2 has_add_buttons
-//                                     b3 has_st010
+//   3  gfx_mb (6 bits)                b2 reserved (must remain zero)
+//                                     b3 has_st010, b4 drifto unknown reads
+//                                     b5 inverted lockout
+//                                     b7..b6 extra_input_mode
 //   4  gfx_code_k           10  wdog_mode
-//   5  gfx_code_mul3        11  game_id
-//   6  gfx_quarters         12..14 reserved (0)
-//   7  bank_map             15  checksum: bytes 0..14 summed, negated
+//   5  b0 gfx_code_mul3      11  game_id
+//   6  gfx_quarters         13  visible width / 2
+//   7  bank_map             12  sample_mb
+//                            14  visible height
+//                            10 b2 has_nvram, b4..b3 extra_ram_mode,
+//                               b5 system_input_mode, b7..b6 nvram_mode
+//                               (0 none, 1 2 KiB, 2 64 KiB)
+//                            15  checksum: bytes 0..14 summed, negated
 //
 // The block MUST precede <rom index="0"> in the MRA, because index-0 bytes
 // cannot be placed without knowing the layout. A mis-ordered or malformed
@@ -92,32 +97,57 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
         bank_valid:         cfg_raw[8][3:0],
         tile_code_identity: cfg_raw[9][0],
         irq_level1_line0:   cfg_raw[9][1],
-        has_add_buttons:    cfg_raw[9][2],
+        extra_input_mode:   cfg_raw[9][7:6],
+        lockout_inverted:   cfg_raw[9][5],
+        has_nvram:          cfg_raw[10][2],
         has_st010:          cfg_raw[9][3],
-        wdog_mode:          cfg_raw[10][1:0]
+        has_drifto_unknown: cfg_raw[9][4],
+        sample_mb:          cfg_raw[12][5:0],
+        wdog_mode:          cfg_raw[10][1:0],
+        extra_ram_mode:     cfg_raw[10][4:3],
+        nvram_mode:         cfg_raw[10][7:6],
+        system_input_mode:  cfg_raw[10][5],
+        visible_width_half: cfg_raw[13],
+        visible_height:     cfg_raw[14]
     };
 endfunction
 
 function automatic logic [SDR_AW:0] stream_byte_address(
     input logic [26:0] stream_addr
 );
-    logic [23:0] gfx_offset;     // 0 .. 0xBFFFFF within the graphics stream
-    logic [21:0] within_quarter; // byte offset inside one 4 MiB quarter
-    logic  [1:0] quarter;        // 0=Q0 1=Q1 2=Q2  (Q3 absent on dynagear)
+    logic [26:0] gfx_offset;
+    logic [26:0] within_quarter;
+    logic  [2:0] quarter;
+    logic [26:0] quarter_bytes;
+    logic [17:0] raw_tile_code;
     begin
-        gfx_offset     = stream_addr[23:0] - STREAM_SPRITES[23:0];
-        within_quarter = gfx_offset[21:0];
-        quarter        = gfx_offset[23:22];
+        gfx_offset     = stream_addr - stream_gfx_start_cfg(cfg);
+        quarter_bytes  = gfx_quarter_bytes_cfg(cfg);
+        // Do not replace this with a shift/mask: 24 MiB and 12 MiB MAME
+        // regions have 6 MiB and 3 MiB quarters respectively.
+        quarter        = 3'd0;
+        within_quarter = gfx_offset;
+        if (gfx_offset >= quarter_bytes) begin
+            quarter        = 3'd1;
+            within_quarter = gfx_offset - quarter_bytes;
+        end
+        if (gfx_offset >= (quarter_bytes << 1)) begin
+            quarter        = 3'd2;
+            within_quarter = gfx_offset - (quarter_bytes << 1);
+        end
+        if (gfx_offset >= (quarter_bytes * 27'd3)) begin
+            quarter        = 3'd3;
+            within_quarter = gfx_offset - (quarter_bytes * 27'd3);
+        end
+        raw_tile_code  = within_quarter >> 5;
 
-        if ((stream_addr >= STREAM_SPRITES) &&
-            (stream_addr <  STREAM_SPRITES + STREAM_GFX_SIZE)) begin
-            // All THREE populated quarters collapse into one aligned 16-byte
+        if ((stream_addr >= stream_gfx_start_cfg(cfg)) &&
+            (stream_addr <  stream_samples_start_cfg(cfg))) begin
+            // All populated quarters collapse into one aligned 16-byte
             // record per 16-pixel tile row, so the row fetcher gets a whole
-            // row from a single 128-bit p2 burst. Bytes 12..15 of every record
-            // are the absent quarter 3 and are deliberately never written --
-            // ssv_gfx_row_fetch forces plane67 to zero. If a family title ever
-            // populates Q3, this function already places it and only the
-            // fetcher's constant has to go.
+            // row from a single 128-bit p2 burst. The descriptor determines
+            // whether bytes 12..15 carry quarter 3 or remain unwritten; the
+            // fetcher independently gates that lane to zero for Q3-absent sets.
             //
             // The "quarters" model is supported by the physical board: a
             // SAM-5127 carries four graphics banks A/B/C/D of four `16M-MASK`
@@ -130,22 +160,23 @@ function automatic logic [SDR_AW:0] stream_byte_address(
             // under this same loader, this function is the first thing to
             // suspect.
             stream_byte_address = gfx_plane_addr(
-                within_quarter[21:5],   // tile code
-                within_quarter[4:2],    // row within the tile
+                raw_tile_code,
+                within_quarter[4:2],
                 quarter,
-                within_quarter[1:0]     // byte within the 32-bit row
+                within_quarter[1:0]
             );
         end
-        else if (stream_addr >= STREAM_ST010) begin
-            // st010.bin, placed contiguously in the free bank 2. MUST be tested
-            // before the sample branch below, which is an open-ended `>=`.
-            stream_byte_address = st010_stream_dest(stream_addr);
+        else if (cfg.has_st010 &&
+                 stream_addr >= stream_st010_start_cfg(cfg)) begin
+            // st010.bin, placed contiguously in bank 3 after samples. MUST be
+            // tested before the sample branch below, which is open-ended `>=`.
+            stream_byte_address = st010_stream_dest_cfg(cfg, stream_addr);
         end
-        else if (stream_addr >= STREAM_SAMPLES) begin
+        else if (stream_addr >= stream_samples_start_cfg(cfg)) begin
             // The sample region no longer sits at its stream offset: the
             // graphics records displaced it above XRAM and CPU RAM.
             stream_byte_address = SDR_SAMPLES_BASE +
-                                  (stream_addr[SDR_AW:0] - STREAM_SAMPLES[SDR_AW:0]);
+                                  (stream_addr - stream_samples_start_cfg(cfg));
         end
         else begin
             stream_byte_address = stream_addr[SDR_AW:0];  // V60 program, identity
@@ -160,8 +191,20 @@ wire [SDR_AW:0] mapped_ioctl_addr = stream_byte_address(ioctl_addr);
 // { rom[2i], rom[2i+1] } -- the OPPOSITE order from the little-endian pairing
 // the SDRAM path uses, which is why wd is {byte_lo, ioctl_dout} and not
 // {ioctl_dout, byte_lo}.
-wire st010_data_byte = (ioctl_addr >= STREAM_ST010 + ST010_DATA_OFFSET) &&
-                       (ioctl_addr <  STREAM_ST010 + STREAM_ST010_SIZE);
+wire st010_data_byte = cfg.has_st010 &&
+                       (ioctl_addr >= stream_st010_start_cfg(cfg) +
+                                      ST010_DATA_OFFSET) &&
+                       (ioctl_addr <  stream_st010_start_cfg(cfg) +
+                                      STREAM_ST010_SIZE);
+
+// MRA sample streams reproduce MAME's ROM_REGION16_BE byte image.  Keep that
+// canonical byte order in SDRAM: the even stream byte is the high half of the
+// ES5506 word.  Program and graphics storage remain little-endian because
+// their consumers already implement the V60/packed-row layout.
+wire sample_data_byte =
+    (ioctl_addr >= stream_samples_start_cfg(cfg)) &&
+    (ioctl_addr <  stream_samples_start_cfg(cfg) +
+                   stream_samples_size_cfg(cfg));
 
 assign ioctl_wait = busy | ~mem_ready;
 
@@ -203,13 +246,13 @@ always_ff @(posedge clk) begin
             cfg_sum = 8'd0;
             for (int i = 0; i < CFG_BYTES - 1; i++)
                 cfg_sum = cfg_sum + cfg_raw[i];
-            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd1) &&
+            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd2) &&
                          (cfg_raw[CFG_BYTES-1] == (-cfg_sum));
             cfg <= cfg_decode();
         end
 
         if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&
-            ioctl_index == 8'd0 && ioctl_addr < STREAM_END) begin
+            ioctl_index == 8'd0 && ioctl_addr < stream_end_cfg(cfg)) begin
             if (ioctl_addr > download_max_addr)
                 download_max_addr <= ioctl_addr;
             if (!ioctl_addr[0])
@@ -217,14 +260,16 @@ always_ff @(posedge clk) begin
             else begin
                 sdr_wr_req  <= 1'b1;
                 sdr_wr_addr <= mapped_ioctl_addr[SDR_AW:1];
-                sdr_wr_din  <= {ioctl_dout, byte_lo};
+                sdr_wr_din  <= sample_data_byte
+                    ? {byte_lo, ioctl_dout}
+                    : {ioctl_dout, byte_lo};
                 sdr_wr_be   <= 2'b11;
                 busy        <= 1'b1;
                 // Second destination for the same pair of bytes. Big-endian, so
                 // byte_lo (the EVEN stream byte) is the HIGH half of the word.
                 if (st010_data_byte) begin
                     st010_drom_we <= 1'b1;
-                    st010_drom_wa <= st010_drom_word(ioctl_addr);
+                    st010_drom_wa <= st010_drom_word_cfg(cfg, ioctl_addr);
                     st010_drom_wd <= {byte_lo, ioctl_dout};
                 end
             end

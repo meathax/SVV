@@ -44,9 +44,9 @@ package ssv_pkg;
     // address [27:26], so each bank is 32 MB:
     //
     //   bank 0  0x0000000  V60 program, XRAM ($160000), CPU RAM ($400000)
-    //   bank 1  0x2000000  packed graphics records
-    //   bank 2  0x4000000  free
-    //   bank 3  0x6000000  ES5506 samples
+    //   bank 1   0x2000000  packed graphics records (up to 32 MiB)
+    //   bank 2   0x4000000  free
+    //   bank 3   0x6000000  ES5506 samples, then optional ST010 image
     //
     // Regions are placed in SEPARATE banks on purpose, and it is not
     // cosmetic. Every bank holds one open row; two clients in the same bank
@@ -74,13 +74,17 @@ package ssv_pkg;
     // Gear invention; it is not, it is the board's RAM at that address.
     localparam logic [SDR_AW:0] SDR_XRAM_BASE    = 27'h0400000; // bank 0
     localparam logic [SDR_AW:0] SDR_CPU_RAM_BASE = 27'h0420000; // bank 0
+    // Cairblad's address map adds a 64 KiB battery-backed NVRAM window at
+    // $580000. Keep it in the unused tail of bank 0 so it uses the existing
+    // external SDRAM path rather than spending another block-RAM instance.
+    localparam logic [SDR_AW:0] SDR_NVRAM_BASE   = 27'h0460000; // bank 0
     localparam logic [SDR_AW:0] SDR_SAMPLES_BASE = 27'h6000000; // bank 3
 
     // ST010 (NEC uPD96050) program ROM, for the three drifto94_state titles.
     //
-    // Bank 2 was entirely free, so this costs nothing in row conflicts: the
-    // DSP's fetch port never shares a bank with the V60, the graphics fetcher
-    // or the sample engine, and 68 KB is 17 of the bank's 8192 rows.
+    // Put this small image immediately after the fixed 8 MiB sample slot in
+    // bank 3; the regions do not overlap and the descriptor still selects
+    // whether the DSP exists. Bank 2 remains free in the ten-set profile.
     //
     // The whole 69,632-byte st010.bin image is placed here contiguously:
     //   + 0x00000 .. 0x0ffff   "dspprg", 16384 x 32-bit big-endian, 24 used
@@ -92,7 +96,7 @@ package ssv_pkg;
     //
     // The base MUST be 8-byte aligned: program fetch uses the controller's
     // 64-bit p5 port, whose address is [SDR_AW:3].
-    localparam logic [SDR_AW:0] SDR_ST010_BASE = 27'h4000000; // bank 2
+    localparam logic [SDR_AW:0] SDR_ST010_BASE = 27'h6800000; // bank 3 tail
 
     // Sizes of the regions inside the MRA index-0 STREAM. These are the
     // shipped game's actual byte counts and are NOT the SDRAM slot sizes
@@ -120,12 +124,50 @@ package ssv_pkg;
     localparam logic [SDR_AW:0] SDR_GFX_SIZE     = 27'h2000000; // 32 MB slot
     localparam logic [SDR_AW:0] SDR_XRAM_SIZE    = 27'h0020000; // 128 KB
     localparam logic [SDR_AW:0] SDR_CPU_RAM_SIZE = 27'h0040000; // 256 KB
+    localparam logic [SDR_AW:0] SDR_NVRAM_SIZE   = 27'h0010000; //  64 KB
     localparam logic [SDR_AW:0] SDR_SAMPLES_SIZE = 27'h0800000; //  8 MB slot
     localparam logic [SDR_AW:0] SDR_ST010_SIZE   = 27'h0011000; // 68 KB exact
 
     // Raw graphics bytes in the MRA stream: 3 populated quarters x 4 MB.
     // The MRA itself is unchanged; only where the loader puts the bytes is.
     localparam logic [26:0] STREAM_GFX_SIZE  = 27'h0C00000;
+
+    // MAME ssv_state::vblank_r() returns the raster status in the upper byte:
+    // VBLANK sets bits 12 and 13 (0x3000), HBLANK sets bit 11 (0x0800).
+    // Keep this board-visible encoding in one shared helper so a game that
+    // polls $1c0000 sees the same status in every descriptor profile.
+    function automatic logic [15:0] ssv_video_status(
+        input logic vblank, input logic hblank
+    );
+        ssv_video_status = (vblank ? 16'h3000 : 16'h0000) |
+                           (hblank ? 16'h0800 : 16'h0000);
+    endfunction
+
+    // ES5506 compressed samples use the OTTO u-law equation from MAME's
+    // es5506_device::compute_tables(), rather than a conventional telephony
+    // u-law table.  Keep it in the shared package so the voice engine and
+    // source-backed regressions cannot silently grow different decoders.
+    function automatic logic signed [15:0] es5506_ulaw_decode(
+        input logic [7:0] code
+    );
+        logic [15:0] rawval;
+        logic [15:0] mantissa;
+        logic [2:0] exponent;
+        logic signed [15:0] signed_mantissa;
+        begin
+            rawval = {code, 8'h80};
+            exponent = rawval[15:13];
+            mantissa = rawval << 3;
+            if (exponent == 3'd0) begin
+                signed_mantissa = mantissa;
+                es5506_ulaw_decode = signed_mantissa >>> 7;
+            end else begin
+                mantissa = (mantissa >> 1) | ((~mantissa) & 16'h8000);
+                signed_mantissa = mantissa;
+                es5506_ulaw_decode = signed_mantissa >>> (7 - exponent);
+            end
+        end
+    endfunction
 
     // Quarters the loader writes vs. slots the record reserves. The 4/3
     // expansion in SDR_GFX_SIZE is exactly this ratio, and it is zero for a
@@ -139,7 +181,8 @@ package ssv_pkg;
     // -----------------------------------------------------------------------
     // PER-GAME CONFIGURATION
     //
-    // The core is being generalised from Dyna Gear to nine SSV titles. What
+    // One universal core supports the nine qualified hardware profiles (plus
+    // the Ultra X review-build clone) selected by the MRA descriptor. What
     // varies between them is small but not derivable from the ROM stream, so
     // it is carried explicitly. Sizes come from MAME's ROM_REGION declarations
     // (src/mame/seta/ssv.cpp), which is the authority for every field here.
@@ -153,7 +196,7 @@ package ssv_pkg;
     //   survarts/twineag2/stmblade  0x1800000 -> 0x30000 = 3 * 2^16
     //   cairblad/drifto94/vasara*   0x2000000 -> 0x40000 =     2^18
     //
-    // Three of the nine are NOT powers of two, so the existing
+    // Five of the ten manifest entries use a non-power-of-two region, so the
     // `wrap_code = code[16:0]` mask is wrong for them twice over: wrong width
     // and wrong wrap rule. Every case is either 2^k or 3*2^k, and for 3*2^k
     //     code % (3<<k) == ((code >> k) % 3) << k | code[k-1:0]
@@ -163,7 +206,7 @@ package ssv_pkg;
     typedef struct packed {
         logic [3:0] game_id;
         logic [2:0] prog_mb;            // 1, 2 or 4
-        logic [5:0] gfx_mb;             // 12, 16, 24 or 32 (MAME region size)
+        logic [5:0] gfx_mb;             // 12, 16, 24 or 32 MiB
         logic [4:0] gfx_code_k;         // tile modulus exponent
         logic       gfx_code_mul3;      // modulus is 3<<k, not 1<<k
         // (1<<gfx_code_k)-1, precomputed. It is derived, not independent, but
@@ -176,12 +219,29 @@ package ssv_pkg;
         logic [3:0] bank_valid;         // which CR banks carry data
         logic       tile_code_identity; // init_ssv_tilescram vs init_ssv
         logic       irq_level1_line0;   // init_ssv_irq1 (twineag2, ultrax)
-        logic       has_add_buttons;    // decodes $500008 (survarts)
+        // 0 none, 1 decoded but idle, 2 decoded six-button input window.
+        logic [1:0] extra_input_mode;
+        logic       lockout_inverted;   // descriptor fact; no coin gating yet
+        logic       has_nvram;          // decodes the descriptor NVRAM window
+        // NVRAM map size: 0 none, 1 = $580000-$5807ff, 2 = $580000-$58ffff.
+        logic [1:0] nvram_mode;
         // ST010 (uPD96050) daughterboard present: drifto94, stmblade, twineag2.
         // Carried in the spare bit 3 of the config block's flags0 byte, beside
-        // tile_code_identity / irq_level1_line0 / has_add_buttons.
+        // tile_code_identity / irq_level1_line0 / reserved descriptor bit 2.
         logic       has_st010;
+        // drifto94_map exposes machine().rand() reads at $510000/$520000;
+        // this remains descriptor-selected rather than a set-name branch.
+        logic       has_drifto_unknown;
+        logic [5:0] sample_mb;          // concatenated loaded ES5506 banks
         logic [1:0] wdog_mode;          // 0 none, 1 read-kick, 2 write-kick
+        // Extra CPU RAM selected by the MAME address map: 0 none, 1 =
+        // $400000-$43ffff, 2 = $010000-$03ffff.  This is board-map data,
+        // not a set-name branch, and keeps the one universal core honest.
+        logic [1:0] extra_ram_mode;
+        // 0 normal SYSTEM port; 1 fixes Test/Tilt high (Vasara wiring).
+        logic       system_input_mode;
+        logic [7:0] visible_width_half; // exact MAME visarea width / 2
+        logic [7:0] visible_height;     // exact MAME visarea height
     } ssv_cfg_t;
 
     // Dyna Gear (SAM-5127). Reproduces today's hardwired behaviour exactly, so
@@ -195,34 +255,241 @@ package ssv_pkg;
             gfx_code_mul3:      1'b0,
             gfx_code_mask:      20'h1FFFF, // (1<<17)-1
             gfx_quarters:       3'd3,    // quarter 3 never populated
-            bank_map:           8'b11_10_01_00,
+            bank_map:           8'h00,
             bank_valid:         4'b0100, // bank 2 only
             tile_code_identity: 1'b0,
             irq_level1_line0:   1'b0,
-            has_add_buttons:    1'b0,
+            extra_input_mode:   2'd1,    // decoded, all Dyna bits idle
+            lockout_inverted:   1'b0,
+            has_nvram:          1'b0,
+            nvram_mode:         2'd0,
             has_st010:          1'b0,
-            wdog_mode:          2'd1     // read-kick at $210000
+            has_drifto_unknown: 1'b0,
+            sample_mb:          6'd4,
+            wdog_mode:          2'd1,    // read-kick at $210000
+            extra_ram_mode:     2'd1,    // survarts_map $400000-$43ffff
+            system_input_mode:  1'b0,
+            visible_width_half: 8'd168,
+            visible_height:     8'd240
         };
     endfunction
 
-    // code % (mul3 ? 3<<k : 1<<k), returned at the full 18 bits a 32 MB
-    // graphics region needs (0x40000 tiles).
-    // n mod 3 for a 5-bit n, as a LUT. This is what the comment above always
-    // claimed the implementation was; writing `high % 20'd3` instead put a
-    // 20-bit divider in the SDRAM address path.
-    //
-    // Five bits is sufficient and not a guess: the modulus is 3<<k with
-    // k = 15..18 across the four SSV graphics region sizes, and the code is 20
-    // bits, so code>>k is at most 20-15 = 5 bits. Rule 14 in layout_fault()
-    // bounds the region against the code width, which is what keeps that true.
-    function automatic logic [1:0] mod3_5(input logic [4:0] n);
-        case (n % 5'd3)
-            5'd0:    mod3_5 = 2'd0;
-            5'd1:    mod3_5 = 2'd1;
-            default: mod3_5 = 2'd2;
+    // The three requested shooter sets. These records mirror the generated
+    // MRA configuration block, whose fields are derived from MAME's ssv.cpp.
+    function automatic ssv_cfg_t cfg_cairblad();
+        cfg_cairblad = '{
+            game_id:            4'd1,
+            prog_mb:            3'd2,
+            gfx_mb:             6'd32,
+            gfx_code_k:         5'd18,
+            gfx_code_mul3:      1'b0,
+            gfx_code_mask:      20'h3FFFF,
+            gfx_quarters:       3'd3,
+            bank_map:           8'h00,
+            bank_valid:         4'b0001,
+            tile_code_identity: 1'b1,
+            irq_level1_line0:   1'b0,
+            extra_input_mode:   2'd0,
+            lockout_inverted:   1'b1,
+            has_nvram:          1'b1,
+            nvram_mode:         2'd2,
+            has_st010:          1'b0,
+            has_drifto_unknown: 1'b0,
+            sample_mb:          6'd4,
+            wdog_mode:          2'd1,
+            extra_ram_mode:     2'd0,
+            system_input_mode:  1'b0,
+            visible_width_half: 8'd169,
+            visible_height:     8'd240
+        };
+    endfunction
+
+    function automatic ssv_cfg_t cfg_vasara();
+        cfg_vasara = '{
+            game_id:            4'd2,
+            prog_mb:            3'd4,
+            gfx_mb:             6'd32,
+            gfx_code_k:         5'd18,
+            gfx_code_mul3:      1'b0,
+            gfx_code_mask:      20'h3FFFF,
+            gfx_quarters:       3'd4,
+            bank_map:           8'h04,
+            bank_valid:         4'b0011,
+            tile_code_identity: 1'b0,
+            irq_level1_line0:   1'b0,
+            extra_input_mode:   2'd0,
+            lockout_inverted:   1'b0,
+            has_nvram:          1'b0,
+            nvram_mode:         2'd0,
+            has_st010:          1'b0,
+            has_drifto_unknown: 1'b0,
+            sample_mb:          6'd8,
+            wdog_mode:          2'd2,
+            extra_ram_mode:     2'd0,
+            system_input_mode:  1'b1,
+            visible_width_half: 8'd168,
+            visible_height:     8'd240
+        };
+    endfunction
+
+    function automatic ssv_cfg_t cfg_vasara2();
+        cfg_vasara2 = cfg_vasara();
+        cfg_vasara2.game_id = 4'd3;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_drifto94();
+        cfg_drifto94 = cfg_vasara();
+        cfg_drifto94.game_id   = 4'd4;
+        cfg_drifto94.has_nvram = 1'b1;
+        cfg_drifto94.nvram_mode = 2'd1; // drifto94_map $580000-$5807ff
+        cfg_drifto94.has_st010 = 1'b1;
+        cfg_drifto94.has_drifto_unknown = 1'b1;
+        cfg_drifto94.wdog_mode = 2'd0;
+        cfg_drifto94.system_input_mode = 1'b0;
+        cfg_drifto94.visible_height = 8'd238;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_stmblade();
+        cfg_stmblade = cfg_drifto94();
+        cfg_stmblade.game_id       = 4'd5;
+        cfg_stmblade.gfx_mb        = 6'd24;
+        cfg_stmblade.gfx_code_k    = 5'd16;
+        cfg_stmblade.gfx_code_mul3 = 1'b1;
+        cfg_stmblade.gfx_code_mask = 20'h0ffff;
+        cfg_stmblade.gfx_quarters  = 3'd3;
+        cfg_stmblade.bank_map      = 8'h00;
+        cfg_stmblade.bank_valid    = 4'b0001;
+        cfg_stmblade.has_nvram     = 1'b1;
+        cfg_stmblade.sample_mb     = 6'd4;
+        cfg_stmblade.visible_width_half = 8'd176;
+        cfg_stmblade.visible_height = 8'd240;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_survartsu();
+        cfg_survartsu = cfg_dynagear();
+        cfg_survartsu.game_id          = 4'd6;
+        cfg_survartsu.gfx_mb           = 6'd24;
+        cfg_survartsu.gfx_code_k       = 5'd16;
+        cfg_survartsu.gfx_code_mul3    = 1'b1;
+        cfg_survartsu.gfx_code_mask    = 20'h0ffff;
+        cfg_survartsu.extra_input_mode = 2'd2;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_twineag2();
+        cfg_twineag2 = cfg_stmblade();
+        cfg_twineag2.game_id          = 4'd7;
+        cfg_twineag2.prog_mb          = 3'd2;
+        cfg_twineag2.bank_map         = 8'h44;
+        cfg_twineag2.bank_valid       = 4'b1111;
+        cfg_twineag2.irq_level1_line0 = 1'b1;
+        cfg_twineag2.has_nvram        = 1'b0;
+        cfg_twineag2.nvram_mode       = 2'd0;
+        cfg_twineag2.has_drifto_unknown = 1'b0;
+        cfg_twineag2.sample_mb        = 6'd8;
+        cfg_twineag2.wdog_mode        = 2'd1;
+        cfg_twineag2.extra_ram_mode   = 2'd2; // twineag2_map $010000-$03ffff
+        // twineag2() restores the standard 336-pixel SSV visible width;
+        // do not inherit STM Blade's wider 352-pixel machine configuration.
+        cfg_twineag2.visible_width_half = 8'd168;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_ultrax(input logic review_build);
+        cfg_ultrax = cfg_twineag2();
+        cfg_ultrax.game_id          = review_build ? 4'd9 : 4'd8;
+        cfg_ultrax.gfx_mb           = 6'd12;
+        cfg_ultrax.gfx_code_k       = 5'd15;
+        cfg_ultrax.gfx_code_mask    = 20'h07fff;
+        cfg_ultrax.has_st010        = 1'b0;
+    endfunction
+
+    function automatic ssv_cfg_t cfg_for_game(input logic [3:0] game_id);
+        case (game_id)
+            4'd1:    cfg_for_game = cfg_cairblad();
+            4'd2:    cfg_for_game = cfg_vasara();
+            4'd3:    cfg_for_game = cfg_vasara2();
+            4'd4:    cfg_for_game = cfg_drifto94();
+            4'd5:    cfg_for_game = cfg_stmblade();
+            4'd6:    cfg_for_game = cfg_survartsu();
+            4'd7:    cfg_for_game = cfg_twineag2();
+            4'd8:    cfg_for_game = cfg_ultrax(1'b0);
+            4'd9:    cfg_for_game = cfg_ultrax(1'b1);
+            default: cfg_for_game = cfg_dynagear();
         endcase
     endfunction
 
+    // MAME only decodes the extra-button window for maps that explicitly
+    // expose $500008-$500009 (survarts_map). Keep the address predicate beside
+    // the descriptor type so the universal core cannot accidentally turn the
+    // window into a global alias when another set is selected.
+    function automatic logic extra_input_window_cfg(
+        input ssv_cfg_t cfg,
+        input logic [23:0] addr
+    );
+        extra_input_window_cfg = (cfg.extra_input_mode != 2'd0) &&
+            (addr >= 24'h500008) && (addr <= 24'h500009);
+    endfunction
+
+    function automatic logic [8:0] active_width_cfg(input ssv_cfg_t cfg);
+        active_width_cfg = {cfg.visible_width_half, 1'b0};
+    endfunction
+
+    function automatic logic [8:0] active_height_cfg(input ssv_cfg_t cfg);
+        active_height_cfg = {1'b0, cfg.visible_height};
+    endfunction
+
+    // MRA index-0 stream boundaries. The graphics stream contains the
+    // populated quarters only; the loader expands each row into a four-quarter
+    // 16-byte record in SDRAM. The sample stream is four MiB per loaded
+    // ES5506 bank, including the zero-filled lane implied by ROM_LOAD16_BYTE.
+    function automatic logic [26:0] stream_prog_size_cfg(input ssv_cfg_t cfg);
+        stream_prog_size_cfg = 27'(cfg.prog_mb) << 20;
+    endfunction
+
+    function automatic logic [26:0] stream_gfx_size_cfg(input ssv_cfg_t cfg);
+        if (cfg.gfx_quarters == 3'd4)
+            stream_gfx_size_cfg = 27'(cfg.gfx_mb) << 20;
+        else
+            stream_gfx_size_cfg = (27'(cfg.gfx_mb) << 18) * 27'd3;
+    endfunction
+
+    function automatic logic [26:0] stream_gfx_start_cfg(input ssv_cfg_t cfg);
+        stream_gfx_start_cfg = stream_prog_size_cfg(cfg);
+    endfunction
+
+    function automatic logic [26:0] stream_samples_start_cfg(input ssv_cfg_t cfg);
+        stream_samples_start_cfg = stream_gfx_start_cfg(cfg) +
+                                   stream_gfx_size_cfg(cfg);
+    endfunction
+
+    function automatic logic [26:0] stream_samples_size_cfg(input ssv_cfg_t cfg);
+        stream_samples_size_cfg = 27'(cfg.sample_mb) << 20;
+    endfunction
+
+    function automatic logic [26:0] stream_st010_start_cfg(input ssv_cfg_t cfg);
+        stream_st010_start_cfg = stream_samples_start_cfg(cfg) +
+                                 stream_samples_size_cfg(cfg);
+    endfunction
+
+    function automatic logic [26:0] stream_end_cfg(input ssv_cfg_t cfg);
+        stream_end_cfg = stream_st010_start_cfg(cfg) +
+                         (cfg.has_st010 ? STREAM_ST010_SIZE : 27'd0);
+    endfunction
+
+    // MAME's graphics region is split into four logical quarters, but the
+    // populated stream may contain only three of them. The quarter byte count
+    // is therefore gfx_region/4, not a power of two: 3, 4, 6, or 8 MiB for
+    // the qualified profiles. This arithmetic is used only by the download
+    // mapper, not by the live graphics address path.
+    function automatic logic [26:0] gfx_quarter_bytes_cfg(
+        input ssv_cfg_t cfg
+    );
+        gfx_quarter_bytes_cfg = 27'(cfg.gfx_mb) << 18;
+    endfunction
+
+    // code % ((1 or 3)<<k), returned at the full 18 bits required by the
+    // qualified 32 MiB region (0x40000 tiles). The quotient-side operand is
+    // only five bits because the smallest qualified k is 15. Constant modulo
+    // three is a small LUT, not a variable divider in the SDRAM address path.
     function automatic logic [17:0] wrap_code_cfg(
         input ssv_cfg_t cfg, input logic [19:0] code
     );
@@ -235,11 +502,8 @@ package ssv_pkg;
             wrap_code_cfg = 18'(low);
         end
         else begin
-            // The only remaining variable shifts. Truncating to 5 bits BEFORE
-            // the mod is the whole point: it turns a 20-bit divide into a
-            // 32-entry lookup.
             high5 = 5'(code >> cfg.gfx_code_k);
-            rem3  = mod3_5(high5);
+            rem3 = high5 % 5'd3;
             wrap_code_cfg = 18'(low | (20'(rem3) << cfg.gfx_code_k));
         end
     endfunction
@@ -252,18 +516,18 @@ package ssv_pkg;
     //
     // Widths are spelled out because a silent truncation here is the whole
     // bug. All four concatenations are 27 bits, matching SDR_AW+1:
-    //   {3'd0, code[16:0], 7'd0} = 27, {20'd0, row, 4'd0}     = 27,
+    //   {2'd0, code[17:0], 7'd0} = 27, {20'd0, row, 4'd0}     = 27,
     //   {23'd0, quarter, 2'd0}   = 27, {25'd0, byte_in_row}   = 27.
     // -----------------------------------------------------------------------
     function automatic logic [SDR_AW:0] gfx_record_addr(
-        input logic [16:0] code, input logic [2:0] row
+        input logic [17:0] code, input logic [2:0] row
     );
-        gfx_record_addr = SDR_GFX_BASE + {3'd0, code, 7'd0}
+        gfx_record_addr = SDR_GFX_BASE + {2'd0, code, 7'd0}
                                        + {20'd0, row, 4'd0};
     endfunction
 
     function automatic logic [SDR_AW:0] gfx_plane_addr(
-        input logic [16:0] code, input logic [2:0] row,
+        input logic [17:0] code, input logic [2:0] row,
         input logic  [1:0] quarter, input logic [1:0] byte_in_row
     );
         gfx_plane_addr = gfx_record_addr(code, row)
@@ -280,11 +544,11 @@ package ssv_pkg;
     // Where an st010.bin stream byte lands in SDRAM. Identity offset inside the
     // region, so the image is contiguous and the "dspprg"/"dspdata" split is a
     // property of the READERS, not of the placement.
-    function automatic logic [SDR_AW:0] st010_stream_dest(
-        input logic [26:0] stream_addr
+    function automatic logic [SDR_AW:0] st010_stream_dest_cfg(
+        input ssv_cfg_t cfg, input logic [26:0] stream_addr
     );
-        st010_stream_dest = SDR_ST010_BASE +
-                            (stream_addr[SDR_AW:0] - STREAM_ST010[SDR_AW:0]);
+        st010_stream_dest_cfg =
+            SDR_ST010_BASE + (stream_addr - stream_st010_start_cfg(cfg));
     endfunction
 
     // Byte address of instruction `pc`. MAME's dspprg is a 32-bit big-endian
@@ -298,11 +562,12 @@ package ssv_pkg;
 
     // 2048-word on-chip data ROM index for an st010.bin stream byte in the
     // "dspdata" half. Two BYTES per word, big-endian.
-    function automatic logic [10:0] st010_drom_word(
-        input logic [26:0] stream_addr
+    function automatic logic [10:0] st010_drom_word_cfg(
+        input ssv_cfg_t cfg, input logic [26:0] stream_addr
     );
-        st010_drom_word =
-            (stream_addr[26:0] - (STREAM_ST010 + ST010_DATA_OFFSET)) >> 1;
+        st010_drom_word_cfg =
+            (stream_addr - (stream_st010_start_cfg(cfg) +
+                            ST010_DATA_OFFSET)) >> 1;
     endfunction
 
     // -----------------------------------------------------------------------
@@ -350,9 +615,21 @@ package ssv_pkg;
                      SDR_SAMPLES_BASE, SDR_SAMPLES_SIZE) ||
             overlaps(SDR_CPU_RAM_BASE, SDR_CPU_RAM_SIZE,
                      SDR_SAMPLES_BASE, SDR_SAMPLES_SIZE))           return 4;
+        if (overlaps(SDR_NVRAM_BASE, SDR_NVRAM_SIZE,
+                     SDR_MAINCPU_BASE, SDR_MAINCPU_SIZE) ||
+            overlaps(SDR_NVRAM_BASE, SDR_NVRAM_SIZE,
+                     SDR_GFX_BASE, SDR_GFX_SIZE) ||
+            overlaps(SDR_NVRAM_BASE, SDR_NVRAM_SIZE,
+                     SDR_XRAM_BASE, SDR_XRAM_SIZE) ||
+            overlaps(SDR_NVRAM_BASE, SDR_NVRAM_SIZE,
+                     SDR_CPU_RAM_BASE, SDR_CPU_RAM_SIZE) ||
+            overlaps(SDR_NVRAM_BASE, SDR_NVRAM_SIZE,
+                     SDR_SAMPLES_BASE, SDR_SAMPLES_SIZE))           return 18;
         if ({1'b0, SDR_SAMPLES_BASE} + {1'b0, SDR_SAMPLES_SIZE}
                                                 > SDR_TOTAL_BYTES ||
             {1'b0, SDR_GFX_BASE} + {1'b0, SDR_GFX_SIZE}
+                                                > SDR_TOTAL_BYTES ||
+            {1'b0, SDR_NVRAM_BASE} + {1'b0, SDR_NVRAM_SIZE}
                                                 > SDR_TOTAL_BYTES)  return 5;
 
         // --- MRA stream: contiguous, and independent of the SDRAM map ---
@@ -389,6 +666,8 @@ package ssv_pkg;
             overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
                      SDR_XRAM_BASE,    SDR_XRAM_SIZE)    ||
             overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
+                     SDR_NVRAM_BASE,  SDR_NVRAM_SIZE)    ||
+            overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
                      SDR_CPU_RAM_BASE, SDR_CPU_RAM_SIZE) ||
             overlaps(SDR_ST010_BASE, SDR_ST010_SIZE,
                      SDR_SAMPLES_BASE, SDR_SAMPLES_SIZE))           return 12;
@@ -421,6 +700,14 @@ package ssv_pkg;
     //
     // NOT yet confirmed: the active/blank split (336/240) and the sync pulse
     // positions in ssv_video_timing.sv. Those still need a scope on a board.
+    //
+    // clk_sys is 48.317307 MHz in the generated PLL. The two 16-bit enables
+    // deliberately track the *ratio* of the board's independent crystals:
+    // 16 MHz / (42.954545 MHz / 6) = 704 / 315. CPU_INC=21701 with
+    // PIXEL_INC=9710 is -3.7 ppm from that ratio; 21702 was +42.4 ppm and
+    // moved one four-write ES5506 group across Dyna Gear lockstep token 100.
+    localparam logic [15:0] SSV_CPU_INC   = 16'd21701;
+    localparam logic [15:0] SSV_PIXEL_INC = 16'd9710;
     localparam logic [8:0] SSV_HTOTAL  = 9'h1C6; // 454
     localparam logic [8:0] SSV_HBSTART = 9'h150; // 336
     localparam logic [8:0] SSV_VTOTAL  = 9'h106; // 262

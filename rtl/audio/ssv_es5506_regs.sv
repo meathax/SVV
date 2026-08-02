@@ -15,6 +15,9 @@
 module ssv_es5506_regs (
     input  logic        clk,
     input  logic        rst,
+    // cold_rst is the power/download reset.  A watchdog reset is a device
+    // reset in MAME and must not erase the voice register banks.
+    input  logic        cold_rst,
 
     input  logic        host_we,
     input  logic        host_re,
@@ -86,6 +89,8 @@ logic [31:0] write_latch;
 logic [31:0] read_latch;
 logic  [7:0] irq_vector;
 logic [31:0] voice_control_valid;
+logic        cold_init_active;
+logic [4:0]  cold_init_voice;
 
 wire [1:0] host_byte = host_addr[1:0];
 wire [3:0] host_reg  = host_addr[5:2];
@@ -185,7 +190,8 @@ logic [17:0] eng_o2n2_h;
 logic [17:0] eng_o1n1_h;
 
 assign eng_cr       = eng_hold ? eng_cr_h       : q_control;
-assign eng_cr_valid = eng_hold ? eng_cr_valid_h : voice_control_valid[eng_voice];
+assign eng_cr_valid = (eng_hold ? eng_cr_valid_h : voice_control_valid[eng_voice]) &&
+                      !cold_init_active;
 assign eng_fc       = eng_hold ? eng_fc_h       : q_fc;
 assign eng_lvol     = eng_hold ? eng_lvol_h     : q_lvol;
 assign eng_lvramp   = eng_hold ? eng_lvramp_h   : q_lvramp;
@@ -315,6 +321,55 @@ always_comb begin
             we_k2 = 1'b1;
             we_ecount = 1'b1;
         end
+    end
+
+    // MAME's ES5506 compute_tables() initializes every voice before the first
+    // device reset: stopped CR, half-scale L/R volume, and zero for the rest.
+    // Write all banks in parallel through their independent MLAB write ports.
+    // This is deliberately a cold-reset-only sweep so watchdog reset retains
+    // the programmed voice state, matching es5506_device::device_reset().
+    if (cold_init_active) begin
+        wr_addr = cold_init_voice;
+        we_control = 1'b1;
+        w_control = 16'h0003;
+        we_fc = 1'b1;
+        w_fc = 17'd0;
+        we_lvol = 1'b1;
+        w_lvol = 16'h8000;
+        we_lvramp = 1'b1;
+        w_lvramp = 8'd0;
+        we_rvol = 1'b1;
+        w_rvol = 16'h8000;
+        we_rvramp = 1'b1;
+        w_rvramp = 8'd0;
+        we_ecount = 1'b1;
+        w_ecount = 9'd0;
+        we_k2 = 1'b1;
+        w_k2 = 16'd0;
+        we_k2ramp = 1'b1;
+        w_k2ramp = 9'd0;
+        we_k1 = 1'b1;
+        w_k1 = 16'd0;
+        we_k1ramp = 1'b1;
+        w_k1ramp = 9'd0;
+        we_start = 1'b1;
+        w_start = 32'd0;
+        we_end = 1'b1;
+        w_end = 32'd0;
+        we_accum = 1'b1;
+        w_accum = 32'd0;
+        we_o4n1 = 1'b1;
+        w_o4n1 = 18'd0;
+        we_o3n1 = 1'b1;
+        w_o3n1 = 18'd0;
+        we_o3n2 = 1'b1;
+        w_o3n2 = 18'd0;
+        we_o2n1 = 1'b1;
+        w_o2n1 = 18'd0;
+        we_o2n2 = 1'b1;
+        w_o2n2 = 18'd0;
+        we_o1n1 = 1'b1;
+        w_o1n1 = 18'd0;
     end
 end
 
@@ -461,7 +516,7 @@ function automatic [31:0] assemble_host_read(
 endfunction
 
 always_ff @(posedge clk) begin
-    if (rst) begin
+    if (cold_rst) begin
         write_latch      <= 32'd0;
         read_latch       <= 32'hffff_ffff;
         current_page     <= 7'd0;
@@ -472,7 +527,11 @@ always_ff @(posedge clk) begin
         lr_clock_end     <= 7'd0;
         irq_vector       <= 8'h80;
         commit           <= 1'b0;
+        // The MLAB banks are initialized by the cold sweep below.  Keep the
+        // engine invalid until all 32 voices have received their defaults.
         voice_control_valid <= 32'd0;
+        cold_init_active <= 1'b1;
+        cold_init_voice  <= 5'd0;
         commit_page      <= 7'd0;
         commit_reg       <= 4'd0;
         commit_data      <= 32'd0;
@@ -504,95 +563,117 @@ always_ff @(posedge clk) begin
         eng_o1n1_h       <= 18'd0;
     end
     else begin
-        commit <= 1'b0;
-        host_rd_pending <= host_rd_steal;
-        // Hold engine snapshots through the steal cycle and the following
-        // cycle while MLAB q still reflects the host rd_addr (address_reg_b).
-        // Dropping hold with steal alone lets eng_* sample host voice data.
-        eng_hold        <= host_rd_steal || host_rd_pending;
+        if (rst) begin
+            // MAME's es5506_device::device_reset() only restores these
+            // device-level timing controls.  Voice banks, PAGE, and IRQV are
+            // retained across the watchdog/software reset.
+            active_voices <= 5'h1f;
+            mode          <= 5'h17;
+            commit        <= 1'b0;
+            host_rd_pending <= 1'b0;
+            eng_hold      <= 1'b0;
+        end
+        else begin
+            commit <= 1'b0;
+            host_rd_pending <= host_rd_steal;
+            // Hold engine snapshots through the steal cycle and the following
+            // cycle while MLAB q still reflects the host rd_addr (address_reg_b).
+            // Dropping hold with steal alone lets eng_* sample host voice data.
+            eng_hold        <= host_rd_steal || host_rd_pending;
 
-        if (host_rd_steal) begin
-            page_r <= current_page;
-            reg_r  <= host_reg;
-            irqv_r <= irq_vector;
-            // q still holds the prior engine read at this edge.
-            eng_cr_h       <= q_control;
-            eng_cr_valid_h <= voice_control_valid[eng_voice];
-            eng_fc_h       <= q_fc;
-            eng_lvol_h     <= q_lvol;
-            eng_lvramp_h   <= q_lvramp;
-            eng_rvol_h     <= q_rvol;
-            eng_rvramp_h   <= q_rvramp;
-            eng_ecount_h   <= q_ecount;
-            eng_k1_h       <= q_k1;
-            eng_k1ramp_h   <= q_k1ramp;
-            eng_k2_h       <= q_k2;
-            eng_k2ramp_h   <= q_k2ramp;
-            eng_start_h    <= q_start;
-            eng_end_h      <= q_end;
-            eng_accum_h    <= q_accum;
-            eng_o4n1_h     <= q_o4n1;
-            eng_o3n1_h     <= q_o3n1;
-            eng_o3n2_h     <= q_o3n2;
-            eng_o2n1_h     <= q_o2n1;
-            eng_o2n2_h     <= q_o2n2;
-            eng_o1n1_h     <= q_o1n1;
+            if (host_rd_steal) begin
+                page_r <= current_page;
+                reg_r  <= host_reg;
+                irqv_r <= irq_vector;
+                // q still holds the prior engine read at this edge.
+                eng_cr_h       <= q_control;
+                eng_cr_valid_h <= voice_control_valid[eng_voice];
+                eng_fc_h       <= q_fc;
+                eng_lvol_h     <= q_lvol;
+                eng_lvramp_h   <= q_lvramp;
+                eng_rvol_h     <= q_rvol;
+                eng_rvramp_h   <= q_rvramp;
+                eng_ecount_h   <= q_ecount;
+                eng_k1_h       <= q_k1;
+                eng_k1ramp_h   <= q_k1ramp;
+                eng_k2_h       <= q_k2;
+                eng_k2ramp_h   <= q_k2ramp;
+                eng_start_h    <= q_start;
+                eng_end_h      <= q_end;
+                eng_accum_h    <= q_accum;
+                eng_o4n1_h     <= q_o4n1;
+                eng_o3n1_h     <= q_o3n1;
+                eng_o3n2_h     <= q_o3n2;
+                eng_o2n1_h     <= q_o2n1;
+                eng_o2n2_h     <= q_o2n2;
+                eng_o1n1_h     <= q_o1n1;
+            end
+
+            // MLAB q is one cycle behind rd_addr (steal or eng).
+            if (host_rd_pending) begin
+                read_latch <= assemble_host_read(
+                    page_r, reg_r,
+                    voice_control_valid[page_r[4:0]],
+                    q_control, q_fc, q_lvol, q_lvramp, q_rvol, q_rvramp,
+                    q_ecount, q_k2, q_k2ramp, q_k1, q_k1ramp,
+                    q_start, q_end, q_accum,
+                    q_o4n1, q_o3n1, q_o3n2, q_o2n1, q_o2n2, q_o1n1,
+                    active_voices, mode, par_data, irqv_r, page_r,
+                    word_clock_start, word_clock_end, lr_clock_end
+                );
+                // Spec: reading IRQV clears the pending vector (after snapshot).
+                if ((reg_r == 4'he) && (page_r < 7'h40))
+                    irq_vector <= 8'h80;
+            end
+
+            if (irq_set && irq_vector[7])
+                irq_vector <= {3'd0, irq_voice};
+
+            if (host_we) begin
+                write_latch <= assembled_write;
+                if (host_byte == 2'd3) begin
+                    commit      <= 1'b1;
+                    commit_page <= current_page;
+                    commit_reg  <= host_reg;
+                    commit_data <= assembled_write;
+
+                    if (host_reg == 4'hf)
+                        current_page <= assembled_write[6:0];
+                    else if (current_page < 7'h20) begin
+                        unique case (host_reg)
+                            4'h0: voice_control_valid[voice] <= 1'b1;
+                            4'hb: active_voices <= assembled_write[4:0];
+                            4'hc: mode <= assembled_write[4:0];
+                            default: ;
+                        endcase
+                    end
+                    else if (current_page < 7'h40) begin
+                        unique case (host_reg)
+                            4'h0: voice_control_valid[voice] <= 1'b1;
+                            4'ha: word_clock_start <= assembled_write[6:0];
+                            4'hb: word_clock_end <= assembled_write[6:0];
+                            4'hc: lr_clock_end <= assembled_write[6:0];
+                            default: ;
+                        endcase
+                    end
+
+                    write_latch <= 32'd0;
+                end
+            end
+
+            if (!host_commit && eng_wr_cr)
+                voice_control_valid[eng_voice] <= 1'b1;
         end
 
-        // MLAB q is one cycle behind rd_addr (steal or eng).
-        if (host_rd_pending) begin
-            read_latch <= assemble_host_read(
-                page_r, reg_r,
-                voice_control_valid[page_r[4:0]],
-                q_control, q_fc, q_lvol, q_lvramp, q_rvol, q_rvramp,
-                q_ecount, q_k2, q_k2ramp, q_k1, q_k1ramp,
-                q_start, q_end, q_accum,
-                q_o4n1, q_o3n1, q_o3n2, q_o2n1, q_o2n2, q_o1n1,
-                active_voices, mode, par_data, irqv_r, page_r,
-                word_clock_start, word_clock_end, lr_clock_end
-            );
-            // Spec: reading IRQV clears the pending vector (after snapshot).
-            if ((reg_r == 4'he) && (page_r < 7'h40))
-                irq_vector <= 8'h80;
-        end
-
-        if (irq_set && irq_vector[7])
-            irq_vector <= {3'd0, irq_voice};
-
-        if (host_we) begin
-            write_latch <= assembled_write;
-            if (host_byte == 2'd3) begin
-                commit      <= 1'b1;
-                commit_page <= current_page;
-                commit_reg  <= host_reg;
-                commit_data <= assembled_write;
-
-                if (host_reg == 4'hf)
-                    current_page <= assembled_write[6:0];
-                else if (current_page < 7'h20) begin
-                    unique case (host_reg)
-                        4'h0: voice_control_valid[voice] <= 1'b1;
-                        4'hb: active_voices <= assembled_write[4:0];
-                        4'hc: mode <= assembled_write[4:0];
-                        default: ;
-                    endcase
-                end
-                else if (current_page < 7'h40) begin
-                    unique case (host_reg)
-                        4'h0: voice_control_valid[voice] <= 1'b1;
-                        4'ha: word_clock_start <= assembled_write[6:0];
-                        4'hb: word_clock_end <= assembled_write[6:0];
-                        4'hc: lr_clock_end <= assembled_write[6:0];
-                        default: ;
-                    endcase
-                end
-
-                write_latch <= 32'd0;
+        if (cold_init_active) begin
+            if (cold_init_voice == 5'h1f) begin
+                cold_init_active <= 1'b0;
+                voice_control_valid <= 32'hffff_ffff;
+            end
+            else begin
+                cold_init_voice <= cold_init_voice + 5'd1;
             end
         end
-
-        if (!host_commit && eng_wr_cr)
-            voice_control_valid[eng_voice] <= 1'b1;
     end
 end
 

@@ -53,17 +53,24 @@ task tick;
     @(posedge clk); #1;
 endtask
 
-// Dyna Gear configuration block. Layout documented in
-// rtl/mem/ssv_rom_loader.sv; byte 15 is the negated sum of bytes 0..14.
-task send_cfg;
+// Serialize one runtime profile exactly as the MRA index-1 block does.
+task send_cfg(input ssv_cfg_t c);
     logic [7:0] b [0:15];
     logic [7:0] sum;
     int i;
     begin
-        b[0]=8'h53; b[1]=8'd1;  b[2]=8'd1;  b[3]=8'd16;
-        b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'b11_10_01_00;
-        b[8]=8'b0000_0100;      b[9]=8'd0;  b[10]=8'd1; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd0; b[14]=8'd0;
+        b[0]=8'h53; b[1]=8'd2; b[2]={5'd0,c.prog_mb};
+        b[3]={2'd0,c.gfx_mb}; b[4]={3'd0,c.gfx_code_k};
+        b[5]={7'd0,c.gfx_code_mul3}; b[6]={5'd0,c.gfx_quarters};
+        b[7]=c.bank_map; b[8]={4'd0,c.bank_valid};
+        b[9]={c.extra_input_mode,c.lockout_inverted,
+              c.has_drifto_unknown,c.has_st010,1'b0,
+              c.irq_level1_line0,c.tile_code_identity};
+        b[10]={c.nvram_mode,c.system_input_mode,
+               c.extra_ram_mode,c.has_nvram,c.wdog_mode};
+        b[11]={4'd0,c.game_id};
+        b[12]={2'd0,c.sample_mb};
+        b[13]=c.visible_width_half; b[14]=c.visible_height;
         sum = 8'd0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = -sum;
@@ -92,6 +99,13 @@ task send_byte(input [26:0] addr, input [7:0] data);
 endtask
 
 initial begin
+    ssv_cfg_t dynagear_cfg;
+    ssv_cfg_t cairblad_cfg;
+    ssv_cfg_t st010_cfg;
+    ssv_cfg_t stmblade_cfg;
+    ssv_cfg_t ultrax_cfg;
+    logic [26:0] st010_start;
+
     rst = 1; mem_ready = 0; ioctl_download = 0; ioctl_index = 0;
     ioctl_wr = 0; ioctl_addr = 0; ioctl_dout = 0; sdr_wr_ack = 0;
     repeat (2) tick();
@@ -100,9 +114,10 @@ initial begin
     // The loader now requires an MRA <rom index="1"> block BEFORE index 0 and
     // discards index-0 bytes until it validates, so send the Dyna Gear record
     // first. The expectations below are unchanged by it.
-    send_cfg();
-    if (!cfg_valid)
-        $fatal(1, "configuration block was rejected");
+    dynagear_cfg = cfg_dynagear();
+    send_cfg(dynagear_cfg);
+    if (!cfg_valid || cfg.extra_ram_mode !== 2'd1 || cfg.nvram_mode !== 2'd0)
+        $fatal(1, "Dyna Gear configuration/RAM-map block was rejected");
 
     send_byte(0, 8'h34);
     send_byte(1, 8'h12);
@@ -154,13 +169,70 @@ initial begin
                "quarters did not share one 16-byte record: %h %h %h",
                q0_addr, q1_addr, q2_addr);
 
-    // The sample region no longer sits at its stream offset: the 16 MB
-    // graphics region displaced it to SDR_SAMPLES_BASE = 0x1160000.
+    // The sample region no longer sits at its stream offset.  Unlike the V60
+    // and packed graphics paths, it is a canonical ROM_REGION16_BE image: the
+    // even stream byte is the high half of the ES5506 word.
     send_byte(27'h0d00000, 8'hcd);
     send_byte(27'h0d00001, 8'hab);
     if (!sdr_wr_req || sdr_wr_addr !== (SDR_SAMPLES_BASE >> 1) ||
-        sdr_wr_din !== 16'habcd)
+        sdr_wr_din !== 16'hcdab)
         $fatal(1, "sample-region write mismatch got %h", sdr_wr_addr);
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    // Signed PCM and the zero-filled lane used by unpaired ROM_LOAD16_BYTE
+    // regions both discriminate the byte order directly.
+    send_byte(27'h0d00002, 8'h80);
+    send_byte(27'h0d00003, 8'h01);
+    if (!sdr_wr_req || sdr_wr_din !== 16'h8001)
+        $fatal(1, "signed sample word was byte-swapped: %h", sdr_wr_din);
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+    send_byte(27'h0d00004, 8'h80);
+    send_byte(27'h0d00005, 8'h00);
+    if (!sdr_wr_req || sdr_wr_din !== 16'h8000)
+        $fatal(1, "sparse sample lane was byte-swapped: %h", sdr_wr_din);
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    cairblad_cfg = cfg_cairblad();
+    send_cfg(cairblad_cfg);
+    if (!cfg_valid || !cfg.has_nvram || cfg.extra_ram_mode !== 2'd0 ||
+        cfg.nvram_mode !== 2'd2)
+        $fatal(1, "Cairblad NVRAM configuration flag was rejected");
+
+    // Non-power-of-two quarter sizes are a universal-profile boundary. A
+    // 24 MiB MAME region has 6 MiB quarters; the old shift-based mapper
+    // treated each as 2 MiB and routed later quarters to the wrong tile code.
+    stmblade_cfg = cfg_stmblade();
+    send_cfg(stmblade_cfg);
+    if (!cfg_valid || cfg.game_id !== stmblade_cfg.game_id ||
+        cfg.extra_ram_mode !== 2'd0 || cfg.nvram_mode !== 2'd1)
+        $fatal(1, "24 MiB configuration block was rejected");
+    send_byte(stream_gfx_start_cfg(stmblade_cfg) +
+              gfx_quarter_bytes_cfg(stmblade_cfg), 8'h77);
+    send_byte(stream_gfx_start_cfg(stmblade_cfg) +
+              gfx_quarter_bytes_cfg(stmblade_cfg) + 27'd1, 8'h66);
+    if (!sdr_wr_req ||
+        sdr_wr_addr !== (gfx_plane_addr(18'd0, 3'd0, 2'd1, 2'd0) >> 1) ||
+        sdr_wr_din !== 16'h6677)
+        $fatal(1, "24 MiB Q1 mapping mismatch got %h", sdr_wr_addr);
+    sdr_wr_ack = 1; tick();
+    sdr_wr_ack = 0; tick();
+
+    ultrax_cfg = cfg_ultrax(1'b0);
+    send_cfg(ultrax_cfg);
+    if (!cfg_valid || cfg.game_id !== ultrax_cfg.game_id ||
+        cfg.extra_ram_mode !== 2'd2 || cfg.nvram_mode !== 2'd0)
+        $fatal(1, "12 MiB configuration block was rejected");
+    send_byte(stream_gfx_start_cfg(ultrax_cfg) +
+              gfx_quarter_bytes_cfg(ultrax_cfg) * 27'd2, 8'h88);
+    send_byte(stream_gfx_start_cfg(ultrax_cfg) +
+              gfx_quarter_bytes_cfg(ultrax_cfg) * 27'd2 + 27'd1, 8'h99);
+    if (!sdr_wr_req ||
+        sdr_wr_addr !== (gfx_plane_addr(18'd0, 3'd0, 2'd2, 2'd0) >> 1) ||
+        sdr_wr_din !== 16'h9988)
+        $fatal(1, "12 MiB Q2 mapping mismatch got %h", sdr_wr_addr);
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
@@ -171,24 +243,38 @@ initial begin
     // against the map rather than against a transcription of it.
     // -----------------------------------------------------------------------
 
+    // Switch to a representative 4 MB program / 32 MB graphics / 8 MB sample
+    // ST010 profile. Its DSP image starts at 0x2c00000, not the obsolete
+    // Dyna-Gear-only 0x1100000 constant. This is the case that proves the
+    // universal loader uses the descriptor for both SDRAM and DSP data ROM.
+    st010_cfg = cfg_drifto94();
+    send_cfg(st010_cfg);
+    if (!cfg_valid || !cfg.has_st010 || !cfg.has_drifto_unknown)
+        $fatal(1, "ST010 configuration block was rejected");
+    st010_start = stream_st010_start_cfg(st010_cfg);
+    if (st010_start !== 27'h2c00000)
+        $fatal(1, "representative ST010 stream start mismatch %h", st010_start);
+
     // First program word.
     drom_clr = 1'b1; tick(); drom_clr = 1'b0; tick();
-    send_byte(STREAM_ST010,        8'h1a);
-    send_byte(STREAM_ST010 + 27'd1, 8'h2b);
-    if (!sdr_wr_req || sdr_wr_addr !== (st010_stream_dest(STREAM_ST010) >> 1) ||
+    send_byte(st010_start,         8'h1a);
+    send_byte(st010_start + 27'd1, 8'h2b);
+    if (!sdr_wr_req ||
+        sdr_wr_addr !== (st010_stream_dest_cfg(st010_cfg, st010_start) >> 1) ||
         sdr_wr_din !== 16'h2b1a)
         $fatal(1, "st010 program base mismatch got %h", sdr_wr_addr);
     // The SDRAM destination of instruction 0 must be what the fetch path will
     // ask for. If these two ever disagree the DSP executes garbage, so assert
     // the identity directly rather than trusting both sides separately.
-    if (st010_stream_dest(STREAM_ST010) !== st010_prg_byte_addr(14'd0))
+    if (st010_stream_dest_cfg(st010_cfg, st010_start) !==
+        st010_prg_byte_addr(14'd0))
         $fatal(1, "st010 program base is not st010_prg_byte_addr(0)");
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
     // Instruction 5 occupies st010.bin bytes 20..23 (4 bytes per dword).
-    send_byte(STREAM_ST010 + 27'd20, 8'h3c);
-    send_byte(STREAM_ST010 + 27'd21, 8'h4d);
+    send_byte(st010_start + 27'd20, 8'h3c);
+    send_byte(st010_start + 27'd21, 8'h4d);
     if (!sdr_wr_req ||
         sdr_wr_addr !== (st010_prg_byte_addr(14'd5) >> 1) ||
         sdr_wr_din !== 16'h4d3c)
@@ -200,12 +286,12 @@ initial begin
 
     // Data half. Byte offset 0x22/0x23 inside "dspdata" is word 0x11, and the
     // region is ROM_REGION16_BE, so the EVEN byte is the HIGH half.
-    send_byte(STREAM_ST010 + ST010_DATA_OFFSET + 27'h22, 8'hde);
-    send_byte(STREAM_ST010 + ST010_DATA_OFFSET + 27'h23, 8'had);
+    send_byte(st010_start + ST010_DATA_OFFSET + 27'h22, 8'hde);
+    send_byte(st010_start + ST010_DATA_OFFSET + 27'h23, 8'had);
     if (!drom_seen)
         $fatal(1, "dspdata byte did not write the on-chip data ROM");
-    if (drom_wa_l !== st010_drom_word(STREAM_ST010 + ST010_DATA_OFFSET +
-                                      27'h23))
+    if (drom_wa_l !== st010_drom_word_cfg(
+            st010_cfg, st010_start + ST010_DATA_OFFSET + 27'h23))
         $fatal(1, "dspdata word index mismatch got %h", drom_wa_l);
     if (drom_wa_l !== 11'h011)
         $fatal(1, "dspdata word index is not 0x011, got %h", drom_wa_l);
@@ -213,8 +299,8 @@ initial begin
         $fatal(1, "dspdata is not big-endian, got %h", drom_wd_l);
     // The same pair also lands in SDRAM at its identity offset.
     if (!sdr_wr_req ||
-        sdr_wr_addr !== (st010_stream_dest(STREAM_ST010 + ST010_DATA_OFFSET +
-                                          27'h22) >> 1))
+        sdr_wr_addr !== (st010_stream_dest_cfg(
+            st010_cfg, st010_start + ST010_DATA_OFFSET + 27'h22) >> 1))
         $fatal(1, "dspdata SDRAM address mismatch got %h", sdr_wr_addr);
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
@@ -222,8 +308,10 @@ initial begin
     // The whole region must sit in the free bank 2 and never touch the sample
     // region, which the open-ended `>= STREAM_SAMPLES` branch would have
     // claimed had the st010 test not been put ahead of it.
-    if (st010_stream_dest(STREAM_ST010)[SDR_AW:SDR_AW-1] !== 2'd2 ||
-        st010_stream_dest(STREAM_ST010 + STREAM_ST010_SIZE - 27'd1)
+    if (st010_stream_dest_cfg(st010_cfg, st010_start)
+            [SDR_AW:SDR_AW-1] !== 2'd2 ||
+        st010_stream_dest_cfg(
+            st010_cfg, st010_start + STREAM_ST010_SIZE - 27'd1)
             [SDR_AW:SDR_AW-1] !== 2'd2)
         $fatal(1, "st010 region left SDRAM bank 2");
 

@@ -6,6 +6,9 @@ module tb_ssv_cached_sprite_renderer;
 logic clk = 1'b0;
 always #5 clk = ~clk;
 
+ssv_pkg::ssv_cfg_t cfg;
+initial cfg = ssv_pkg::cfg_dynagear();
+
 `ifdef WAVES
 initial begin
     $dumpfile("D:/Arcade/AI/SVV/sim_output/cached_sprite_line_buckets_wave3/cached_sprite.vcd");
@@ -27,7 +30,7 @@ logic [15:0] spr_data;
 // is available in the same cycle. Model both banks here.
 logic [15:0] spr_data_next;
 logic rom_req;
-logic [24:4] rom_addr;
+logic [ssv_pkg::SDR_AW:4] rom_addr;
 logic [127:0] rom_data;
 logic rom_ack;
 logic [3:0] plot_we;
@@ -48,19 +51,36 @@ always_ff @(posedge clk) begin
 end
 
 logic rom_req_d;
+logic saw_rom_req;
+logic [ssv_pkg::SDR_AW:4] last_rom_addr;
 integer rom_delay;
 integer rom_quarter;
 always_ff @(posedge clk) begin
-    rom_req_d <= rom_req;
-    rom_ack <= 1'b0;
-    if (rom_req && !rom_req_d)
-        rom_delay <= 2;
-    if (rom_delay > 0) begin
-        rom_delay <= rom_delay - 1;
-        if (rom_delay == 1) begin
-            rom_data <= 128'h80;
-            rom_ack <= 1'b1;
-            rom_quarter <= rom_quarter + 1;
+    if (rst) begin
+        rom_req_d <= 1'b0;
+        saw_rom_req <= 1'b0;
+        last_rom_addr <= '0;
+        rom_delay <= 0;
+        rom_quarter <= 0;
+        rom_data <= 128'd0;
+        rom_ack <= 1'b0;
+    end
+    else begin
+        rom_req_d <= rom_req;
+        rom_ack <= 1'b0;
+        if (rom_req) begin
+            saw_rom_req <= 1'b1;
+            last_rom_addr <= rom_addr;
+        end
+        if (rom_req && !rom_req_d)
+            rom_delay <= 2;
+        if (rom_delay > 0) begin
+            rom_delay <= rom_delay - 1;
+            if (rom_delay == 1) begin
+                rom_data <= 128'h80;
+                rom_ack <= 1'b1;
+                rom_quarter <= rom_quarter + 1;
+            end
         end
     end
 end
@@ -119,6 +139,38 @@ always_ff @(posedge clk) begin
 end
 
 integer i;
+
+task automatic prove_deadline_abort(
+    input logic [5:0] wanted_state,
+    input string state_name
+);
+    rst = 1'b1;
+    cache_start = 1'b0;
+    cache_deadline = 1'b0;
+    repeat (4) @(negedge clk);
+    rst = 1'b0;
+    cycles = 0;
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    while ((dut.state != wanted_state) && (cycles < 10000))
+        @(negedge clk);
+    if (dut.state != wanted_state)
+        $fatal(1, "deadline phase %s not reached state=%0d",
+               state_name, dut.state);
+    if (!cache_busy)
+        $fatal(1, "deadline phase %s was not cache-busy", state_name);
+    cache_deadline = 1'b1;
+    @(negedge clk);
+    cache_deadline = 1'b0;
+    @(negedge clk);
+    if (cache_busy || !cache_ready || !cache_overflow)
+        $fatal(1,
+            "deadline phase %s did not abort busy=%0b ready=%0b overflow=%0b",
+            state_name, cache_busy, cache_ready, cache_overflow);
+    $display("DEADLINE_PHASE_ABORT %s", state_name);
+endtask
+
 initial begin
     for (i = 0; i < 131072; i = i + 1)
         sprite_mem[i] = 16'd0;
@@ -150,11 +202,6 @@ initial begin
     shadow_4bit = 1'b0;
     spr_data = 16'd0;
     spr_data_next = 16'd0;
-    rom_data = 128'd0;
-    rom_ack = 1'b0;
-    rom_req_d = 1'b0;
-    rom_delay = 0;
-    rom_quarter = 0;
     plots = 0;
     first_x = -1;
     cycles = 0;
@@ -181,8 +228,10 @@ initial begin
     @(posedge clk);
     if (plots != 1 || first_x != 10)
         $fatal(1, "plot coverage count=%0d first=%0d", plots, first_x);
-    if (rom_addr < 21'h10000)
-        $fatal(1, "graphics ROM address outside sprite region: %h", rom_addr);
+    if (!saw_rom_req || last_rom_addr < 21'h10000)
+        $fatal(1,
+            "graphics ROM request missing/outside sprite region: saw=%0b addr=%h",
+            saw_rom_req, last_rom_addr);
     // An unbucketed line must complete through the synchronous count read
     // without issuing pixels from a stale line entry.
     target_y = 9'd19;
@@ -195,6 +244,77 @@ initial begin
     @(posedge clk);
     if (plots != 1)
         $fatal(1, "empty line produced pixels count=%0d", plots);
+
+    // Prove the paired global read preserves distinct words 2 and 3. These
+    // offsets cancel in Y and move X by five pixels, while the cached snapshot
+    // exposes the exact four-word ordering independently of rendered output.
+    sprite_mem[2] = 16'h0005;
+    sprite_mem[3] = 16'h0002;
+    sprite_mem[16'h1002] = 16'd10;
+    sprite_mem[16'h1003] = 16'h03e1;
+    plots = 0;
+    first_x = -1;
+    target_y = 9'd20;
+    @(negedge clk);
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+    wait (cache_ready);
+    if (cache_overflow || dut.cache_count != 1 ||
+        dut.descriptor_cache[0][95:64] != 32'h0005_0002)
+        $fatal(1,
+               "paired global word order mismatch overflow=%0b count=%0d words=%h",
+               cache_overflow, dut.cache_count,
+               dut.descriptor_cache[0][95:64]);
+
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    wait (done);
+    @(posedge clk);
+    if (plots != 1 || first_x != 15)
+        $fatal(1, "paired global render count=%0d first=%0d",
+               plots, first_x);
+
+    // Two consecutive global entries with the same ordinary descriptor are
+    // idempotent in MAME draw order. The build-time suppression must remove
+    // the second cache slot, while retaining the single visible draw.
+    sprite_mem[0] = 16'h6000;
+    sprite_mem[1] = 16'h0400;
+    sprite_mem[2] = 16'd0;
+    sprite_mem[3] = 16'd0;
+    sprite_mem[4] = 16'h6000;
+    sprite_mem[5] = 16'h0400;
+    sprite_mem[6] = 16'd0;
+    sprite_mem[7] = 16'd0;
+    sprite_mem[8] = 16'd0;
+    sprite_mem[9] = 16'h8000;
+    sprite_mem[16'h1002] = 16'd10;
+    sprite_mem[16'h1003] = 16'h03e3;
+    plots = 0;
+    first_x = -1;
+    target_y = 9'd20;
+    @(negedge clk);
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+    wait (cache_ready);
+    if (cache_overflow || dut.cache_count != 1)
+        $fatal(1, "ordinary duplicate cache mismatch overflow=%0b count=%0d",
+               cache_overflow, dut.cache_count);
+
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    wait (done);
+    @(posedge clk);
+    if (plots != 1 || first_x != 10)
+        $fatal(1, "ordinary duplicate render count=%0d first=%0d",
+               plots, first_x);
 
     // MAME draw_sprites() identifies this as tilemap scroll group 1:
     // local count is nonzero, code is 1, attr is zero, x size is one
@@ -344,6 +464,24 @@ initial begin
     $display("DENSE_LINE cycles=%0d limit=2691", cycles);
     if (cycles > 2691)
         $fatal(1, "dense line deadline cycles=%0d limit=2691", cycles);
+
+    // The physical raster deadline can occur during any cache-build phase,
+    // not just BUILD_ADVANCE. Exercise the bucket, prefix and reindex families
+    // explicitly so no multi-cycle phase can miss the pulse and suppress all
+    // full-core line-buffer swaps for the next visible frame.
+    for (i = 0; i < 4096; i = i + 1)
+        sprite_mem[i] = 16'd0;
+    sprite_mem[0] = 16'h6000;
+    sprite_mem[1] = 16'h0400;
+    sprite_mem[5] = 16'h8000;
+    sprite_mem[16'h1000] = 16'd0;
+    sprite_mem[16'h1001] = 16'h0001;
+    sprite_mem[16'h1002] = 16'd10;
+    sprite_mem[16'h1003] = 16'h03e3;
+    prove_deadline_abort(dut.BUILD_BUCKET_WRITE, "bucket");
+    prove_deadline_abort(dut.BUILD_PREFIX_WRITE, "prefix");
+    prove_deadline_abort(dut.BUILD_REINDEX_WAIT, "reindex");
+    prove_deadline_abort(dut.BUILD_REINDEX_BUCKET_WRITE, "reindex_bucket");
 
     // ------------------------------------------------------------------
     // Vblank deadline abort.

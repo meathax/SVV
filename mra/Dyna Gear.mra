@@ -7,8 +7,9 @@
   <year>1993</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
+  <rotation>horizontal</rotation>
   <rom index="1">
-    <part>5301011011000300040401000000007E</part>
+    <part>53020110110003000440090004A8F09D</part>
   </rom>
   <rom index="0" zip="dynagear.zip">
     <!-- program -->

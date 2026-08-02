@@ -53,8 +53,15 @@ module ssv_es5506_voice (
     output logic [15:0] eng_k1_w,
     output logic [15:0] eng_k2_w,
     output logic [8:0]  eng_ecount_w,
+    // IRQV is available when its active-low vector output is inactive.
+    // A voice with CR.IRQ set retries on each scan until this is true.
+    input  logic        irq_ready,
     output logic        eng_irq_set,
     output logic [4:0]  eng_irq_voice,
+
+    // An ECOUNT host write restarts that voice's slow filter-ramp cadence.
+    input  logic        host_ecount_write,
+    input  logic [4:0]  host_ecount_voice,
 
     output logic        sdr_req,
     output logic [ssv_pkg::SDR_AW:1] sdr_addr,
@@ -68,6 +75,27 @@ module ssv_es5506_voice (
 );
 
 import ssv_pkg::*;
+
+function automatic logic [SDR_AW:1] sample_address(
+    input ssv_cfg_t cfg_in,
+    input logic [1:0] bank,
+    input logic [31:0] accum_in
+);
+    logic [1:0] slot;
+    begin
+        case (bank)
+            2'd0: slot = cfg_in.bank_map[1:0];
+            2'd1: slot = cfg_in.bank_map[3:2];
+            2'd2: slot = cfg_in.bank_map[5:4];
+            default: slot = cfg_in.bank_map[7:6];
+        endcase
+        // Each loaded ES5506 bank occupies one 4 MiB slot, or 2^21 16-bit
+        // words. Vasara and Vasara 2 populate banks 0 and 1, while Dyna Gear
+        // aliases its active bank to slot 0.
+        sample_address = SDR_SAMPLES_BASE[SDR_AW:1] +
+                         (26'(slot) << 21) + {5'd0, accum_in[31:11]};
+    end
+endfunction
 
 localparam logic [15:0] CR_STOP = 16'h0003;
 localparam logic [15:0] CR_DIR  = 16'h0040;
@@ -114,13 +142,12 @@ logic [31:0] vstart, vend, accum;
 logic [17:0] o4n1, o3n1, o3n2, o2n1, o2n2, o1n1;
 // Pipeline: lerp/loop → poles 1-2 → poles 3-4 → volume/mix (timing).
 logic        proc_active;
-logic        proc_do_irq;
 logic [31:0] proc_accn;
 logic [15:0] proc_crn;
 logic signed [17:0] proc_xin;
 logic [17:0] proc_p1, proc_p2, proc_p3, proc_p4;
 
-wire stopped = !cr_valid || |(cr & CR_STOP) || |(cr & CR_CMPD);
+wire stopped = !cr_valid || |(cr & CR_STOP);
 
 function automatic logic [15:0] vol_gain(input logic [15:0] vol);
     logic [11:0] idx;
@@ -220,7 +247,6 @@ always_ff @(posedge clk) begin
         eng_ecount_w <= '0;
         eng_irq_voice <= '0;
         proc_active <= 1'b0;
-        proc_do_irq <= 1'b0;
         proc_accn <= '0;
         proc_crn <= '0;
         proc_xin <= '0;
@@ -287,7 +313,7 @@ always_ff @(posedge clk) begin
                     o1n1     <= eng_o1n1;
                     if (!eng_cr_valid ||
                         |((eng_cr_valid ? eng_cr : 16'h0003) & CR_STOP) ||
-                        ((eng_cr_valid ? eng_cr : 16'h0) & CR_CMPD)) begin
+                        (eng_cr_valid && (eng_start == eng_end))) begin
                         s1 <= '0;
                         s2 <= '0;
                         state <= S_PROC;
@@ -307,8 +333,8 @@ always_ff @(posedge clk) begin
                         // bank_map selects which loaded sample slot this CR bank
                         // reads from, which is how ROM_COPY aliases are honoured
                         // without duplicating the data in SDRAM.
-                        sdr_addr <= SDR_SAMPLES_BASE[SDR_AW:1] +
-                                    {5'd0, eng_accum[31:11]};
+                        sdr_addr <= sample_address(
+                            cfg, eng_cr[15:14], eng_accum);
                         sdr_req  <= 1'b1;
                         got_ack  <= 1'b0;
                         state    <= S_WAIT1;
@@ -321,8 +347,7 @@ always_ff @(posedge clk) begin
                 end
 
                 S_REQ2: begin
-                    sdr_addr <= SDR_SAMPLES_BASE[SDR_AW:1] +
-                                ({3'd0, accum[31:11]} + 24'd1);
+                    sdr_addr <= sample_address(cfg, cr[15:14], accum) + 1'd1;
                     sdr_req  <= 1'b1;
                     got_ack  <= 1'b0;
                     state    <= S_WAIT2;
@@ -336,7 +361,6 @@ always_ff @(posedge clk) begin
                 S_PROC: begin
                     // Stage 1: lerp + accumulator/loop/IRQ only (no filters).
                     proc_active <= 1'b0;
-                    proc_do_irq <= 1'b0;
                     proc_accn <= accum;
                     proc_crn <= cr;
                     proc_xin <= o1n1;
@@ -345,33 +369,46 @@ always_ff @(posedge clk) begin
                     proc_p3 <= o3n1;
                     proc_p4 <= o4n1;
 
-                    if (!stopped) begin
+                    if (cr_valid && !(cr & CR_STOP) && (vstart == vend)) begin
+                        // A degenerate range stops before any sample fetch or
+                        // output.  S_START bypassed SDRAM for this case.
+                        proc_crn <= cr | 16'h0001;
+                    end else if (!stopped) begin
                         logic signed [15:0] ip;
                         logic [31:0] accn;
                         logic [15:0] crn;
-                        logic do_irq;
 
-                        ip  = lerp(s1, s2, accum);
+                        ip  = (cr & CR_CMPD)
+                            ? lerp(es5506_ulaw_decode(s1[15:8]),
+                                   es5506_ulaw_decode(s2[15:8]), accum)
+                            : lerp(s1, s2, accum);
                         accn = (cr & CR_DIR) ? (accum - {15'd0, fc})
                                              : (accum + {15'd0, fc});
                         crn = cr;
-                        do_irq = 1'b0;
 
                         if (!(cr & CR_DIR) && (accn > vend) && !(cr & CR_LEI)) begin
-                            if (cr & CR_IRQE) begin crn = crn | CR_IRQ; do_irq = 1'b1; end
+                            if (cr & CR_IRQE) crn = crn | CR_IRQ;
                             unique case (cr & (CR_LPE|CR_BLE))
-                                16'h0000, CR_BLE: crn = crn | 16'h0001;
+                                16'h0000: crn = crn | 16'h0001;
                                 CR_LPE: accn = vstart + (accn - vend);
+                                CR_BLE: begin
+                                    accn = vstart + (accn - vend);
+                                    crn = (crn & ~(CR_LPE | CR_BLE)) | CR_LEI;
+                                end
                                 default: begin
                                     accn = vend - (accn - vend);
                                     crn = crn ^ CR_DIR;
                                 end
                             endcase
                         end else if ((cr & CR_DIR) && (accn < vstart) && !(cr & CR_LEI)) begin
-                            if (cr & CR_IRQE) begin crn = crn | CR_IRQ; do_irq = 1'b1; end
+                            if (cr & CR_IRQE) crn = crn | CR_IRQ;
                             unique case (cr & (CR_LPE|CR_BLE))
-                                16'h0000, CR_BLE: crn = crn | 16'h0001;
+                                16'h0000: crn = crn | 16'h0001;
                                 CR_LPE: accn = vend - (vstart - accn);
+                                CR_BLE: begin
+                                    accn = vend - (vstart - accn);
+                                    crn = (crn & ~(CR_LPE | CR_BLE)) | CR_LEI;
+                                end
                                 default: begin
                                     accn = vstart + (vstart - accn);
                                     crn = crn ^ CR_DIR;
@@ -380,7 +417,6 @@ always_ff @(posedge clk) begin
                         end
 
                         proc_active <= 1'b1;
-                        proc_do_irq <= do_irq;
                         proc_accn <= accn;
                         proc_crn <= crn;
                         proc_xin <= {{2{ip[15]}}, ip};
@@ -449,7 +485,6 @@ always_ff @(posedge clk) begin
                     if (proc_active) begin
                         logic signed [31:0] aL, aR;
                         logic [15:0] gL, gR;
-                        logic [3:0] fcc;
 
                         gL = vol_gain(lvol);
                         gR = vol_gain(rvol);
@@ -471,49 +506,55 @@ always_ff @(posedge clk) begin
                         eng_o3n2_w   <= o3n1;
                         eng_o3n1_w   <= proc_p3;
                         eng_o4n1_w   <= proc_p4;
-                        if (proc_crn != cr) begin
-                            eng_wr_cr <= 1'b1;
-                            eng_cr_w  <= proc_crn;
-                        end
-                        if (proc_do_irq) begin
-                            eng_irq_set <= 1'b1;
-                            eng_irq_voice <= voice_i;
-                        end
+                    end
 
-                        if (ecount != 9'd0) begin
-                            logic signed [16:0] tmp;
-                            fcc = filtcount[voice_i] + 4'd1;
-                            filtcount[voice_i] <= fcc;
-                            eng_wr_env <= 1'b1;
-                            eng_ecount_w <= ecount - 9'd1;
-                            if (lvramp != 8'd0) begin
-                                tmp = $signed({1'b0, lvol}) + $signed({{9{lvramp[7]}}, lvramp});
-                                if (tmp < 0) eng_lvol_w <= 16'd0;
-                                else if (tmp > 17'sh0ffff) eng_lvol_w <= 16'hffff;
-                                else eng_lvol_w <= tmp[15:0];
-                            end
-                            if (rvramp != 8'd0) begin
-                                tmp = $signed({1'b0, rvol}) + $signed({{9{rvramp[7]}}, rvramp});
-                                if (tmp < 0) eng_rvol_w <= 16'd0;
-                                else if (tmp > 17'sh0ffff) eng_rvol_w <= 16'hffff;
-                                else eng_rvol_w <= tmp[15:0];
-                            end
-                            if (k1ramp[7:0] != 8'd0 && (!k1ramp[8] || fcc[2:0] == 3'd0)) begin
-                                tmp = $signed({1'b0, k1}) + $signed({{9{k1ramp[7]}}, k1ramp[7:0]});
-                                if (tmp < 0) eng_k1_w <= 16'd0;
-                                else if (tmp > 17'sh0ffff) eng_k1_w <= 16'hffff;
-                                else eng_k1_w <= tmp[15:0];
-                            end
-                            if (k2ramp[7:0] != 8'd0 && (!k2ramp[8] || fcc[2:0] == 3'd0)) begin
-                                tmp = $signed({1'b0, k2}) + $signed({{9{k2ramp[7]}}, k2ramp[7:0]});
-                                if (tmp < 0) eng_k2_w <= 16'd0;
-                                else if (tmp > 17'sh0ffff) eng_k2_w <= 16'hffff;
-                                else eng_k2_w <= tmp[15:0];
-                            end
-                        end
-                    end else if (ecount != 9'd0) begin
+                    // CR.IRQ is a per-voice pending bit.  Leave it set while
+                    // IRQV is occupied, then promote and clear it on a later
+                    // scan after the host acknowledges the previous vector.
+                    if ((proc_crn & CR_IRQ) && irq_ready) begin
+                        eng_irq_set <= 1'b1;
+                        eng_irq_voice <= voice_i;
+                        eng_wr_cr <= 1'b1;
+                        eng_cr_w <= proc_crn & ~CR_IRQ;
+                    end else if (proc_crn != cr) begin
+                        eng_wr_cr <= 1'b1;
+                        eng_cr_w <= proc_crn;
+                    end
+
+                    // Envelopes advance for stopped and running voices alike.
+                    // Slow negative K ramps test the old counter, so the first
+                    // step occurs at count zero, then eight, sixteen, ...
+                    if (ecount != 9'd0) begin
+                        logic signed [16:0] tmp;
+                        filtcount[voice_i] <= filtcount[voice_i] + 4'd1;
                         eng_wr_env <= 1'b1;
                         eng_ecount_w <= ecount - 9'd1;
+                        if (lvramp != 8'd0) begin
+                            tmp = $signed({1'b0, lvol}) + $signed({{9{lvramp[7]}}, lvramp});
+                            if (tmp < 0) eng_lvol_w <= 16'd0;
+                            else if (tmp > 17'sh0ffff) eng_lvol_w <= 16'hffff;
+                            else eng_lvol_w <= tmp[15:0];
+                        end
+                        if (rvramp != 8'd0) begin
+                            tmp = $signed({1'b0, rvol}) + $signed({{9{rvramp[7]}}, rvramp});
+                            if (tmp < 0) eng_rvol_w <= 16'd0;
+                            else if (tmp > 17'sh0ffff) eng_rvol_w <= 16'hffff;
+                            else eng_rvol_w <= tmp[15:0];
+                        end
+                        if (k1ramp[7:0] != 8'd0 &&
+                            (!k1ramp[8] || filtcount[voice_i][2:0] == 3'd0)) begin
+                            tmp = $signed({1'b0, k1}) + $signed({{9{k1ramp[7]}}, k1ramp[7:0]});
+                            if (tmp < 0) eng_k1_w <= 16'd0;
+                            else if (tmp > 17'sh0ffff) eng_k1_w <= 16'hffff;
+                            else eng_k1_w <= tmp[15:0];
+                        end
+                        if (k2ramp[7:0] != 8'd0 &&
+                            (!k2ramp[8] || filtcount[voice_i][2:0] == 3'd0)) begin
+                            tmp = $signed({1'b0, k2}) + $signed({{9{k2ramp[7]}}, k2ramp[7:0]});
+                            if (tmp < 0) eng_k2_w <= 16'd0;
+                            else if (tmp > 17'sh0ffff) eng_k2_w <= 16'hffff;
+                            else eng_k2_w <= tmp[15:0];
+                        end
                     end
                     state <= S_NEXT;
                 end
@@ -548,6 +589,10 @@ always_ff @(posedge clk) begin
                 default: state <= S_START;
             endcase
         end
+
+        // Host ECOUNT writes win over an envelope update on the same clock.
+        if (host_ecount_write)
+            filtcount[host_ecount_voice] <= 4'd0;
     end
 end
 

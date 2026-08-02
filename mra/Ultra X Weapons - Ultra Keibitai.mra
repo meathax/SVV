@@ -3,15 +3,15 @@
        Stream offsets: program 0x0000000-0x01FFFFF; graphics 0x0200000-0x0AFFFFF; samples 0x0B00000-0x12FFFFF
        ES5506 bank aliases (ROM_COPY in MAME, address aliases rather than data, so not duplicated here): ensoniq.2 aliases ensoniq.0; ensoniq.3 aliases ensoniq.1
        Switches MAME defines that an MRA cannot express, left out and still at their default: Region (DSW2 mask 0x14, non-contiguous)
-       NOT YET SUPPORTED by the SSV core: rtl/mem/ssv_rom_loader.sv takes a fixed Dyna Gear stream (1 MB program, graphics as three 4 MB quarters, 4 MB samples) and this set does not match it. The ROM description below is correct and will work once the loader is generalised. -->
+       Runs on the SSV core. -->
   <name>Ultra X Weapons / Ultra Keibitai</name>
   <setname>ultrax</setname>
   <year>1995</year>
   <manufacturer>Banpresto / Tsuburaya Productions / Seta</manufacturer>
   <rbf>SSV</rbf>
-  <!-- MAME rotation ROT270; the core does not rotate. -->
+  <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>5301020C0F0103440F02010F00000026</part>
+    <part>5302020C0F0103440F02110808A8F07C</part>
   </rom>
   <rom index="0" zip="ultrax.zip">
     <!-- program -->

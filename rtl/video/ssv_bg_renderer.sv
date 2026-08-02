@@ -40,7 +40,7 @@ module ssv_bg_renderer (
     output logic        done
 );
 
-localparam logic [8:0] LAST_PIXEL = 9'd335;
+wire [8:0] LAST_PIXEL = ssv_pkg::active_width_cfg(cfg) - 1'd1;
 
 typedef enum logic [4:0] {
     IDLE, WAIT_CLEAR, ROW_DECIDE,

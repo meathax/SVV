@@ -71,7 +71,8 @@ module upd96050 (
     // Instruction-issue enable. One instruction is started per clk on which
     // `ce` is high while the core is idle. Tie high to run at clk/5.
     input               ce,
-    input               rst,
+    input               rst,       // cold/download reset: device_start state
+    input               soft_rst,  // /RESET: MAME device_reset retention
 
     //------------------------------------------------------------------------
     // Program memory: 16384 x 24. MAME fetches opcode = read_dword(pc) >> 8
@@ -518,14 +519,40 @@ wire [15:0] dsp_ram_q;
 wire [15:0] host_ram_q;
 logic       host_ram_high_q;
 
+// The inferred M10Ks have no runtime clear pin. Walk port A once on every
+// cold/download reset so a newly selected ST010 descriptor gets MAME's clean
+// device-start data RAM. Watchdog soft_rst deliberately does not arm this.
+logic        cold_rst_q = 1'b0;
+logic        ram_clear_active = 1'b0;
+logic [10:0] ram_clear_addr = 11'd0;
+always_ff @(posedge clk) begin
+    cold_rst_q <= rst;
+    if (rst && !cold_rst_q) begin
+        ram_clear_active <= 1'b1;
+        ram_clear_addr   <= 11'd0;
+    end
+    else if (ram_clear_active) begin
+        if (ram_clear_addr == 11'h7ff)
+            ram_clear_active <= 1'b0;
+        else
+            ram_clear_addr <= ram_clear_addr + 11'd1;
+    end
+end
+
+wire [10:0] dataram_a_addr = ram_clear_active ? ram_clear_addr
+                                               : dsp_ram_addr;
+wire [15:0] dataram_a_data = ram_clear_active ? 16'h0000 : ram_wdata;
+wire        dataram_a_we   = ram_clear_active ||
+                             (ram_we && (state == S_EXEC));
+
 s32_big_dpram #(
     .ADDR_WIDTH(11), .DATA_WIDTH(16), .BE_WIDTH(2), .NUM_WORDS(2048)
 ) dataram (
     .clock_a(clk),
-    .address_a(dsp_ram_addr),
-    .data_a(ram_wdata),
+    .address_a(dataram_a_addr),
+    .data_a(dataram_a_data),
     .byteena_a(2'b11),
-    .wren_a(ram_we && (state == S_EXEC)),
+    .wren_a(dataram_a_we),
     .q_a(dsp_ram_q),
 
     .clock_b(clk),
@@ -564,13 +591,9 @@ assign dbg_idb = idb; assign dbg_sp = sp;
 
 always_ff @(posedge clk) begin
     if (rst) begin
-        // MAME splits this: device_start (upd7725.cpp:138-158) zeroes the whole
-        // register file and the data RAM at power-on, while /RESET
-        // (device_reset, :165-181) only clears PC, SR, both flag words and the
-        // serial acks. An FPGA has no such split, so `rst` behaves as power-on.
-        // Consequence to be aware of: a mid-run reset here also clears
-        // A/B/K/L/DP/RP/TR/TRB/DR, which MAME's /RESET would preserve. The SSV
-        // only resets the DSP at power-on, so nothing observes the difference.
+        // MAME device_start establishes a completely clean device. Data RAM
+        // is cleared by the port-A walker above because inferred M10Ks have no
+        // runtime array reset.
         state      <= S_IDLE;
         pc         <= 14'd0;
         sp         <= 4'd0;
@@ -590,6 +613,34 @@ always_ff @(posedge clk) begin
         retire_r   <= 1'b0;
         ram_p      <= 16'd0; ram_k <= 16'd0; rom_q <= 16'd0;
         for (i = 0; i < 16; i = i + 1) stack[i] <= 14'd0;
+    end
+    else if (ram_clear_active) begin
+        // A one-clock cold pulse can leave the M10K walker running after rst
+        // falls. Do not let the DSP observe a partially cleared RAM image.
+        state      <= S_IDLE;
+        ir_valid   <= 1'b0;
+        irq_firing <= 2'd0;
+        int_q      <= 1'b0;
+        retire_r   <= 1'b0;
+    end
+    else if (soft_rst) begin
+        // MAME necdsp_device::device_reset(): /RESET clears PC, SR, A/B flags
+        // and interrupt/serial handshake state. General registers, SP/stack,
+        // and all data RAM survive. Abort the RTL's in-flight microsequence so
+        // execution restarts cleanly at the retained-state PC zero.
+        state      <= S_IDLE;
+        pc         <= 14'd0;
+        flaga      <= 6'd0;
+        flagb      <= 6'd0;
+        sr_rqm     <= 1'b0; sr_usf1 <= 1'b0; sr_usf0 <= 1'b0; sr_drs <= 1'b0;
+        sr_dma     <= 1'b0; sr_drc  <= 1'b0; sr_soc  <= 1'b0; sr_sic <= 1'b0;
+        sr_ei      <= 1'b0; sr_p1   <= 1'b0; sr_p0   <= 1'b0;
+        ir         <= 24'd0;
+        ir_valid   <= 1'b0;
+        irq_firing <= 2'd0;
+        int_q      <= 1'b0;
+        retire_r   <= 1'b0;
+        ram_p      <= 16'd0; ram_k <= 16'd0; rom_q <= 16'd0;
     end
     else begin
         retire_r <= 1'b0;

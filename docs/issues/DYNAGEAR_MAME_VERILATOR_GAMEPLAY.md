@@ -1,5 +1,9 @@
 # Dyna Gear MAME / Verilator gameplay validation
 
+> Historical evidence only: this report predates the current universal-model
+> matched-gameplay gate. It does not satisfy the owner-required current
+> same-run Verilator gameplay proof.
+
 ## Result
 
 The Verilated core now accepts coin and Start, clears character selection,

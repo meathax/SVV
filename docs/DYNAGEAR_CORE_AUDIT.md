@@ -237,8 +237,10 @@ and `clk_ram` ~13%.
 The V60 and ES5506 voice multicycle exceptions in `SSV.sdc` were re-checked
 against the RTL this pass and hold up:
 
-- `ce_cpu` is a 21702/65536 accumulator at 48.32 MHz → 16.00 MHz, and because
-  21702×2 < 65536 the gap between enables is never smaller than 3 `clk_sys`.
+- `ce_cpu` is a 21701/65536 accumulator at 48.317307 MHz → 15.9994 MHz, and because
+  21701×2 < 65536 the gap between enables is never smaller than 3 `clk_sys`.
+  Relative to the 9710 pixel accumulator it is within 3.7 ppm of the PCB's
+  exact 704:315 CPU-to-pixel clock ratio.
   `-setup 3 -hold 2` is therefore the correct pairing (hold 2 pulls the hold
   check back to the launch edge, i.e. the normal same-edge check).
 - Every register in `s32_v60` and `s32_v60_bus` sits inside a single

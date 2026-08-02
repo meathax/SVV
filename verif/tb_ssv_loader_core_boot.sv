@@ -68,7 +68,7 @@ ssv_rom_loader loader (
 
 ssv_core core (
     .cfg(ssv_pkg::cfg_dynagear()),
-    .clk_sys(clk), .rst(core_rst), .ce_cpu(ce_cpu),
+    .clk_sys(clk), .rst(core_rst), .cold_rst(core_rst), .ce_cpu(ce_cpu),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -186,10 +186,10 @@ task automatic send_cfg;
     logic [7:0] sum;
     int i;
     begin
-        b[0]=8'h53; b[1]=8'd1;  b[2]=8'd1;  b[3]=8'd16;
+        b[0]=8'h53; b[1]=8'd2;  b[2]=8'd1;  b[3]=8'd16;
         b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'b11_10_01_00;
-        b[8]=8'b0000_0100;      b[9]=8'd0;  b[10]=8'd1; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd0; b[14]=8'd0;
+        b[8]=8'b0000_0100;      b[9]=8'h40; b[10]=8'h09; b[11]=8'd0;
+        b[12]=8'd0; b[13]=8'd168; b[14]=8'd240;
         sum = 8'd0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = -sum;

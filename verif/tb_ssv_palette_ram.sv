@@ -45,7 +45,9 @@ initial begin
         $fatal(1);
     end
 
-    // CPU reads retain the original 16-bit word organization.
+    // The even word is full-width. The odd word is physical 00RR in this core:
+    // MAME retains the unused written upper byte, but no qualified trace reads
+    // it and widening costs 32 M10Ks on the already RAM-bound target.
     @(negedge clk);
     cpu_addr = 16'h2468;
     repeat (2) @(posedge clk);
@@ -55,7 +57,7 @@ initial begin
     cpu_addr = 16'h2469;
     repeat (2) @(posedge clk);
     #1;
-    if (cpu_q !== 16'haa56) $fatal(1, "odd CPU word mismatch");
+    if (cpu_q !== 16'h0056) $fatal(1, "odd CPU 00RR word mismatch");
 
     $display("PASS tb_ssv_palette_ram");
     $finish;
