@@ -250,6 +250,7 @@ wire [15:0] spr_video_q;
 wire [15:0] spr_video_next_q;
 wire [14:0] line_color;
 wire [23:0] palette_video_rgb;
+wire [23:0] palette_background_rgb;
 integer scroll_init_i;
 
 s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) work_ram (
@@ -318,7 +319,8 @@ assign spr_video_next_q = spr_odd_video_q;
 ssv_palette_ram palette_ram (
     .clk(clk_sys), .cpu_addr(pal_addr), .cpu_data(m_wdata),
     .cpu_be(m_be), .cpu_we(m_req && m_we && sel_palette), .cpu_q(pal_q),
-    .video_index(line_color), .video_rgb(palette_video_rgb)
+    .video_index(line_color), .video_rgb(palette_video_rgb),
+    .background_rgb(palette_background_rgb)
 );
 
 always_ff @(posedge clk_sys) begin
@@ -597,7 +599,14 @@ end
 wire crtc_visible = (hcnt >= crtc_min_x) && (hcnt < active_width) &&
                     (vcnt >= crtc_min_y) && (vcnt < active_height);
 wire video_active = video_enable && crtc_visible && !hb && !vb;
-wire [23:0] core_pixel   = video_active ? palette_video_rgb : 24'h000000;
+// MAME's screen_update() first bitmap.fill(0), then returns early when the
+// video-enable latch is clear.  The visible result is palette pen 0, not a
+// hard black RGB value; this matters when boot software has already loaded
+// the backdrop colour before a blanking write.
+wire [23:0] core_pixel =
+    (crtc_visible && !hb && !vb) ?
+        (video_enable ? palette_video_rgb : palette_background_rgb) :
+        24'h000000;
 
 assign rgb = core_pixel;
 

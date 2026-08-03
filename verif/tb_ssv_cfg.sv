@@ -77,7 +77,8 @@ endtask
 initial begin
     // 1. Decomposition self-check: the table must actually describe the size.
     for (int g = 0; g < 4; g++) begin
-        int unsigned m = games[g].factor << games[g].k;
+        int unsigned m;
+        m = games[g].factor << games[g].k;
         if (m != games[g].elements) begin
             errors++;
             $display("FAIL %s: factor<<k = %0x but elements = %0x",
@@ -92,8 +93,10 @@ initial begin
 
     // 2. The modulo itself.
     for (int g = 0; g < 4; g++) begin
-        ssv_cfg_t c = cfg_for(games[g].k, games[g].mul3);
-        int unsigned e = games[g].elements;
+        ssv_cfg_t c;
+        int unsigned e;
+        c = cfg_for(games[g].k, games[g].mul3);
+        e = games[g].elements;
 
         // Boundaries: last in range, first out of range, and the 2x/3x wraps.
         check_one(games[g].name, c, e, 20'd0);
@@ -112,7 +115,8 @@ initial begin
     // 3. Dyna Gear must be untouched: its modulus is 2^17, so the wrap is
     //    exactly the old mask and the generalisation cannot have moved it.
     begin
-        ssv_cfg_t c = cfg_dynagear();
+        ssv_cfg_t c;
+        c = cfg_dynagear();
         for (int unsigned code = 0; code < 32'h100000; code += 337) begin
             if (wrap_code_cfg(c, 20'(code)) !== 18'(code[16:0])) begin
                 errors++;
@@ -230,10 +234,13 @@ initial begin
     //    non-power-of-two title -- so had the mask still been in place,
     //    section 2 above would have failed.
     for (int g = 0; g < 4; g++) begin
-        int unsigned e = games[g].elements;
-        int unsigned disagreements = 0;
+        int unsigned e;
+        int unsigned disagreements;
+        e = games[g].elements;
+        disagreements = 0;
         for (int unsigned code = 0; code < 32'h100000; code += 1021) begin
-            logic [17:0] old_mask = 18'(code[16:0]);
+            logic [17:0] old_mask;
+            old_mask = 18'(code[16:0]);
             if (old_mask !== 18'(code % e)) disagreements++;
         end
         if (games[g].factor != 1 && disagreements == 0) begin

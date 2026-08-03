@@ -18,6 +18,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $buildScript = Join-Path $PSScriptRoot 'build_ssv_visual.ps1'
+$simSafe = 'C:\Users\meath\bin\verilator-sim-safe.exe'
+if (-not (Test-Path -LiteralPath $simSafe)) { throw "Missing safe simulator wrapper: $simSafe" }
 
 $manifestPath = Join-Path $project 'tools\ssv_supported_sets.py'
 $python = Get-Command python -ErrorAction Stop
@@ -216,8 +218,10 @@ try {
     $env:SSV_VISUAL_AUDIO_RATE = [string]$AudioOutputRate
     $env:SSV_VISUAL_AUDIO_PRIME_MS = [string]$AudioPrimeMs
     $env:SSV_VISUAL_AUDIO_MAX_QUEUE_MS = [string]$AudioMaxQueueMs
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments `
+    $safeArguments = @('--', $exe) + $arguments
+    $process = Start-Process -FilePath $simSafe -ArgumentList $safeArguments `
         -WorkingDirectory $project `
+        -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutLog `
         -RedirectStandardError $stderrLog `
         -PassThru
@@ -261,8 +265,6 @@ while ((Get-Date) -lt $deadline) {
         throw "Visual process exited before verification. stderr:`n$tail"
     }
     $live.Refresh()
-    if ($live.MainWindowHandle -ne [IntPtr]::Zero)
-        { $windowHandle = $live.MainWindowHandle }
     $fields = Read-VisualStatusFields -Path $statusPath
     if ($null -ne $fields) {
         if ($fields.Count -ge 5) {

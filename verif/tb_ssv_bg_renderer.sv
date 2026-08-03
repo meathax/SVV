@@ -4,6 +4,7 @@ module tb_ssv_bg_renderer;
 logic clk = 1'b0;
 always #5 clk = ~clk;
 
+ssv_pkg::ssv_cfg_t cfg;
 logic rst, line_start;
 logic [8:0] target_y;
 logic clear_done;
@@ -16,7 +17,7 @@ logic [15:0] spr_data;
 // is available in the same cycle. Model both banks here.
 logic [15:0] spr_data_next;
 logic rom_req;
-logic [24:4] rom_addr;
+logic [ssv_pkg::SDR_AW:4] rom_addr;
 logic [127:0] rom_data;
 logic rom_ack;
 logic [3:0] plot_we;
@@ -27,12 +28,21 @@ logic [31:0] plot_pen;
 logic plot_shadow_4bit;
 logic busy, done;
 
+localparam logic [ssv_pkg::SDR_AW:4] GFX_FLIP_ROW_ADDR =
+    ssv_pkg::SDR_GFX_BASE[ssv_pkg::SDR_AW:4] + 23'd15;
+
 ssv_bg_renderer dut (.*);
 
 logic [15:0] sprite_mem [0:131071];
 always_ff @(posedge clk) begin
-    spr_data      <= sprite_mem[spr_addr];
-    spr_data_next <= sprite_mem[spr_addr | 17'd1];
+    if (rst) begin
+        spr_data      <= 16'd0;
+        spr_data_next <= 16'd0;
+    end
+    else begin
+        spr_data      <= sprite_mem[spr_addr];
+        spr_data_next <= sprite_mem[spr_addr | 17'd1];
+    end
 end
 
 // Responder and capture state have exactly one driver each -- the always_ff
@@ -51,28 +61,9 @@ logic rom_req_d;
 integer rom_delay;
 integer rom_quarter;
 integer requests;
-logic [24:4] first_rom_addr;
+logic [ssv_pkg::SDR_AW:4] first_rom_addr;
 always_ff @(posedge clk) begin
-    rom_req_d <= rom_req;
-    rom_ack <= 1'b0;
-    if (rom_req && !rom_req_d) begin
-        if (requests == 0)
-            first_rom_addr <= rom_addr;
-        requests <= requests + 1;
-        rom_delay <= 2;
-    end
-    if (rom_delay > 0) begin
-        rom_delay <= rom_delay - 1;
-        if (rom_delay == 1) begin
-            // One 128-bit record per tile row: plane01 supplies pen bit
-            // zero at pixel zero, the other quarters are blank.
-            rom_data <= 128'h80;
-            rom_ack <= 1'b1;
-            rom_quarter <= rom_quarter + 1;
-        end
-    end
-    // Last, so arming wins over anything above it on the same edge.
-    if (capture_arm) begin
+    if (rst) begin
         rom_req_d      <= 1'b0;
         rom_ack        <= 1'b0;
         rom_data       <= 128'd0;
@@ -80,6 +71,36 @@ always_ff @(posedge clk) begin
         rom_quarter    <= 0;
         requests       <= 0;
         first_rom_addr <= '0;
+    end
+    else begin
+        rom_req_d <= rom_req;
+        rom_ack <= 1'b0;
+        if (rom_req && !rom_req_d) begin
+            if (requests == 0)
+                first_rom_addr <= rom_addr;
+            requests <= requests + 1;
+            rom_delay <= 2;
+        end
+        if (rom_delay > 0) begin
+            rom_delay <= rom_delay - 1;
+            if (rom_delay == 1) begin
+                // One 128-bit record per tile row: plane01 supplies pen bit
+                // zero at pixel zero, the other quarters are blank.
+                rom_data <= 128'h80;
+                rom_ack <= 1'b1;
+                rom_quarter <= rom_quarter + 1;
+            end
+        end
+        // Last, so arming wins over anything above it on the same edge.
+        if (capture_arm) begin
+            rom_req_d      <= 1'b0;
+            rom_ack        <= 1'b0;
+            rom_data       <= 128'd0;
+            rom_delay      <= 0;
+            rom_quarter    <= 0;
+            requests       <= 0;
+            first_rom_addr <= '0;
+        end
     end
 end
 
@@ -133,6 +154,7 @@ end
 
 integer i;
 initial begin
+    cfg = ssv_pkg::cfg_dynagear();
     for (i = 0; i < 131072; i = i + 1)
         sprite_mem[i] = 16'd0;
     // Each column's descriptor is 64 words apart for a 512-pixel map.
@@ -152,8 +174,6 @@ initial begin
     global_y_adjust = 16'd0;
     flip_control = 16'd0;
     shadow_4bit = 1'b0;
-    spr_data = 16'd0;
-    spr_data_next = 16'd0;
     capture_arm = 1'b0;
 
     // Arm the responder and the monitor; their own always_ff blocks clear them.
@@ -177,7 +197,7 @@ initial begin
     if (plots != 21 || first_x != 0 || last_x != 320)
         $fatal(1, "plot coverage count=%0d first=%0d last=%0d",
                plots, first_x, last_x);
-    if (first_rom_addr != 21'h10000)
+    if (first_rom_addr != ssv_pkg::SDR_GFX_BASE[ssv_pkg::SDR_AW:4])
         $fatal(1, "normal row address got %h", first_rom_addr);
 
     // Vertical flip must select code+1 and row 7 for source line zero.
@@ -200,7 +220,7 @@ initial begin
     if (plots != 21 || first_x != 0 || last_x != 320)
         $fatal(1, "flipped plot coverage count=%0d first=%0d last=%0d",
                plots, first_x, last_x);
-    if (first_rom_addr != 21'h1000f)
+    if (first_rom_addr != GFX_FLIP_ROW_ADDR)
         $fatal(1, "vertical-flip row address got %h", first_rom_addr);
 
     $display("PASS tb_ssv_bg_renderer");

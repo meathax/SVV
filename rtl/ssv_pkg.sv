@@ -491,7 +491,7 @@ package ssv_pkg;
         end
         else begin
             high5 = 5'(code >> cfg.gfx_code_k);
-            rem3 = high5 % 5'd3;
+            rem3 = 2'(high5 % 5'd3);
             wrap_code_cfg = 18'(low | (20'(rem3) << cfg.gfx_code_k));
         end
     endfunction
@@ -553,9 +553,9 @@ package ssv_pkg;
     function automatic logic [10:0] st010_drom_word_cfg(
         input ssv_cfg_t cfg, input logic [26:0] stream_addr
     );
-        st010_drom_word_cfg =
+        st010_drom_word_cfg = 11'(
             (stream_addr - (stream_st010_start_cfg(cfg) +
-                            ST010_DATA_OFFSET)) >> 1;
+                            ST010_DATA_OFFSET)) >> 1);
     endfunction
 
     // -----------------------------------------------------------------------

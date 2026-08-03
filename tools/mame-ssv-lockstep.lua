@@ -9,6 +9,8 @@ local trace_start_frame = tonumber(os.getenv("SSV_LOCKSTEP_START_FRAME")) or 0
 local startup_mode = os.getenv("SSV_LOCKSTEP_REFERENCE_STARTUP_MODE") or "cold-lockstep"
 local catchup_target = tonumber(os.getenv("SSV_LOCKSTEP_CATCHUP_TARGET")) or -1
 local strict_inputs = os.getenv("SSV_LOCKSTEP_STRICT_INPUTS") == "1"
+local dump_index_frame = tonumber(os.getenv("SSV_LOCKSTEP_DUMP_INDEX_FRAME")) or -1
+local dump_index_path = os.getenv("SSV_LOCKSTEP_DUMP_INDEX_PATH")
 local first_comparable_token = assert(
     tonumber(os.getenv("SSV_LOCKSTEP_FIRST_COMPARABLE_TOKEN")),
     "SSV_LOCKSTEP_FIRST_COMPARABLE_TOKEN is required")
@@ -188,6 +190,41 @@ local function capture_ppm(token)
     end
     atomic_write(string.format("reference/frame_%06d.ppm", token),
                  table.concat(rows), true)
+end
+
+-- The driver renders bitmap_ind16 pens and the screen exposes only the final
+-- xRGB888 value.  For renderer diagnosis, invert that conversion using the
+-- live SSV palette RAM at the same frame boundary.  The first matching pen is
+-- sufficient for the normal palette (duplicate RGB entries are harmless for
+-- this diagnostic); 0xffff marks an RGB value not present in palette RAM.
+local function capture_index_frame(token)
+    if dump_index_frame ~= token or not dump_index_path then return end
+
+    local first_pen = {}
+    for pen = 0, 0x7fff do
+        local even = program:read_u16(0x140000 + pen * 4)
+        local odd = program:read_u16(0x140000 + pen * 4 + 2)
+        local rgb = (((odd & 0x00ff) << 16) |
+                     ((even & 0xff00)) |
+                     (even & 0x00ff))
+        if first_pen[rgb] == nil then first_pen[rgb] = pen end
+    end
+
+    local bytes = {}
+    for y = 0, height - 1 do
+        for x = 0, width - 1 do
+            local pixel = screen:pixel(x, y)
+            local rgb = pixel & 0xffffff
+            local pen = first_pen[rgb] or 0xffff
+            bytes[#bytes + 1] = string.char(pen & 0xff, (pen >> 8) & 0xff)
+        end
+    end
+    local stream = assert(io.open(dump_index_path, "wb"))
+    stream:write(table.concat(bytes))
+    stream:flush()
+    stream:close()
+    print(string.format("SSV_LOCKSTEP_INDEX_DUMP frame=%d path=%s", token,
+                        dump_index_path))
 end
 
 local function cpu_pc()
@@ -377,6 +414,7 @@ emu.register_frame_done(function()
     last_screen_frame = screen_frame
     if frame >= trace_start_frame then
         capture_ppm(frame)
+        capture_index_frame(frame)
         capture_state(frame)
         flush_trace()
     end

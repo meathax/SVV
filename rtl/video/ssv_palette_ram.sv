@@ -11,7 +11,10 @@ module ssv_palette_ram (
     output logic [15:0] cpu_q,
 
     input  logic [14:0] video_index,
-    output logic [23:0] video_rgb
+    output logic [23:0] video_rgb,
+    // MAME clears the indexed bitmap to pen 0 before checking video-enable.
+    // Expose that same pen for software-blanked active pixels.
+    output logic [23:0] background_rgb
 );
 
 // The odd word of an SSV palette entry is 00RR: eight bits of red and eight
@@ -31,9 +34,23 @@ wire [15:0] even_cpu_q;
 wire  [7:0] odd_cpu_q;
 wire [15:0] even_video_q;
 wire  [7:0] odd_video_q;
+logic [15:0] background_even_q;
+logic  [7:0] background_odd_q;
 
 always_ff @(posedge clk)
     cpu_bank_d <= cpu_addr[0];
+
+// Keep a tiny mirror of palette entry zero.  The RAM's video port is already
+// consumed by the live scanline index, while MAME's bitmap clear needs pen 0
+// concurrently when video is disabled.
+always_ff @(posedge clk) begin
+    if (cpu_we && (cpu_addr == 16'd0)) begin
+        if (cpu_be[0]) background_even_q[7:0]  <= cpu_data[7:0];
+        if (cpu_be[1]) background_even_q[15:8] <= cpu_data[15:8];
+    end
+    if (cpu_we && (cpu_addr == 16'd1) && cpu_be[0])
+        background_odd_q <= cpu_data[7:0];
+end
 
 s32_big_dpram #(.ADDR_WIDTH(15), .NUM_WORDS(32768)) even_words (
     .clock_a(clk), .address_a(bank_addr), .data_a(cpu_data),
@@ -55,6 +72,8 @@ always_comb begin
     cpu_q = cpu_bank_d ? {8'd0, odd_cpu_q} : even_cpu_q;
     // Raw 32-bit entry is 00RRGGBB: even word GGBB, odd word 00RR.
     video_rgb = {odd_video_q, even_video_q[15:8], even_video_q[7:0]};
+    background_rgb = {background_odd_q,
+                      background_even_q[15:8], background_even_q[7:0]};
 end
 
 endmodule

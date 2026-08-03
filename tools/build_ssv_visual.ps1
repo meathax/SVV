@@ -98,7 +98,7 @@ $buildProfile = @(
     "defines=SIMULATION,SSV_VISUAL,SSV_VISUAL_BEHAVIORAL_ONLY,$(if($Savable){'SSV_VISUAL_EXTERNAL_CLOCK'}else{'SSV_VISUAL_NO_SAVE'})",
     "timing=$(if($Savable){'off'}else{'on'}),savable=$(if($Savable){'on'}else{'off'}),assert=on",
     'model_threads=1',
-    'verilate_jobs=8,build_jobs=8',
+    'verilate_jobs=4,build_jobs=4',
     'verilator_opt=-O3',
     "source_profile=$([bool]$Profile)",
     "cflags=$cflags",
@@ -142,7 +142,7 @@ $arguments = @(
     '+define+SIMULATION', '-DSSV_VISUAL',
     '+define+SSV_VISUAL_BEHAVIORAL_ONLY', '-Iverif',
     '--top-module', 'tb_ssv_frame_crc', '--Mdir', $objDir,
-    '--threads', '1', '--verilate-jobs', '8'
+    '--threads', '1', '--verilate-jobs', '4'
 ) + $coreSources + $visualSources + @(
     '-CFLAGS', $cflags, '-LDFLAGS', $sdlLibs
 )
@@ -183,7 +183,7 @@ $tempMsys = ('/{0}/{1}' -f $msysTemp.Substring(0, 1).ToLowerInvariant(),
     ($msysTemp.Substring(3) -replace '\\', '/'))
 $makeCommand = "export MSYSTEM=UCRT64; export PATH=/ucrt64/bin:/usr/bin; " +
     "export TMP='$tempMsys'; export TEMP=`$TMP; export TMPDIR=`$TMP; " +
-    "cd '$objMsys'; mingw32-make -f Vtb_ssv_frame_crc.mk -j8"
+    "cd '$objMsys'; mingw32-make -f Vtb_ssv_frame_crc.mk -j4"
 $buildCommand = "& $(ConvertTo-PowerShellLiteral $bash) " +
     "'--noprofile' '--norc' '-c' $(ConvertTo-PowerShellLiteral $makeCommand)"
 Write-Host "SSV_VISUAL_BUILD_COMMAND $buildCommand"

@@ -33,6 +33,19 @@ from ssv_supported_sets import (  # noqa: E402
 from ssv_input_journal import inspect_journal  # noqa: E402
 
 MB = 1 << 20
+
+
+def source_git(source_root: Path, *arguments: str) -> list[str]:
+    """Run read-only Git provenance checks on an external checkout safely.
+
+    The shared MAME checkout is intentionally owned by the host user rather
+    than the sandbox identity.  Pass a repository-local safe.directory for
+    each read instead of mutating global Git configuration.
+    """
+    return ["git", "-C", str(source_root),
+            "-c", f"safe.directory={source_root}", *arguments]
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -88,7 +101,7 @@ def mame_version(mame: Path) -> str:
 
 def source_revision(source_root: Path, revision: str = "HEAD") -> str:
     result = subprocess.run(
-        ["git", "-C", str(source_root), "rev-parse", revision],
+        source_git(source_root, "rev-parse", revision),
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     return result.stdout.strip() if result.returncode == 0 else "unversioned"
@@ -109,13 +122,13 @@ def tagged_source_file(source_root: Path, revision: str,
                        relative: str) -> dict[str, object]:
     spec = f"{revision}:{relative}"
     blob = subprocess.run(
-        ["git", "-C", str(source_root), "show", spec],
+        source_git(source_root, "show", spec),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     if blob.returncode != 0:
         raise FileNotFoundError(f"MAME source checkout has no {spec}")
     object_id = subprocess.run(
-        ["git", "-C", str(source_root), "rev-parse", spec],
+        source_git(source_root, "rev-parse", spec),
         check=True, text=True, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     ).stdout.strip()

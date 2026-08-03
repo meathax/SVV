@@ -33,6 +33,7 @@ module tb_ssv_tilemap_page;
 logic clk = 1'b0;
 always #5 clk = ~clk;
 
+ssv_pkg::ssv_cfg_t cfg;
 logic rst, line_start;
 logic [8:0] target_y;
 logic clear_done;
@@ -45,7 +46,7 @@ logic [15:0] spr_data;
 // is available in the same cycle. Model both banks here.
 logic [15:0] spr_data_next;
 logic rom_req;
-logic [24:4] rom_addr;
+logic [ssv_pkg::SDR_AW:4] rom_addr;
 logic [127:0] rom_data;
 logic rom_ack;
 logic [3:0] plot_we;
@@ -60,8 +61,14 @@ ssv_bg_renderer dut (.*);
 
 logic [15:0] sprite_mem [0:131071];
 always_ff @(posedge clk) begin
-    spr_data      <= sprite_mem[spr_addr];
-    spr_data_next <= sprite_mem[spr_addr | 17'd1];
+    if (rst) begin
+        spr_data      <= 16'd0;
+        spr_data_next <= 16'd0;
+    end
+    else begin
+        spr_data      <= sprite_mem[spr_addr];
+        spr_data_next <= sprite_mem[spr_addr | 17'd1];
+    end
 end
 
 // Minimal ROM responder, same shape as tb_ssv_bg_renderer.
@@ -69,16 +76,25 @@ logic rom_req_d;
 integer rom_delay;
 integer rom_quarter;
 always_ff @(posedge clk) begin
-    rom_req_d <= rom_req;
-    rom_ack <= 1'b0;
-    if (rom_req && !rom_req_d)
-        rom_delay <= 2;
-    if (rom_delay > 0) begin
-        rom_delay <= rom_delay - 1;
-        if (rom_delay == 1) begin
-            rom_data <= 128'h80;
-            rom_ack <= 1'b1;
-            rom_quarter <= rom_quarter + 1;
+    if (rst) begin
+        rom_req_d   <= 1'b0;
+        rom_ack     <= 1'b0;
+        rom_data    <= 128'd0;
+        rom_delay   <= 0;
+        rom_quarter <= 0;
+    end
+    else begin
+        rom_req_d <= rom_req;
+        rom_ack <= 1'b0;
+        if (rom_req && !rom_req_d)
+            rom_delay <= 2;
+        if (rom_delay > 0) begin
+            rom_delay <= rom_delay - 1;
+            if (rom_delay == 1) begin
+                rom_data <= 128'h80;
+                rom_ack <= 1'b1;
+                rom_quarter <= rom_quarter + 1;
+            end
         end
     end
 end
@@ -190,7 +206,17 @@ task automatic run_line(
         @(negedge clk);
         clear_done = 1'b0;
 
-        wait (done);
+        fork
+            begin
+                wait (done);
+            end
+            begin
+                repeat (10000) @(negedge clk);
+                $fatal(1, "%s: renderer timeout state=%0d busy=%b done=%b spr_addr=%0d rom_req=%b rom_ack=%b",
+                       name, dut.state, busy, done, spr_addr, rom_req, rom_ack);
+            end
+        join_any
+        disable fork;
         @(posedge clk);
         watching = 1'b0;
 
@@ -209,7 +235,7 @@ task automatic run_line(
         end
 
         // Horizontal origin, MAME sx1 = 0 - ((scrollx + rowscroll) & 0xf).
-        expected_sx = -$signed({7'd0, (sx + rowscroll) & 16'h000f});
+        expected_sx = -$signed({7'd0, ((sx + rowscroll) & 16'h000f)});
         if (!screen_x_seen) begin
             $display("FAIL %s: no screen_x observed", name);
             errors = errors + 1;
@@ -228,6 +254,7 @@ task automatic run_line(
 endtask
 
 initial begin
+    cfg = ssv_pkg::cfg_dynagear();
     errors = 0;
     rst = 1'b1;
     line_start = 1'b0;
@@ -240,13 +267,6 @@ initial begin
     global_y_adjust = 16'd0;
     flip_control = 16'd0;
     shadow_4bit = 1'b0;
-    spr_data = 16'd0;
-    spr_data_next = 16'd0;
-    rom_data = 128'd0;
-    rom_ack = 1'b0;
-    rom_req_d = 1'b0;
-    rom_delay = 0;
-    rom_quarter = 0;
     watching = 1'b0;
     capture_arm = 1'b0;
     rowscroll_addr = 17'd1536;

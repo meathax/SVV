@@ -271,13 +271,13 @@ logic ce_pixel, hs, vs, hb, vb;
 logic signed [15:0] audio_l, audio_r;
 logic [31:0] debug_pc;
 logic [23:0] debug_status;
+integer visual_width, visual_height, visual_expected_pixels;
 
 `ifdef SSV_VISUAL
 bit [31:0] visual_pixels [0:84479];
 integer visual_status;
 integer visual_trace_device;
 integer visual_p1_mask, visual_system_mask;
-integer visual_width, visual_height, visual_expected_pixels;
 integer visual_index_nonzero, visual_palette_nonblack, visual_active_pixels;
 integer visual_line_starts, visual_renderer_starts;
 integer visual_bg_done, visual_obj_done;
@@ -293,6 +293,8 @@ integer visual_bg_nonzero_rows, visual_obj_nonzero_rows;
 integer visual_bg_nonzero_pens, visual_obj_nonzero_pens;
 integer visual_nonzero_spr_writes, visual_spr_write_logs;
 integer visual_cache_store_logs;
+integer visual_boot_trace_count;
+logic [31:0] visual_boot_trace_pc;
 longint unsigned visual_sample_fetches, visual_nonzero_sample_fetches;
 integer visual_sample_fetch_logs;
 logic [15:0] visual_sample_word;
@@ -1334,6 +1336,8 @@ always_ff @(posedge clk_sys) begin
         visual_nonzero_spr_writes <= 0;
         visual_spr_write_logs <= 0;
         visual_cache_store_logs <= 0;
+        visual_boot_trace_count <= 0;
+        visual_boot_trace_pc <= 32'hffff_ffff;
         visual_cache_slot_valid <= 1'b0;
         visual_cache_last_slot <= 12'd0;
         visual_spr_write_d <= 1'b0;
@@ -1486,6 +1490,21 @@ always_ff @(posedge clk_sys) begin
                      dut.m_be, dut.irq_requested, dut.irq_enabled,
                      dut.irq_n);
         end
+        if ($test$plusargs("BOOT_TRACE") && ce_cpu && dut.cpu.st == 7'd3 &&
+            visual_boot_trace_count < 2000 &&
+            (((debug_pc >= 32'h00e02b00) && (debug_pc < 32'h00e02f80)) ||
+             ((debug_pc >= 32'h00e03a00) && (debug_pc < 32'h00e04200)) ||
+             ((debug_pc >= 32'h00e04800) && (debug_pc < 32'h00e04920)) ||
+             ((debug_pc >= 32'h00fc0300) && (debug_pc < 32'h00fc0500)) ||
+             ((debug_pc >= 32'h00fc1c00) && (debug_pc < 32'h00fc1d20))) &&
+            debug_pc != visual_boot_trace_pc) begin
+            $display("BOOT_TRACE cycle=%0d frame=%0d pc=%08x r0=%08x r1=%08x r2=%08x psw=%08x bus=%0b/%0b/%06x ack=%0b",
+                     cycle_count, post_ve_frames, debug_pc,
+                     dut.cpu.r[0], dut.cpu.r[1], dut.cpu.r[2], dut.cpu.psw,
+                     dut.m_req, dut.m_we, dut.a, dut.m_ack);
+            visual_boot_trace_count <= visual_boot_trace_count + 1;
+            visual_boot_trace_pc <= debug_pc;
+        end
         end
 `endif
         // MAME init_ssv() and the shared RTL both power on with video enabled,
@@ -1495,6 +1514,11 @@ always_ff @(posedge clk_sys) begin
         // different software frames on the two sides.
         if (dut.lockout_write && dut.m_wdata[7])
             ve_seen <= 1'b1;
+`ifdef SSV_VISUAL
+        if (dut.lockout_write && visual_diag)
+            $display("SSV_VISUAL_LOCKOUT_WRITE cycle=%0d pc=%08x data=%04x video_enable=%0b",
+                     cycle_count, debug_pc, dut.m_wdata, dut.video_enable);
+`endif
 
         // Multi-shot PPM: frames ppm_start + k*ppm_step for k in [0, ppm_count).
         // Single-shot: ppm_count==1 and ppm_path already set via +DUMP_PPM=.
@@ -1511,7 +1535,12 @@ always_ff @(posedge clk_sys) begin
                      post_ve_frames, ppm_path);
         end
 
-        if (ce_pixel && !hb && !vb && debug_status[22]) begin
+        // MAME's raw screen frame advances through software-blanked frames as
+        // well as visible frames.  Count the native active raster regardless
+        // of video_enable; core_pixel is already black while the latch is
+        // clear.  Gating this on debug_status[22] used to drop blank boot
+        // frames and shift the lockstep token stream relative to MAME.
+        if (ce_pixel && !hb && !vb) begin
 `ifdef SSV_VISUAL
             if (visual_diag) begin
                 if (dut.line_color != 15'd0)
@@ -1545,8 +1574,9 @@ always_ff @(posedge clk_sys) begin
             // Accumulate every active pixel after VE (no delayed frame_active).
             if (ve_seen) begin
 `ifdef SSV_VISUAL
-                if (px_count < visual_expected_pixels)
+                if (px_count < visual_expected_pixels) begin
                     visual_pixels[px_count] <= {8'hff, rgb};
+                end
 `endif
                 if (post_ve_frames >= state_start_frame) begin
                     idx15 = {rgb[23:19], rgb[15:11], rgb[7:3]};
@@ -2282,6 +2312,8 @@ initial begin
         $test$plusargs("STOP_ON_RENDERER_OVERRUN");
     ignore_overrun = $test$plusargs("IGNORE_OVERRUN");
     ignore_nonblack = $test$plusargs("IGNORE_NONBLACK");
+`ifdef SSV_VISUAL
+`endif
 `ifdef SSV_VISUAL_BEHAVIORAL_ONLY
     if ($test$plusargs("REAL_SDRAM"))
         $fatal(1, "+REAL_SDRAM is unavailable in the behavioural-only visual build");

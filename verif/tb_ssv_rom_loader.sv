@@ -305,15 +305,15 @@ initial begin
     sdr_wr_ack = 1; tick();
     sdr_wr_ack = 0; tick();
 
-    // The whole region must sit in the free bank 2 and never touch the sample
+    // The whole region must sit in the bank-3 tail after samples and never touch
     // region, which the open-ended `>= STREAM_SAMPLES` branch would have
     // claimed had the st010 test not been put ahead of it.
     if (st010_stream_dest_cfg(st010_cfg, st010_start)
-            [SDR_AW:SDR_AW-1] !== 2'd2 ||
+            [SDR_AW:SDR_AW-1] !== 2'd3 ||
         st010_stream_dest_cfg(
             st010_cfg, st010_start + STREAM_ST010_SIZE - 27'd1)
-            [SDR_AW:SDR_AW-1] !== 2'd2)
-        $fatal(1, "st010 region left SDRAM bank 2");
+            [SDR_AW:SDR_AW-1] !== 2'd3)
+        $fatal(1, "st010 region left SDRAM bank 3");
 
     ioctl_download = 0;
     tick();

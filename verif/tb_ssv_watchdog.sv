@@ -215,7 +215,7 @@ endtask
 
 logic [15:0] read0, read1;
 
-initial begin
+initial begin : watchdog_test
     repeat (4) @(posedge clk_sys);
     // Change reset away from the sampling edge. Deasserting in the same
     // active region as a posedge races the DUT always_ff blocks and makes an
@@ -243,6 +243,7 @@ initial begin
         $display("PASS tb_ssv_watchdog mode0 never resets cycles=%0d",
                  TEST_TIMEOUT_CYCLES * 2);
         $finish;
+        disable watchdog_test;
     end
     if (!wdog_rst)
         $fatal(1, "wdog_rst did not assert at exact master-cycle timeout");

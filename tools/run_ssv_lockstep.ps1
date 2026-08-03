@@ -17,6 +17,8 @@ param(
     [string]$Session = '',
     [string]$RtlRestore = '',
     [string]$RtlInputJournal = '',
+    [ValidateRange(-1, 100000)]
+    [int]$DumpIndexFrame = -1,
     [string]$ModelDir = 'C:\tmp\ssv_obj_visual_lockstep'
 )
 
@@ -94,6 +96,8 @@ $height = [int]$manifest.alignment.geometry.rtl[1]
 $dsw1 = [int]$manifest.alignment.mra_dips.DSW1
 $dsw2 = [int]$manifest.alignment.mra_dips.DSW2
 $gameId = [int]$manifest.game_id
+$descriptorBytes = [Convert]::FromHexString([string]$manifest.mra.descriptor_hex)
+$hasSt010 = (($descriptorBytes[9] -band 0x08) -ne 0)
 $requestedEndFrame = $StartFrame + $Frames - 1
 $proofFrame = -1
 $proofSoakFrames = 0
@@ -188,7 +192,7 @@ $st010Rom = Join-Path $romDir 'st010.bin'
 foreach ($rom in @($mainRom,$spriteRom,$sampleRom)) {
     if (-not (Test-Path -LiteralPath $rom)) { throw "Missing simulation image: $rom" }
 }
-if ($gameId -in @(4,5,7) -and -not (Test-Path -LiteralPath $st010Rom)) {
+if ($hasSt010 -and -not (Test-Path -LiteralPath $st010Rom)) {
     throw "Missing ST010 simulation image: $st010Rom"
 }
 
@@ -258,15 +262,39 @@ $rtl = Start-Process -FilePath $simSafe -ArgumentList $safeArgs `
 # Do not start the reference emulator while the safe RTL wrapper is merely
 # queued for a shared simulation slot. A short bounded acquisition check keeps
 # this chat from consuming MAME/runtime resources while another model is active.
+function Get-RtlModelProcess {
+    $modelName = [System.IO.Path]::GetFileNameWithoutExtension($exe)
+    Get-Process -Name $modelName -ErrorAction SilentlyContinue |
+        Where-Object {
+            try { $_.Path -ieq $exe } catch { $false }
+        } |
+        Select-Object -First 1
+}
+
+function Stop-RtlModelProcess {
+    $model = Get-RtlModelProcess
+    if ($model) {
+        Stop-Process -Id $model.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $rtlChild = $null
-$slotDeadline = (Get-Date).AddSeconds([Math]::Min($TimeoutSeconds, 15))
+# Let the machine-wide safe scheduler drain a queued visual model before
+# declaring a lane unavailable.  The reference emulator is still withheld
+# until the RTL child is actually running, so this does not strand MAME.
+$slotDeadline = (Get-Date).AddSeconds([Math]::Min($TimeoutSeconds, 120))
 while ((Get-Date) -lt $slotDeadline) {
     if ($rtl.HasExited) {
         throw "Safe RTL wrapper exited before launching the model: $($rtl.ExitCode)"
     }
-    $rtlChild = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($rtl.Id)" |
-        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($exe) } |
-        Select-Object -First 1
+    try {
+        $rtlChild = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($rtl.Id)" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($exe) } |
+            Select-Object -First 1
+    } catch {
+        $rtlChild = $null
+    }
+    if (-not $rtlChild) { $rtlChild = Get-RtlModelProcess }
     if ($rtlChild) { break }
     Start-Sleep -Milliseconds 100
 }
@@ -282,7 +310,12 @@ if (-not $rtlChild) {
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Session 'cleanup.json')
     throw 'Safe simulation slot was busy; MAME was not launched'
 }
-Write-Host "SSV_LOCKSTEP_RTL_SLOT_ACQUIRED wrapper_pid=$($rtl.Id) model_pid=$($rtlChild.ProcessId)"
+$rtlChildPid = if ($rtlChild.PSObject.Properties.Name -contains 'ProcessId') {
+    [int]$rtlChild.ProcessId
+} else {
+    [int]$rtlChild.Id
+}
+Write-Host "SSV_LOCKSTEP_RTL_SLOT_ACQUIRED wrapper_pid=$($rtl.Id) model_pid=$rtlChildPid"
 
 $mameProcess = $null
 $watchdog = $null
@@ -298,7 +331,11 @@ $mameRunSeconds = [Math]::Max(30, [Math]::Min(299, $TimeoutSeconds + 15))
 $mameArgs = @(
     $Set, '-rompath', ('"{0}"' -f (Join-Path $project 'rom')), '-window', '-nomaximize',
     '-skip_gameinfo', '-seconds_to_run', [string]$mameRunSeconds, '-throttle',
-    '-video', 'd3d', '-sound', 'auto', '-output', 'console',
+    '-video', 'opengl', '-sound', 'auto', '-output', 'console',
+    # SSV's PORT_IMPULSE(10) is a MAME UI convenience.  Lockstep packets
+    # already carry the raw PCB input level for each native interval, so do
+    # not add hidden coin-latch state between the RTL owner and MAME.
+    '-coin_impulse', '-1',
     '-autoboot_delay', '0',
     '-cfg_directory', ('"{0}"' -f (Join-Path $Session 'mame\cfg')),
     '-nvram_directory', ('"{0}"' -f (Join-Path $Session 'mame\nvram')),
@@ -318,6 +355,11 @@ $mameEnvironment = @{
     SSV_LOCKSTEP_CATCHUP_TARGET = $(if ($RtlRestore) {
         [string]$StartFrame } else { '-1' })
     SSV_LOCKSTEP_STRICT_INPUTS = $(if ($RtlRestore) { '1' } else { '0' })
+}
+if ($DumpIndexFrame -ge 0) {
+    $mameEnvironment['SSV_LOCKSTEP_DUMP_INDEX_FRAME'] = [string]$DumpIndexFrame
+    $mameEnvironment['SSV_LOCKSTEP_DUMP_INDEX_PATH'] =
+        (Join-Path $Session ("reference/frame_{0:D6}.index" -f $DumpIndexFrame))
 }
 $mameProcess = Start-Process -FilePath $mame -ArgumentList $mameArgs `
     -WorkingDirectory $project -RedirectStandardOutput $mameLog `
@@ -402,11 +444,7 @@ Write-Host "SSV_LOCKSTEP_STARTED set=$Set rtl_pid=$($rtl.Id) mame_pid=$($mamePro
         if (-not $process) { continue }
         if (-not $process.WaitForExit(10000)) {
             if ($name -eq 'rtl') {
-                Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id)" |
-                    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($exe) } |
-                    ForEach-Object {
-                        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-                    }
+                Stop-RtlModelProcess
             }
             Stop-Process -Id $process.Id -Force
             $process.WaitForExit()

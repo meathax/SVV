@@ -67,6 +67,7 @@ logic [14:0] write_value [0:3];
 
 integer lane_i;
 integer bank_i;
+integer bank_ff_i;
 always_comb begin
     scan_word = (scan_x < ACTIVE_WIDTH) ? scan_x[8:2] : 7'd0;
 
@@ -157,11 +158,11 @@ always_ff @(posedge clk) begin
         plot_shadow_q <= 1'b0;
         shadow_4bit_q <= 1'b0;
         bypass_q <= 4'd0;
-        for (bank_i = 0; bank_i < 4; bank_i = bank_i + 1) begin
-            bank_addr_q[bank_i] <= 7'd0;
-            bank_color_q[bank_i] <= 15'd0;
-            bank_pen_q[bank_i] <= 8'd0;
-            bypass_value_q[bank_i] <= 15'd0;
+        for (bank_ff_i = 0; bank_ff_i < 4; bank_ff_i = bank_ff_i + 1) begin
+            bank_addr_q[bank_ff_i] <= 7'd0;
+            bank_color_q[bank_ff_i] <= 15'd0;
+            bank_pen_q[bank_ff_i] <= 8'd0;
+            bypass_value_q[bank_ff_i] <= 15'd0;
         end
     end
     else begin
@@ -170,14 +171,14 @@ always_ff @(posedge clk) begin
             plot_select_q <= ~front_select;
             plot_shadow_q <= plot_shadow;
             shadow_4bit_q <= shadow_4bit;
-            for (bank_i = 0; bank_i < 4; bank_i = bank_i + 1) begin
-                bank_addr_q[bank_i] <= bank_addr[bank_i];
-                bank_color_q[bank_i] <= bank_color[bank_i];
-                bank_pen_q[bank_i] <= bank_pen[bank_i];
-                bypass_q[bank_i] <= plot_pending[bank_i] &&
+            for (bank_ff_i = 0; bank_ff_i < 4; bank_ff_i = bank_ff_i + 1) begin
+                bank_addr_q[bank_ff_i] <= bank_addr[bank_ff_i];
+                bank_color_q[bank_ff_i] <= bank_color[bank_ff_i];
+                bank_pen_q[bank_ff_i] <= bank_pen[bank_ff_i];
+                bypass_q[bank_ff_i] <= plot_pending[bank_ff_i] &&
                                    (plot_select_q == ~front_select) &&
-                                   (bank_addr_q[bank_i] == bank_addr[bank_i]);
-                bypass_value_q[bank_i] <= write_value[bank_i];
+                                   (bank_addr_q[bank_ff_i] == bank_addr[bank_ff_i]);
+                bypass_value_q[bank_ff_i] <= write_value[bank_ff_i];
             end
         end
         else begin

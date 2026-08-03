@@ -158,6 +158,15 @@ wire        if_ack_i  = FAST_IFETCH ? if_ack  : 1'b0;
 wire [63:0] if_data_i = FAST_IFETCH ? if_data : 64'b0;
 wire        fetch_ack = FAST_IFETCH ? if_ack_i : pf_ack;  // ack from the active port
 
+// A control-flow decode may replace the active fetch window with the retained
+// loop window below.  A fast-fetch response can be visible in this same clock
+// (the response is generated outside the CPU CE domain); accepting it after
+// the restore would overwrite the restored tail with bytes from the old PC.
+// Drop that response and let the new window request its frontier again.
+wire pf_decode_redirect = (st == S_DECODE) &&
+    ((opcode[7:4] == 4'h6) || (opcode[7:4] == 4'h7) ||
+     (opcode == 8'h48) || (opcode == 8'hc6) || (opcode == 8'hc7));
+
 // ---------------------------------------------------------------------------
 // fetch buffer: 16 bytes from PC, filled before each decode
 // ---------------------------------------------------------------------------
@@ -894,8 +903,8 @@ else if (ce) begin
             st_after_fill <= S_DECODE;
         end
         8'b0111_????: begin
-            logic [15:0] bd16;
             logic [31:0] branch_target;
+            logic [15:0] bd16;
             bd16 = fb16(1);
             branch_target = cond_true(opcode[3:0])
                 ? pc + {{16{bd16[15]}}, bd16}
@@ -931,6 +940,7 @@ else if (ce) begin
         8'hc6, 8'hc7: begin
             logic [3:0] cc4;
             logic [31:0] branch_target;
+            logic [15:0] bd16;
             case ({opcode[0], fb[1][7:5]})
                 4'b0000: cc4 = 4'h0; 4'b0001: cc4 = 4'h2; 4'b0010: cc4 = 4'h4;
                 4'b0011: cc4 = 4'h6; 4'b0100: cc4 = 4'h8; 4'b0101: cc4 = 4'ha; // DBR
@@ -3136,7 +3146,8 @@ else if (ce) begin
         if (pf_iss_epoch == pf_epoch
             && pf_addr == fb_base + {27'b0, fb_wr}
             && !(st == S_FILL && fb_base != pc)
-            && st != S_NEXT) begin
+            && st != S_NEXT
+            && !pf_decode_redirect) begin
             if (FAST_IFETCH) begin
                 // append the 8-byte line from the frontier offset to the line end
                 // (1..8 bytes).  s32_core has ALREADY aligned if_data so byte 0 is

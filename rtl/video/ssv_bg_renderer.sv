@@ -153,7 +153,8 @@ wire tile_flip_y = tile_attr[14] ^
 always_comb begin
     spr_addr = tile_word_addr;
     if (state == ROW_ADDR || state == ROW_WAIT)
-        spr_addr = ({9'd0, scroll_mode[7:0]} << 9) + map_y[8:0];
+        spr_addr = ({9'd0, scroll_mode[7:0]} << 9) +
+                   {8'd0, map_y[8:0]};
 
     fetch_start = (state == FETCH_START);
 
@@ -163,13 +164,14 @@ always_comb begin
     plot_color = 60'd0;
     for (plot_lane = 0; plot_lane < 4; plot_lane = plot_lane + 1) begin
         batch_pen = pens[(plot_i + plot_lane) * 8 +: 8];
-        batch_x = screen_x + $signed(plot_i + plot_lane);
+        batch_x = screen_x + $signed(12'(plot_i + plot_lane));
         plot_we[plot_lane] = (state == PLOT) && (batch_x >= 0) &&
-                             (batch_x <= LAST_PIXEL) && (batch_pen != 0);
+                             (batch_x <= $signed({3'd0, LAST_PIXEL})) &&
+                             (batch_pen != 0);
         plot_x[plot_lane * 9 +: 9] = batch_x[8:0];
         plot_pen[plot_lane * 8 +: 8] = batch_pen;
         plot_color[plot_lane * 15 +: 15] =
-            ({color, 6'd0} + batch_pen) & 15'h7fff;
+            ({color, 6'd0} + {7'd0, batch_pen}) & 15'h7fff;
     end
     plot_shadow = shadow;
     plot_shadow_4bit = shadow_4bit;
@@ -317,7 +319,7 @@ always_ff @(posedge clk) begin
                     end
                 end
                 else begin
-                    plot_i <= plot_i + 3'd4;
+                    plot_i <= plot_i + 5'd4;
                 end
             end
         endcase

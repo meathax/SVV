@@ -29,11 +29,11 @@ task automatic pulse_line_start;
         while (!clear_done) begin
             @(negedge clk);
             clear_clocks = clear_clocks + 1;
-            if (clear_clocks > 86)
-                $fatal(1, "four-bank clear exceeded deadline");
+            if (clear_clocks > 90)
+                $fatal(1, "four-bank clear exceeded 88-word deadline");
         end
-        if (clear_clocks < 83 || clear_clocks > 85)
-            $fatal(1, "four-bank clear took %0d clocks", clear_clocks);
+        if (clear_clocks < 87 || clear_clocks > 89)
+            $fatal(1, "four-bank 88-word clear took %0d clocks", clear_clocks);
         @(negedge clk);
     end
 endtask

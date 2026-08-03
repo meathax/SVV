@@ -8,6 +8,7 @@ mkdir -p "$OUT"
 pwd
 ls rtl/ssv_pkg.sv >/dev/null
 VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -CFLAGS -D_GLIBCXX_USE_CXX11_ABI=0
         -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
@@ -71,7 +72,7 @@ run_one() {
   fi
   echo "=== RUN $top ==="
   verilator-safe status
-  verilator-sim-safe -- "$bdir/$top" | tee "$bdir/run.log"
+  verilator-sim-safe -- "$bdir/$top.exe" | tee "$bdir/run.log"
 }
 
 run_one tb_ssv_rom_loader \
@@ -86,6 +87,10 @@ run_one tb_ssv_irq \
 run_one tb_ssv_video_timing \
   rtl/ssv_pkg.sv rtl/ssv_video_timing.sv verif/tb_ssv_video_timing.sv
 
+run_one tb_ssv_palette_ram \
+  rtl/common/s32_big_dpram.sv rtl/video/ssv_palette_ram.sv \
+  verif/tb_ssv_palette_ram.sv
+
 run_one tb_ssv_clock_ratio \
   rtl/ssv_pkg.sv rtl/ssv_video_timing.sv verif/ssv_tb_ce_cpu.sv \
   verif/tb_ssv_clock_ratio.sv
@@ -99,6 +104,16 @@ run_one tb_ssv_nvram_bridge \
 run_one tb_ssv_gfx_row_fetch \
   rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
   verif/tb_ssv_gfx_row_fetch.sv
+
+run_one tb_ssv_bg_renderer \
+  rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
+  rtl/video/ssv_gfx_row_decode.sv rtl/video/ssv_bg_renderer.sv \
+  verif/tb_ssv_bg_renderer.sv
+
+run_one tb_ssv_tilemap_page \
+  rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
+  rtl/video/ssv_gfx_row_decode.sv rtl/video/ssv_bg_renderer.sv \
+  verif/tb_ssv_tilemap_page.sv
 
 run_one tb_ssv_cached_sprite_renderer \
   rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \

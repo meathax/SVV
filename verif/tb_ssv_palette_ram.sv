@@ -10,6 +10,7 @@ logic cpu_we;
 logic [15:0] cpu_q;
 logic [14:0] video_index;
 logic [23:0] video_rgb;
+logic [23:0] background_rgb;
 
 ssv_palette_ram dut (.*);
 
@@ -44,6 +45,14 @@ initial begin
         $error("xRGB888 lookup got %h", video_rgb);
         $fatal(1);
     end
+
+    // Pen 0 is also the MAME bitmap-clear colour when video is disabled.
+    write_word(16'h0000, 16'h3412);
+    write_word(16'h0001, 16'haa56);
+    @(negedge clk);
+    #1;
+    if (background_rgb !== 24'h563412)
+        $fatal(1, "palette pen 0 mirror mismatch: %h", background_rgb);
 
     // The even word is full-width. The odd word is physical 00RR in this core:
     // MAME retains the unused written upper byte, but no qualified trace reads

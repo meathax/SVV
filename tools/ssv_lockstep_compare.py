@@ -403,6 +403,7 @@ def main() -> int:
     all_states_equal = True
     trace_frames_compared = 0
     state_frames_compared = 0
+    keep_trace_after_first_difference = os.getenv("SSV_LOCKSTEP_KEEP_TRACE") == "1"
 
     for frame in range(args.start_frame, args.start_frame + args.frames):
         wait_for(lambda: frame if read_token(session / "rtl_frame.txt") == frame else None,
@@ -470,12 +471,12 @@ def main() -> int:
             trace_diff["frame"] = frame
             atomic_json(session / "FIRST_TRACE_DIVERGENCE.json", trace_diff)
             atomic_json(session / "FIRST_CAUSAL_DIVERGENCE.json", trace_diff)
-            # Preserve the first causal event bundle, then stop expensive bus
-            # collection regardless of which surface controls the session's
-            # freeze policy.  Compact frame/state evidence continues and can
-            # still freeze later on a first visible or architectural split.
-            atomic_text(session / "TRACE_STOP.txt",
-                        f"first trace divergence frame {frame}\n")
+            # Preserve the first causal event bundle. Normal sessions stop
+            # expensive bus collection here; diagnostic sessions may retain
+            # it to classify a later video-only transition.
+            if not keep_trace_after_first_difference:
+                atomic_text(session / "TRACE_STOP.txt",
+                            f"first trace divergence frame {frame}\n")
         if state_diff is not None and not (session / "FIRST_STATE_DIVERGENCE.json").exists():
             state_diff["frame"] = frame
             atomic_json(session / "FIRST_STATE_DIVERGENCE.json", state_diff)
