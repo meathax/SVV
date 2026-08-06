@@ -92,12 +92,206 @@ core's I/O path. Next investigator should look at *when* and *how* the
 game code samples this port (a bus trace around the coin-poll routine)
 rather than at the input wiring.
 
+## RESOLVED (2026-08-06) — root cause found via MAME MCP: coin-poll loop starts at frame ~73, script asserts coin at frame 30
+
+Using MAME MCP against the pinned `D:\Arcade\AI\mame289` build (ROM audit
+passed for `vasara`), found the exact mechanism with live-session tools plus
+a controlled `run_lua_script` diagnostic; see `.mame_mcp/vasara_*` logs for
+raw evidence.
+
+**1. Confirmed vasara's coin-poll loop timing directly (`trace_memory_access`,
+range `$210000-$21001F`, the shared SSV I/O block).** With zero injected
+input, no access to that range occurs before frame ~73; from frame ~73
+onward a per-frame loop runs continuously:
+
+```
+R  PC=F01046  addr=21000C (SYSTEM)   -- coin/service read #1
+W  PC=F01063  addr=21000E (lockout)  -- refresh lockout output
+R  PC=F01072  addr=210008 (P1)
+R  PC=F01083  addr=21000A (P2)
+R  PC=F01094  addr=21000C (SYSTEM)   -- coin/service read #2
+W  PC=F00FF5  addr=210000 (watchdog) -- per-iteration kick
+```
+
+**2. Confirmed MAME's live `mame_send_input` mechanism correctly asserts the
+coin** — pressing "Coin 1" via the live session flips the SYSTEM port from
+`$00FF` to `$00FE` (bit 0, matching the field's `mask=0x0001`), and produces
+a real, persistent work-RAM state change (`byte[0x000009]`: `$00` → `$14`,
+confirmed stable across 40+ subsequent frames with no further input — not a
+free-running animation counter).
+
+**3. Root-caused why the project's shared MAME capture script
+(`tools/mame-capture-ssv-frames.lua`, "Capture ... for Dyna Gear" per its own
+header) never worked for vasara1.** It uses the identical `field:set_value()`
+mechanism as `mame_send_input` (verified byte-for-byte against the MCP
+server's own `bridge.lua:handlers.send_input`) — the mechanism itself is not
+broken. The problem is purely the **hardcoded frame window**: the script
+asserts Coin 1 at frames 30-34, a full ~40 frames *before* vasara1's
+coin-poll loop even starts (~frame 73). Any injection landing entirely
+before frame ~73 is structurally invisible to the game, regardless of pulse
+duration (already ruled out — the 40-frame `coin_start_probe` hold, frames
+20-60, *also* ends before frame 73) or bit polarity (already ruled out — the
+debug HUD confirmed the RTL-side port bit was correct).
+
+Directly verified the fix with a standalone Lua harness replicating the
+capture script's exact code path, coin window moved to frames 100-110
+(comfortably inside the confirmed-active window): `byte[9]` reads `$00` at
+frame 99, `$14` at frame 115 and after. **Confirmed: MAME's own reference
+genuinely does accept vasara1's coin** — the opposite of this journal's
+prior conclusion, which was correct about the symptom (zero response at
+frames 20-170) but wrong about attributing it to an unknown/unfindable
+requirement rather than simply "too early."
+
+**Fix applied**: `tools/mame-capture-ssv-frames.lua` now reads
+`SSV_COIN_FRAME_LO`/`_HI` and `SSV_START_FRAME_LO`/`_HI` env vars, defaulting
+to the existing Dyna Gear-tuned 30-34/165-170 (zero behavior change for
+Dyna Gear or any other set already relying on the defaults). Vasara1 (and
+any other affected set) can now pass a correct window without touching the
+shared default. Smoke-tested: default-path run (no env overrides) still
+completes identically (`SSV_FRAME_CRC_DONE frames=120`, no errors).
+
+**This also means every prior "vasara1 coin_start" RTL/MAME lockstep result
+in this project used a MAME reference that was still in pure attract mode**,
+not post-coin state — the RTL-side comparison to that reference was
+comparing against the wrong ground truth the whole time. It does not mean
+the RTL was ever tested against real post-coin MAME behavior and passed or
+failed; it means that comparison has never actually been run yet.
+
 ## Next steps
 
-1. Find vasara1's actual coin-accept requirement — since duration isn't it,
-   candidates are: a different exact sample frame/window than 20-170, a
-   different system-port bit, or a service/test-mode gate that must be
-   cleared first. Disassembling the input-poll routine (via the MAME
-   debugger or a targeted bus trace) would settle this directly.
-2. Once a working coin-start scenario exists, repeat the gameplay/sound
-   checks done for vasara2 (pixel-trajectory trend, audio-activity check).
+1. Determine vasara1's exact required start-button window the same way
+   (currently only coin's window is nailed down precisely; a generous
+   estimate ≥frame 150 is likely safe based on live-session observation but
+   not yet isolated to the same precision as the coin window).
+2. Re-run the RTL/MAME lockstep for vasara1 with
+   `SSV_COIN_FRAME_LO=100 SSV_COIN_FRAME_HI=110` (and a verified start
+   window) to get the first real post-coin comparison evidence for this
+   title, then repeat the vasara2-style gameplay/sound checks
+   (pixel-trajectory trend, audio-activity check) against real gameplay
+   instead of attract mode.
+## RESOLVED (2026-08-06, continued) — RTL apply_inputs() fixed the same way; first real post-coin RTL/MAME comparison obtained
+
+Applied the identical fix to the Verilator side: `verif/tb_ssv_frame_crc.sv`'s
+`apply_inputs()` coin/start frame window is now `+COIN_FRAME_LO/HI=` and
+`+START_FRAME_LO/HI=` plusargs (default 30/34/165/170, unchanged for every
+existing caller). Rebuilt and ran both sides for vasara1's `coin_start_p1`
+scenario with `COIN_FRAME_LO=100 COIN_FRAME_HI=110 START_FRAME_LO=200
+START_FRAME_HI=210` (comfortably inside the confirmed-active window):
+
+- MAME side: `tools/mame-capture-ssv-frames.lua` via
+  `SSV_COIN_FRAME_LO/HI`/`SSV_START_FRAME_LO/HI` env vars, 300 frames,
+  completed cleanly (`SSV_FRAME_CRC_DONE frames=300`).
+- RTL side: same plusargs, `+FRAMES=300`; hit the default `+CYCLES=200000000`
+  budget and stopped at frame 249 (`WARNING CYCLE_BUDGET_TRUNCATED`) — not a
+  failure, just needs a higher `+CYCLES` for a full 300-frame run next time.
+
+**Comparison** (`tools/compare-ssv-frame-crcs.py`, frame 0 skipped as the
+known MAME-vs-RTL boot-epoch warmup mismatch per this project's existing
+`--skip` convention):
+
+- **Frames 1-111: pixel-exact.** Coin insertion itself (frames 100-110)
+  produces zero visible divergence.
+- **State CRCs (`list512`/`spr8k`/`scroll64`/`pal512`) match exactly across
+  the entire 248-frame comparison window, with zero exceptions.** The
+  divergence described below is confined to rendered pixels only — this is
+  a presentation/rendering-timing question, not a gameplay-logic or
+  CPU-state bug.
+- **Frames 112-201: small, periodic, self-correcting mismatches** (112,
+  118-119, 133-134, 138-139, 149-150, 159-160, 164-165, 179-181, 195-196,
+  200-201 — roughly every 14-20 frames, 1-2 frames each). This is the same
+  signature already documented and understood for vasara2's post-coin
+  behavior (`docs/debug/vasara2/GAMEPLAY_AND_SOUND.md`: "a small, periodic
+  mismatch... recurring roughly every 10-20 frames... reads like a
+  blinking/animated UI element... out of phase") — likely benign.
+- **Frames 229-248 (end of the truncated run): every frame differs,
+  continuously**, starting shortly after the Start press (200-210) —
+  plausibly the point where the game transitions from select/intro into
+  actual gameplay rendering. **Not yet classified** — no pixel-percentage or
+  bounding-box evidence gathered yet (would need `+DUMP_PPM`/`compare_ppm.py`
+  on both sides), so whether this is a real rendering bug or another benign
+  timing artifact like the frame 112-201 pattern is unknown. The run was cut
+  short at frame 249 by the cycle budget, so it's also unknown whether this
+  stays bounded or compounds further.
+
+**This is the first real evidence of any kind for vasara1 past the coin
+insertion point** — every prior "vasara1 gameplay" investigation in this
+project compared against a MAME reference that was still in attract mode.
+
+## RESOLVED (2026-08-06, continued) — pixel-diff evidence classifies both divergence patterns
+
+Got real PPM captures on both sides for frames 228-242 (`+DUMP_PPM_PREFIX=`
+on RTL, `SSV_PPM_PREFIX=`/`SSV_PPM_FRAMES=` on MAME) and ran
+`compare_ppm.py` frame by frame (`C:\Users\meath\.claude\skills\
+mister-core-development\scripts\compare_ppm.py`).
+
+**Found and fixed a second, unrelated pre-existing bug along the way**:
+`verif/tb_ssv_frame_crc.sv`'s `visual_width`/`visual_height` (which feed the
+`+DUMP_PPM` header) were only assigned under `` `ifdef SSV_VISUAL``, so the
+plain (non-visual) build's PPM dumps silently wrote a degenerate
+`P6\n0 0\n255\n` header — every non-SSV_VISUAL PPM capture in this project's
+history has been an empty 0x0 image. Fixed by hoisting the assignment
+outside the ifdef (unconditional, using the same build-variant-independent
+`active_width_cfg`/`active_height_cfg` functions); zero behavior change for
+the SSV_VISUAL path, which still computes the identical value.
+
+**Results**:
+
+| frame | different pixels | bbox | pattern |
+|---|---|---|---|
+| 228-234 | 76/80640 (0.094%), constant | `(1,94)-(10,103)`, unchanging | small, static, same signature as the 112-201 periodic blips |
+| 235 | 2,800 (3.5%) | `(1,0)-(335,239)` | onset |
+| 236 | 5,488 (6.8%) | | |
+| 237 | 8,991 (11.1%) | left edge x=77 | |
+| 238 | 11,651 (14.4%) | | |
+| 239 | 16,644 (20.6%) | | |
+| 240 | 19,254 (23.9%) | | growing linearly |
+| 241 | 25,540 (31.7%) | | |
+| 242 | 28,192 (35.0%) | left edge x=73 | |
+
+**Frames 228-234 are the same benign, static, tiny-region mismatch already
+characterized** (likely a blinking UI element a frame or two out of phase) —
+not a new finding.
+
+**Frames 235-242 show a distinct, diagnostic signature**: the mismatched
+region's left edge moves steadily leftward and its right edge stays pinned
+to the screen edge (335) — `first=(x,0)` at x = 312, 288, 264, 240, 216, 192,
+168, 144 across frames 235-242, a constant **-24 px/frame**, with the
+mismatch always spanning from that moving boundary to the right edge, full
+screen height. This is the exact signature of **a horizontal wipe/curtain
+transition rendered one frame out of phase between RTL and MAME** — not
+random corruption, not a game-logic bug (state CRCs remain exactly identical
+throughout, per the earlier finding), and not a growing/compounding
+divergence in the sense of accumulating error: it is consistent with both
+sides eventually rendering the identical final frame once the transition
+completes, just reaching each intermediate step one frame apart. This is
+architecturally the same *class* of presentation-timing artifact already
+documented elsewhere in this project (e.g. Twin Eagle II's palette/scanline
+split from a live-vs-snapshot palette update), not a new mechanism, applied
+here to a transition wipe instead of a palette write.
+
+**Not yet confirmed**: the hypothesis predicts the mismatch should *shrink
+back down* once the wipe completes on both sides (the boundary reaching
+x≈0) — this session's capture stopped at frame 242, before that point.
+Capturing a few more frames (the wipe at -24px/frame from x=144 would reach
+x≈0 around frame 248) would either confirm the hypothesis (mismatch drops
+back toward the ~0.1% baseline) or refute it (stays elevated, pointing to an
+actual content difference rather than a timing offset).
+
+## Next steps (revised again)
+
+1. Capture frames ~243-255 (both sides) to test the wipe-convergence
+   prediction above — the single remaining open question from this session.
+2. If confirmed as a 1-frame transition-timing skew: locate which RTL signal
+   drives the wipe (likely a scroll or window/crop register written once per
+   frame during the transition) and compare its write timing against MAME's
+   equivalent, the same way other single-frame presentation skews in this
+   project have been root-caused (video-enable/palette timing at the
+   video-timing boundary, not gameplay logic).
+3. Given vasara2's coin_start_p1 scenario "worked" with the *original*
+   30-34 default (per `docs/debug/vasara2/GAMEPLAY_AND_SOUND.md`), vasara2's
+   own coin-poll loop evidently starts earlier than vasara1's — worth a
+   quick confirmatory trace_memory_access pass on vasara2 too, since its
+   result was never independently verified against a MAME-side RAM/state
+   check the way vasara1 now has been (it was inferred from RTL-side pixel
+   transitions and audio activity, not directly confirmed on the MAME side
+   with the rigor applied here).

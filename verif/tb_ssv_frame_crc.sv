@@ -424,6 +424,9 @@ assign checkpoint_ve_seen = ve_seen;
 assign checkpoint_post_ve_frame = post_ve_frames;
 `endif
 integer p1_transactions;
+// coin_start_p1-family override, mirroring tools/mame-capture-ssv-frames.lua's
+// SSV_COIN_FRAME_LO/HI env vars -- see apply_inputs() for why.
+integer coin_frame_lo, coin_frame_hi, start_frame_lo, start_frame_hi;
 integer visual_p2_nonzero_code_logs;
 integer visual_p2_max_code;
 logic visual_p2_code_valid;
@@ -1169,9 +1172,17 @@ task automatic apply_inputs(input integer f);
         scenario == "coin_start_p1_gameplay" ||
         scenario == "coin_start_p1_long" ||
         scenario == "coin_start_p1_runright") begin
-        if (f >= 30 && f < 34) in_system = 16'hfffe; // COIN1
+        // coin_frame_lo/hi and start_frame_lo/hi default to the original
+        // Dyna Gear-tuned 30-34/165-170 (see +COIN_FRAME_LO=/etc. parsing
+        // below) -- overridable per set without changing any existing
+        // scenario's behavior. Mirrors the same fix applied to
+        // tools/mame-capture-ssv-frames.lua's SSV_COIN_FRAME_LO/HI for the
+        // identical reason: vasara1's own coin-poll loop does not start
+        // until post-VE frame ~73 (docs/debug/vasara/GAMEPLAY_AND_SOUND.md),
+        // so the 30-34 default is structurally invisible to that title.
+        if (f >= coin_frame_lo && f < coin_frame_hi) in_system = 16'hfffe; // COIN1
         // Wait for "PUSH START" after coin, then enter select.
-        if (f >= 165 && f < 170) in_p1[0] = 1'b0;   // START
+        if (f >= start_frame_lo && f < start_frame_hi) in_p1[0] = 1'b0;   // START
         // Confirm Roger on SELECT PLAYER.
         if (f >= 250 && f < 255) in_p1[0] = 1'b0;   // START confirm
         if (f >= 255 && f < 262) in_p1[3] = 1'b0;   // B1 confirm
@@ -2452,10 +2463,15 @@ initial begin
     if (selected_game_id < 0 || selected_game_id > 9)
         $fatal(1, "GAME_ID must be in the universal profile range 0..9");
     sim_cfg = cfg_for_game(4'(selected_game_id));
-`ifdef SSV_VISUAL
-    visual_diag = $test$plusargs("VISUAL_DIAG");
+    // visual_width/height feed the +DUMP_PPM header, which is used outside
+    // SSV_VISUAL too (e.g. the plain run_gameplay_sims.sh-style build) --
+    // previously only assigned under `ifdef SSV_VISUAL below, leaving a
+    // plain-build PPM dump with a degenerate "P6\n0 0\n255\n" header (found
+    // while gathering pixel-diff evidence for a real divergence).
     visual_width = int'(active_width_cfg(sim_cfg));
     visual_height = int'(active_height_cfg(sim_cfg));
+`ifdef SSV_VISUAL
+    visual_diag = $test$plusargs("VISUAL_DIAG");
     visual_expected_pixels = visual_width * visual_height;
     if (visual_width < 1 || visual_width > 352 ||
         visual_height < 1 || visual_height > 240)
@@ -2492,6 +2508,14 @@ initial begin
     end
     if (!$value$plusargs("SCENARIO=%s", scenario))
         scenario = "attract_idle";
+    if (!$value$plusargs("COIN_FRAME_LO=%d", coin_frame_lo))
+        coin_frame_lo = 30;
+    if (!$value$plusargs("COIN_FRAME_HI=%d", coin_frame_hi))
+        coin_frame_hi = 34;
+    if (!$value$plusargs("START_FRAME_LO=%d", start_frame_lo))
+        start_frame_lo = 165;
+    if (!$value$plusargs("START_FRAME_HI=%d", start_frame_hi))
+        start_frame_hi = 170;
     if (!$value$plusargs("P1_LATENCY=%d", p1_latency))
         p1_latency = 0;
     if (!$value$plusargs("DUMP_TILEMAP=%d", dump_tilemap_frame))

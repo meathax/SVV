@@ -72,6 +72,20 @@ if es5506_output then
         end)
 end
 
+-- Per-game override for the coin/start frame window below. The hardcoded
+-- 30-34 / 165-170 defaults are Dyna Gear-tuned (see file header) and land
+-- before other games' coin-poll loops even start -- confirmed for vasara1
+-- via docs/debug/vasara/GAMEPLAY_AND_SOUND.md: its own coin-accept polling
+-- loop (SYSTEM port read at PC 0xF01046/0xF01094) does not begin until
+-- ~frame 73, so any injection ending at or before frame 60 (including the
+-- old 20-60 coin_start_probe hold) is structurally invisible to the game,
+-- regardless of pulse duration or bit polarity -- both already-ruled-out
+-- hypotheses in that journal. This does not change Dyna Gear's defaults.
+local coin_frame_lo = tonumber(os.getenv("SSV_COIN_FRAME_LO")) or 30
+local coin_frame_hi = tonumber(os.getenv("SSV_COIN_FRAME_HI")) or 34
+local start_frame_lo = tonumber(os.getenv("SSV_START_FRAME_LO")) or 165
+local start_frame_hi = tonumber(os.getenv("SSV_START_FRAME_HI")) or 170
+
 local function apply_inputs(frame)
     coin1:set_value(0)
     p1_start:set_value(0)
@@ -82,8 +96,8 @@ local function apply_inputs(frame)
        scenario ~= "coin_start_p1_gameplay" then
         return
     end
-    coin1:set_value((frame >= 30 and frame < 34) and 1 or 0)
-    p1_start:set_value(((frame >= 165 and frame < 170) or
+    coin1:set_value((frame >= coin_frame_lo and frame < coin_frame_hi) and 1 or 0)
+    p1_start:set_value(((frame >= start_frame_lo and frame < start_frame_hi) or
                         (frame >= 250 and frame < 255) or
                         (scenario == "coin_start_p1_gameplay" and
                          frame >= 480 and frame < 485)) and 1 or 0)

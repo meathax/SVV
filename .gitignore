@@ -45,3 +45,6 @@ __pycache__/
 *~
 .DS_Store
 Thumbs.db
+
+# MAME MCP generated scripts/logs/state (mister-mame-diff skill)
+.mame_mcp/
