@@ -76,7 +76,14 @@ module s32_v60 #(
 
     // debug/trace
     output reg [31:0] dbg_pc,
-    output            dbg_halted
+    output            dbg_halted,
+    // Pulses one clk_sys cycle whenever an instruction retires into decode
+    // (ce-gated, not gated on interrupt-frame entry -- a simple "CPU is
+    // alive and making forward progress" heartbeat for the OSD debug HUD;
+    // not intended to be cycle-exact with any simulation-only retirement
+    // counter). Purely additive/observational: does not affect any existing
+    // signal or FSM transition.
+    output            dbg_retire
 );
 
 // ---------------------------------------------------------------------------
@@ -109,6 +116,7 @@ wire        psw_is = psw_rest[28];
 
 reg halted;
 assign dbg_halted = halted;
+assign dbg_retire = ce && (st == S_DECODE) && !halted;
 
 // ---------------------------------------------------------------------------
 // Data/prefetch bus arbiter.  The CPU's DATA accesses drive dbus_* and observe
