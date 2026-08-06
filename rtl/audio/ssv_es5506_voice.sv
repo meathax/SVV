@@ -172,11 +172,23 @@ function automatic logic signed [17:0] lp(
     input logic [15:0] k,
     input logic signed [17:0] h
 );
+    // x and h are already 18-bit signed at their natural width. The previous
+    // form re-sign-extended each to 32 bits before subtracting, which forced
+    // Quartus to synthesize the downstream multiply against a 32-bit operand
+    // (measured: doubled to two physical DSP blocks, "18x18 plus 36" plus a
+    // companion "Two Independent 18x18", instead of one). Two 18-bit signed
+    // values subtracted need at most 19 bits to represent the exact result
+    // without overflow (range +-262142, fits in signed 19-bit's +-262144) --
+    // `diff` below is numerically identical to the old 32-bit-wide
+    // subtraction, just without the redundant high sign-extension bits that
+    // don't change the value but do change how wide a multiplier Quartus
+    // thinks it needs.
+    logic signed [18:0] diff;
     logic signed [31:0] t;
     begin
-        t = (($signed({{14{x[17]}}, x}) - $signed({{14{h[17]}}, h}))
-             * $signed({1'b0, k[15:4]})) >>> 12;
-        lp = sat18($signed({{14{h[17]}}, h}) + t);
+        diff = $signed({x[17], x}) - $signed({h[17], h});
+        t = ($signed(diff) * $signed({1'b0, k[15:4]})) >>> 12;
+        lp = sat18($signed(h) + t);
     end
 endfunction
 
@@ -186,11 +198,14 @@ function automatic logic signed [17:0] hp(
     input logic signed [17:0] h,
     input logic signed [17:0] prev
 );
+    // Same fix as lp(): h is already signed 18-bit at its declared width, so
+    // $signed(h) carries the identical value the old 32-bit re-extension did
+    // -- multiplying against it directly instead of a 32-bit-padded copy lets
+    // this collapse back to a single DSP block.
     logic signed [31:0] t;
     begin
-        t = ($signed({1'b0, k[15:4]}) * $signed({{14{h[17]}}, h})) >>> 13;
-        hp = sat18($signed({{14{x[17]}}, x}) - $signed({{14{prev[17]}}, prev})
-                   + t + ($signed({{14{h[17]}}, h}) >>> 1));
+        t = ($signed({1'b0, k[15:4]}) * $signed(h)) >>> 13;
+        hp = sat18($signed(x) - $signed(prev) + t + ($signed(h) >>> 1));
     end
 endfunction
 
@@ -199,11 +214,23 @@ function automatic logic signed [15:0] lerp(
     input logic signed [15:0] b,
     input logic [31:0] acc
 );
+    // frac is 9 bits by construction (acc[10:2]), so 512-frac ranges 1..512
+    // and fits in 10 bits unsigned -- both terms below were previously
+    // computed as full 32-bit values (32'sd512 - 32'(frac), 32'(frac)) for a
+    // pair of numbers that never exceed 10 significant bits, again forcing a
+    // doubled-up DSP multiplier for no numeric reason. frac_inv keeps the
+    // exact same unsigned-operand structure the original had (neither
+    // frac_inv nor frac is wrapped in $signed() here, matching
+    // "32'sd512 - 32'(frac)" and "32'(frac)" being unsigned expressions in
+    // the original) -- only the bit width changes, not which operand is
+    // signed vs unsigned, so the multiply's arithmetic is unchanged.
     logic [8:0] frac;
+    logic [9:0] frac_inv;
     logic signed [31:0] t;
     begin
         frac = acc[10:2];
-        t = $signed(a) * (32'sd512 - 32'(frac)) + $signed(b) * 32'(frac);
+        frac_inv = 10'd512 - {1'b0, frac};
+        t = $signed(a) * frac_inv + $signed(b) * frac;
         lerp = t[24:9];
     end
 endfunction
