@@ -25,7 +25,15 @@ function Assert-BuildPolicy {
         'set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF',
         'set_global_assignment -name SMART_RECOMPILE ON',
         'set_global_assignment -name SAVE_DISK_SPACE OFF',
-        'set_global_assignment -name COMPRESSION_MODE OFF'
+        # Compressed bitstreams are a hard MiSTer/DE10-nano requirement, not
+        # a preference: the HPS configuration path only accepts compressed
+        # Cyclone V bitstreams. COMPRESSION_MODE OFF was added incidentally
+        # in commit 5eb1f5b (an unrelated fitter-tuning pass, no rationale
+        # given) and briefly enforced here as if it were required; an
+        # uncompressed RBF assembles and passes every report, then silently
+        # fails to configure the FPGA on real hardware (GPI[31]==1, dead
+        # core, no signal). Fixed 2026-08-05.
+        'set_global_assignment -name COMPRESSION_MODE ON'
     )
     foreach ($assignment in $required) {
         if (-not $qsf.Contains($assignment)) {

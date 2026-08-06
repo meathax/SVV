@@ -19,7 +19,7 @@ set_global_assignment -name GENERATE_RBF_FILE ON
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name SAVE_DISK_SPACE OFF
 set_global_assignment -name SMART_RECOMPILE ON
-set_global_assignment -name COMPRESSION_MODE OFF
+set_global_assignment -name COMPRESSION_MODE ON
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP "-40"
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100
 set_global_assignment -name POWER_PRESET_COOLING_SOLUTION "23 MM HEAT SINK WITH 200 LFPM AIRFLOW"
@@ -70,7 +70,14 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 2
+# SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
+# no Error text captured (once during placement prep, once even earlier during
+# clock-uncertainty derivation) -- inconsistent crash point across two
+# identical-config runs, matching the Quartus 17.0.2 Lite virtual-memory
+# ceiling documented below (peak VM was already 8843 MB on the last successful
+# fit before these crashes, i.e. already close to the ~9,072 MB failure point
+# recorded 29 Jul 2026). Per this file's own "Sweep SEED instead" guidance.
 # quartus_map/fit Access Violation on this host at 4-way; keep single-threaded.
 # NUM_PARALLEL_PROCESSORS is 1 on purpose, not by omission. Raising it to 4 on
 # 29 Jul 2026 took quartus_fit to 9,072 MB peak virtual memory and it died with
