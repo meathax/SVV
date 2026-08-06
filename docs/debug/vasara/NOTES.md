@@ -246,3 +246,52 @@ iteration classifies (does not newly discover) the frame 229+ divergence.
    hypothesis) or stays elevated (would refute it) — not done this session.
 2. If confirmed, find the specific RTL register/signal driving the
    transition wipe and compare its write timing against MAME.
+
+## Iteration 4 — correction: state comparison had a field-name bug; wipe-convergence test refuted; real picture is a bounded +3-frame offset (2026-08-06)
+
+**Correction of Iteration 2/3 claims**: the state-CRC comparison script used
+in Iteration 2 required `scroll64=` on both sides; RTL actually emits
+`scroll63=`, so the regex never matched any RTL line and `set(mame) &
+set(rtl)` was empty. This was silently reported as "zero exceptions" —
+a false negative, not a real result. Fixed the regex (`scroll6[34]=`) and
+re-ran the comparison across the full frame 0-259 range (needed a fresh
+RTL run with `+STATE_CRC=` added, since the PPM-focused reruns in
+Iteration 3 hadn't requested it).
+
+**Corrected findings:**
+- `list512`/`spr8k`: first differ at frame 22 -- a 2-frame-early transition
+  boundary (MAME switches at 24, RTL at 22), both plateau afterward through
+  at least frame 39. Same benign pattern documented project-wide.
+- `pal512`: first differs at frame 69; `MAME[f] == RTL[f-3]` exactly across
+  every 15-frame window tested from 70 to 255 except the 220-234 block
+  (which overlaps the still-unexplained pixel anomaly below). **Constant
+  offset, not growing** -- different in kind from vasara2's documented
+  compounding CPU-throughput divergence. Frame ~70 aligns closely with
+  vasara1's independently-measured coin-poll-loop start (~frame 73),
+  suggesting this is the same already-documented "CPU-phase boundary"
+  shift from vasara1's original attract-mode journal, not a new defect.
+
+**Wipe-convergence test (requested next step from Iteration 3), REFUTED**:
+captured frames 243-255 (both sides, `+DUMP_PPM_START=243 +DUMP_PPM_COUNT=13`
+RTL / `SSV_PPM_FRAMES=243,...,255` MAME). The predicted shrink-back-to-~0%
+did not happen: mismatch grew to 90.7% at frame 249 (wipe boundary reaching
+x=0 at the same -24px/frame rate), then dropped to a different, fixed bbox
+`(0,56)-(271,183)` from frame 250, shrinking 37.6%->11.9% by frame 255. The
+"1-frame timing skew, otherwise-identical, self-converging" hypothesis from
+Iteration 3 is refuted -- something larger than a fixed frame offset is
+happening in this window.
+
+**Root cause + evidence**: NOT fully resolved. The +3-frame state offset
+(bounded, likely a known/pre-existing effect) is understood; the frames
+220-255 pixel/state anomaly is not.
+
+**Regressions:** none run this session beyond the comparisons above.
+
+**Open observability gaps / next action:**
+1. The frames 220-255 anomaly needs a PC/bus-level trace (not just frame/
+   state CRC snapshots) on both sides to find where execution genuinely
+   diverges beyond the constant +3-frame offset -- the one real open
+   question remaining from this whole investigation chain.
+2. Re-check vasara2's own state comparison for the same scroll63/scroll64
+   field-name bug -- its "state matches" conclusions (if any used the same
+   comparison approach) should be treated as unverified until re-checked.

@@ -191,11 +191,14 @@ known MAME-vs-RTL boot-epoch warmup mismatch per this project's existing
 
 - **Frames 1-111: pixel-exact.** Coin insertion itself (frames 100-110)
   produces zero visible divergence.
-- **State CRCs (`list512`/`spr8k`/`scroll64`/`pal512`) match exactly across
-  the entire 248-frame comparison window, with zero exceptions.** The
-  divergence described below is confined to rendered pixels only — this is
-  a presentation/rendering-timing question, not a gameplay-logic or
-  CPU-state bug.
+- **State CRC claim below was WRONG — see the correction two sections down.**
+  ~~State CRCs (`list512`/`spr8k`/`scroll64`/`pal512`) match exactly across
+  the entire 248-frame comparison window, with zero exceptions.~~ This was a
+  false negative from a comparison-script bug (RTL emits `scroll63=`, the
+  script looked for `scroll64=` on both sides, so the regex never matched a
+  single RTL line and the "comparison" silently ran over an empty set).
+  State genuinely does diverge — bounded and non-growing, not a new bug; see
+  the correction below for the real picture.
 - **Frames 112-201: small, periodic, self-correcting mismatches** (112,
   118-119, 133-134, 138-139, 149-150, 159-160, 164-165, 179-181, 195-196,
   200-201 — roughly every 14-20 frames, 1-2 frames each). This is the same
@@ -269,29 +272,70 @@ documented elsewhere in this project (e.g. Twin Eagle II's palette/scanline
 split from a live-vs-snapshot palette update), not a new mechanism, applied
 here to a transition wipe instead of a palette write.
 
-**Not yet confirmed**: the hypothesis predicts the mismatch should *shrink
-back down* once the wipe completes on both sides (the boundary reaching
-x≈0) — this session's capture stopped at frame 242, before that point.
-Capturing a few more frames (the wipe at -24px/frame from x=144 would reach
-x≈0 around frame 248) would either confirm the hypothesis (mismatch drops
-back toward the ~0.1% baseline) or refute it (stays elevated, pointing to an
-actual content difference rather than a timing offset).
+**The wipe-convergence prediction was tested and refuted.** Captured frames
+243-255 (both sides) as planned. The mismatch did **not** shrink back down —
+it kept *growing* (46% at 243, up to 90.7% at frame 249, the wipe boundary
+continuing left at the same -24px/frame all the way to x=0), then dropped to
+a **different, fixed** bounding box `(0,56)-(271,183)` from frame 250
+onward, shrinking steadily (37.6% → 11.9% by frame 255). This is not a
+simple "off by one frame, otherwise identical" transition; a bigger effect
+is in play during frames 220-255.
+
+## CORRECTION (2026-08-06) — the earlier "state matches exactly" claim was a script bug; the real picture
+
+Rechecking with the regex fixed (`scroll6[34]=` instead of a strict
+`scroll64=`) found real state divergence that the broken check had silently
+hidden:
+
+- `list512`/`spr8k` (sprite list/RAM): first differ at frame 22, but it's a
+  single **2-frame-early transition boundary** (MAME switches value at
+  frame 24, RTL at frame 22) — the same benign "CPU-phase boundary" pattern
+  already documented for *every* title in this project (Dyna Gear,
+  Cairblad, vasara1's own attract-mode journal), not a new or growing issue.
+  Confirmed via a shift search: both sides sit on an unchanging plateau
+  value from frame 24 through at least 39, ruling out compounding drift in
+  this window.
+- `pal512`: first differs at frame 69, but **`MAME[f] == RTL[f-3]` exactly**
+  for every tested window from frame 70 through 255 (checked in 15-frame
+  blocks at 70,100,130,160,190,220,240,250; every one gives an exact
+  15/15 match at shift=+3, except the 220-234 block, which sits inside the
+  frames-235-249 anomaly above and doesn't resolve to a clean shift). **This
+  offset is constant, not growing** — categorically different from the
+  documented compounding V60-CPU-throughput divergence in vasara2's attract
+  mode (`docs/debug/vasara2/ATTRACT_DIVERGENCE.md`), which grows without
+  bound over hundreds of frames. Frame ~70 lines up closely with vasara1's
+  independently-measured coin-poll-loop start (~frame 73, this same
+  session) — this is very likely the *same* few-frame "CPU-phase boundary"
+  shift vasara1's original attract-mode journal already found and assessed
+  as benign ("already about as close to MAME as this core gets given the
+  known, unresolved CPU-timing question"), not a new defect introduced by
+  the coin-start scenario or this session's fixes.
+
+**Net effect on this session's conclusions**: the "state is exactly
+identical, only presentation differs" framing was too strong and is
+withdrawn. The corrected picture is that vasara1's post-coin trajectory
+carries the same small, bounded, already-documented CPU-phase-boundary
+offset as its attract mode — not a new bug — but frames 220-255 show a
+larger, not-yet-explained effect (the growing-then-relocating pixel
+mismatch, and the one state window that doesn't resolve to a clean shift)
+that is **not** accounted for by the constant +3 offset alone and needs
+further investigation before being classified.
 
 ## Next steps (revised again)
 
-1. Capture frames ~243-255 (both sides) to test the wipe-convergence
-   prediction above — the single remaining open question from this session.
-2. If confirmed as a 1-frame transition-timing skew: locate which RTL signal
-   drives the wipe (likely a scroll or window/crop register written once per
-   frame during the transition) and compare its write timing against MAME's
-   equivalent, the same way other single-frame presentation skews in this
-   project have been root-caused (video-enable/palette timing at the
-   video-timing boundary, not gameplay logic).
-3. Given vasara2's coin_start_p1 scenario "worked" with the *original*
+1. Root-cause the frames 220-255 anomaly specifically: get a PC/bus trace
+   (not just frame/state CRCs) spanning that window on both sides to find
+   the first causal event where RTL and MAME's *execution*, not just
+   presentation, diverges beyond the constant +3-frame offset. This is the
+   one real open question from this session — everything else (coin timing,
+   the +3 boundary shift) is now understood and consistent with prior
+   documented findings.
+2. Given vasara2's coin_start_p1 scenario "worked" with the *original*
    30-34 default (per `docs/debug/vasara2/GAMEPLAY_AND_SOUND.md`), vasara2's
    own coin-poll loop evidently starts earlier than vasara1's — worth a
    quick confirmatory trace_memory_access pass on vasara2 too, since its
    result was never independently verified against a MAME-side RAM/state
    check the way vasara1 now has been (it was inferred from RTL-side pixel
    transitions and audio activity, not directly confirmed on the MAME side
-   with the rigor applied here).
+   with the rigor applied here). Also worth re-checking vasara2's own state
+   comparison for the same `scroll63`/`scroll64` field-name bug found here.
