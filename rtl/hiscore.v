@@ -876,51 +876,54 @@ end else begin : g_ram_block
 	// the whole hiscore module reporting only 768 memory bits. That is roughly
 	// 3.3% of the device spent on a high score table.
 	//
-	// no_rw_check waives same-address read/write coherency, which is safe
-	// here (neither deep instance has a consumer that reads an address in
-	// the cycle it writes it), but a SEPARATE Quartus 17 limitation still
-	// blocked M10K inference even with that attribute: a real fit
-	// (2026-08-05) showed "can't infer memory for variable 'ram'" firing
-	// on this exact array despite the ramstyle, and the unconditional-read
-	// restructuring attempted that day (both ports handled in one shared
-	// always block) STILL failed to infer -- reconfirmed by a real fit on
-	// 2026-08-06. Splitting into one always block per port (below) cleared
-	// the hard "can't infer" error but a real fit the same day then showed
-	// "uninferred due to asynchronous read logic" -- the pattern matcher
-	// wants an always_ff containing ONLY one write port and one
-	// unconditional registered read, nothing else. The we_a_d/d_a_d delay
-	// copies used for the write-first output bypass were sharing that same
-	// block; moved to their own block below so each RAM-access block is
-	// exactly the documented minimal TDP template. Behaviourally identical:
-	// every signal still updates on the same clock edge as before: this
-	// only changes which always block textually contains each assignment,
-	// not any dependency between them (we_a_d/d_a_d depend only on
-	// we_a/d_a, never on ram_q_a or vice versa).
+	// no_rw_check waives same-address read/write coherency ACROSS the two
+	// ports (port A writing address X while port B reads address X in the
+	// same cycle), which is safe here (neither deep instance has a
+	// consumer that reads an address in the cycle it writes it). Getting
+	// this array to actually infer as M10K took three real-fit iterations:
+	// - 2026-08-05: unconditional-read/delayed-bypass in one shared always
+	//   block (both ports) -> "can't infer memory for variable 'ram'".
+	// - 2026-08-06 attempt 1: split into one always block per port, still
+	//   unconditional-read/delayed-bypass -> "uninferred due to
+	//   asynchronous read logic".
+	// - 2026-08-06 attempt 2: isolated the RAM access into its own block
+	//   per port, moved the we_a_d/d_a_d delay copies to a separate block
+	//   -> STILL "uninferred due to asynchronous read logic". The extra
+	//   indirection (ram_q_a/we_a_d/d_a_d feeding q_a through a downstream
+	//   `always @(*)` mux, rather than q_a being driven directly inside
+	//   the memory-access block) was the actual remaining blocker.
+	// Below is Altera's literal documented true-dual-port write-first
+	// template: one always block per port, write-then-bypass in the `if`
+	// branch, registered read in the `else` branch, q_a/q_b driven
+	// directly -- no intermediate signals. This is what the M10K's native
+	// NEW_DATA read-during-write mode implements in hardware, so it is the
+	// best-supported inference shape. Behaviourally identical to the
+	// previous (broken-inference) version: q_a still updates exactly one
+	// cycle after we_a/d_a/addr_a are presented, to d_a if we_a was set
+	// that cycle (write-first bypass) or to the array's prior contents
+	// otherwise -- same latency, same bypass semantics, just reached
+	// directly instead of through a delayed we_a_d/d_a_d/ram_q_a mux.
 	(* ramstyle = "M10K, no_rw_check" *) reg [dWidth-1:0] ram [2**aWidth-1:0];
 
-	reg                 we_a_d, we_b_d;
-	reg [dWidth-1:0]    d_a_d,  d_b_d;
-	reg [dWidth-1:0]    ram_q_a, ram_q_b;
-
 	always @(posedge clk) begin
-		if (we_a) ram[addr_a] <= d_a;
-		ram_q_a <= ram[addr_a];
+		if (we_a) begin
+			ram[addr_a] <= d_a;
+			q_a <= d_a;
+		end
+		else begin
+			q_a <= ram[addr_a];
+		end
 	end
 
 	always @(posedge clk) begin
-		if (we_b) ram[addr_b] <= d_b;
-		ram_q_b <= ram[addr_b];
+		if (we_b) begin
+			ram[addr_b] <= d_b;
+			q_b <= d_b;
+		end
+		else begin
+			q_b <= ram[addr_b];
+		end
 	end
-
-	always @(posedge clk) begin
-		we_a_d  <= we_a;
-		d_a_d   <= d_a;
-		we_b_d  <= we_b;
-		d_b_d   <= d_b;
-	end
-
-	always @(*) q_a = we_a_d ? d_a_d : ram_q_a;
-	always @(*) q_b = we_b_d ? d_b_d : ram_q_b;
 
 end
 endgenerate
