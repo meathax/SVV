@@ -33,9 +33,15 @@ specification. The Programmer's Reference is authoritative for:
 - Byte-lane and bus-width rules for the 16-bit external bus, which `s32_v60_bus` implements
   by inference.
 
-**Still missing:** hardware AC timing (clocks per bus cycle, wait states). The Programmer's
-Reference is a software document; a µPD70616 *hardware* datasheet has not been located
-`[NEGATIVE]`.
+**Update 2026-08-06 — timing evidence recovered.** See `V60_TIMING_EVIDENCE.md`:
+Komoto/Saito/Mine (NEC), *Overview of 32-bit V-Series Microprocessor*, J. Info. Processing
+13(2) 1990 `[PRIMARY]` (on file in `refs/`) gives the V60 bus cycle (**3 or 4 clocks/cycle,
+16-bit bus**), the 6-unit/6-stage pipeline with max 4 concurrent instructions, 3.5 MIPS @
+16 MHz, and a per-instruction clock table (V70 column; execution-bound entries transfer to
+V60 — ADD reg,reg=2, MUL.W=23, DIV.W=43, branch 11/4, INT response 165, etc.).
+The µPD70616 *full* datasheet with formal AC tables (T-state protocol, wait-state rules)
+is still not located `[NEGATIVE]` — the 1987 Data Book Vol 2 (also in `refs/`) carries only
+the same 3-page preliminary short-form as the DSAIH000102840 excerpt.
 
 ---
 

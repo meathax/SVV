@@ -295,6 +295,8 @@ integer visual_nonzero_spr_writes, visual_spr_write_logs;
 integer visual_cache_store_logs;
 integer visual_boot_trace_count;
 logic [31:0] visual_boot_trace_pc;
+integer visual_loop_trace_count;
+longint unsigned visual_loop_trace_start;
 longint unsigned visual_sample_fetches, visual_nonzero_sample_fetches;
 integer visual_sample_fetch_logs;
 logic [15:0] visual_sample_word;
@@ -339,6 +341,74 @@ integer main_count, sprite_count, i;
 // (~805k clk_sys per 60 Hz frame plus ~26M of boot).  The long gameplay
 // scenario needs more than that, so the cycle budget is 64-bit.
 longint cycle_count, max_cycles;
+
+// ---------------------------------------------------------------------
+// V60 per-instruction cycle-cost profiler (simulation-only, additive).
+// Taps the CPU's existing dbg_retire/dbg_pc/cur_op debug hooks
+// (rtl/cpu/v60/s32_v60.sv) hierarchically via `dut.cpu.*` -- exactly like
+// the pre-existing BOOT_TRACE/CPU_LOOP_TRACE probes below already do for
+// dut.cpu.st/dut.cpu.r[]. Zero RTL changes; reads only. See
+// docs/hardware/V60_CYCLE_TIMING_REFERENCE.md for the hardware targets
+// this is meant to be compared against (via tools/analyze_v60_cycle_profile.py).
+// Enabled with +V60_CYCLE_PROFILE; window and output path are configurable.
+// ---------------------------------------------------------------------
+bit                    v60_prof_enable;
+bit                    v60_prof_started;
+integer                v60_prof_lo_frame, v60_prof_hi_frame;
+string                 v60_prof_path;
+integer                v60_prof_fd;
+longint unsigned       v60_prof_last_tick;
+longint unsigned       v60_prof_delta;
+logic [7:0]            v60_prof_op_tmp;
+longint unsigned       v60_prof_op_count [0:255];
+longint unsigned       v60_prof_op_cycles[0:255];
+longint unsigned       v60_prof_op_min   [0:255];
+longint unsigned       v60_prof_op_max   [0:255];
+longint unsigned       v60_prof_total_instrs;
+
+// ---------------------------------------------------------------------
+// V60 per-FSM-state cycle profiler, gated to ONE target opcode byte per run
+// (+V60_STATE_PROFILE_OP=<hex>). Same dbg-hook tap as the opcode profiler
+// above; additionally reads dut.cpu.st (already used elsewhere in this file,
+// e.g. BOOT_TRACE/CPU_LOOP_TRACE). Localizes WHERE inside a specific
+// instruction's execution its cycles go (S_EA_MODE, S_WB_MEM, etc.) --
+// the natural next step after the opcode-level ranking in
+// docs/hardware/V60_CYCLE_PROFILE_FINDINGS.md. Caveat: cur_op still holds
+// the OUTGOING instruction's opcode during the retiring S_DECODE cycle
+// itself (see that same finding doc / the opcode profiler's comment below),
+// so each instruction's own S_DECODE cycle is undercounted by exactly one
+// tick, attributed instead to whatever instruction preceded it. Negligible
+// against the hundreds of cycles a single instruction spans, but real --
+// documented rather than engineered around, to keep this instrumentation
+// simple and reuse the already-validated read timing.
+// ---------------------------------------------------------------------
+bit                    v60_stateprof_enable;
+logic [7:0]            v60_stateprof_target_op;
+longint unsigned       v60_stateprof_cycles [0:127];
+longint unsigned       v60_stateprof_entries[0:127];
+logic [6:0]            v60_stateprof_prev_st;
+bit                    v60_stateprof_prev_valid;
+string                 v60_stateprof_path;
+integer                v60_stateprof_fd;
+
+// ---------------------------------------------------------------------
+// V60 memory-access-site trace: which memory region (sel_wram/sel_sprram/
+// sel_rom/etc, from ssv_core.sv's own address decode) and how many clk_sys
+// ticks a specific opcode's S_WB_MEM/S_OP2_LD wait actually resolves against.
+// Answers whether the dominant cost found in
+// docs/hardware/V60_CYCLE_PROFILE_FINDINGS.md is SDRAM-arbitration-bound
+// (sel_rom) or local-BRAM-bound (sel_wram/sel_sprram/etc, no SDRAM
+// controller or arbiter involved at all). Bounded print count; simulation
+// only, no RTL signal written.
+// ---------------------------------------------------------------------
+bit                    v60_memtrace_enable;
+logic [7:0]            v60_memtrace_target_op;
+integer                v60_memtrace_printed;
+integer                v60_memtrace_max;
+logic [6:0]            v60_memtrace_prev_st;
+bit                    v60_memtrace_prev_valid;
+longint unsigned       v60_memtrace_entry_tick;
+
 `ifdef SSV_VISUAL_EXTERNAL_CLOCK
 logic external_setup_complete;
 integer external_reset_edges;
@@ -1087,6 +1157,14 @@ task automatic apply_inputs(input integer f);
     in_extra = 16'hffff;
     in_p1 = 16'hffff;
     in_system = 16'hffff;
+    // Diagnostic-only probe: a much longer, more forgiving coin+start hold
+    // than coin_start_p1's 4-frame pulses, used to check whether a title's
+    // coin-accept window is simply longer than that script assumes. Not
+    // tuned for any specific game's actual gameplay beyond coin+start.
+    if (scenario == "coin_start_probe") begin
+        if (f >= 20 && f < 60)   in_system[0] = 1'b0;  // COIN1, held 40 frames
+        if (f >= 80 && f < 140)  in_p1[0] = 1'b0;       // START, held 60 frames
+    end
     if (scenario == "coin_start_p1" ||
         scenario == "coin_start_p1_gameplay" ||
         scenario == "coin_start_p1_long" ||
@@ -1338,6 +1416,7 @@ always_ff @(posedge clk_sys) begin
         visual_cache_store_logs <= 0;
         visual_boot_trace_count <= 0;
         visual_boot_trace_pc <= 32'hffff_ffff;
+        visual_loop_trace_count <= 0;
         visual_cache_slot_valid <= 1'b0;
         visual_cache_last_slot <= 12'd0;
         visual_spr_write_d <= 1'b0;
@@ -1504,6 +1583,20 @@ always_ff @(posedge clk_sys) begin
                      dut.m_req, dut.m_we, dut.a, dut.m_ack);
             visual_boot_trace_count <= visual_boot_trace_count + 1;
             visual_boot_trace_pc <= debug_pc;
+        end
+        // Temporary per-cycle FSM probe (not PC-range-gated): every clk_sys
+        // cycle once armed, so the full S_FILL/S_DECODE/... sequence between
+        // two retirements is visible, not just the retirement cadence.
+        // Used to locate the vasara2 attract idle-loop bottleneck. Remove
+        // after use.
+        if ($test$plusargs("CPU_LOOP_TRACE") &&
+            cycle_count >= visual_loop_trace_start &&
+            visual_loop_trace_count < 6000) begin
+            $display("CPU_LOOP_TRACE cycle=%0d frame=%0d ce=%0b st=%0d pc=%08x fb_base=%08x fb_valid=%0d fb_wr=%0d pf_suppress=%0b pf_busy=%0b r0=%08x",
+                     cycle_count, post_ve_frames, ce_cpu, dut.cpu.st, debug_pc,
+                     dut.cpu.fb_base, dut.cpu.fb_valid, dut.cpu.fb_wr,
+                     dut.cpu.pf_suppress, dut.cpu.pf_busy, dut.cpu.r[0]);
+            visual_loop_trace_count <= visual_loop_trace_count + 1;
         end
         end
 `endif
@@ -2135,11 +2228,114 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
+// ---------------------------------------------------------------------
+// V60 per-instruction cycle-cost profiler -- the actual monitor.
+// dbg_retire pulses for exactly one clk_sys cycle when the CPU's decode
+// stage begins a new instruction (rtl/cpu/v60/s32_v60.sv: "Pulses one
+// clk_sys cycle whenever an instruction retires into decode"). At that
+// same edge, dbg_pc/cur_op (read here BEFORE this edge's non-blocking
+// update lands, per standard SV NBA scheduling) still hold the PC/opcode
+// of the instruction that is finishing, not the one starting -- so this
+// correctly tags the OUTGOING instruction with the elapsed clk_sys ticks
+// since its own retirement pulse, i.e. its total fetch+decode+EA+
+// execute+writeback cost. Purely observational: no RTL signal is written,
+// no synthesizable behavior is touched.
+always @(posedge clk_sys) begin
+    if (v60_prof_enable && !rst && dut.cpu.dbg_retire) begin
+        v60_prof_delta  = cycle_count - v60_prof_last_tick;
+        v60_prof_op_tmp = dut.cpu.cur_op;
+        if (v60_prof_started &&
+            post_ve_frames >= v60_prof_lo_frame &&
+            post_ve_frames <= v60_prof_hi_frame) begin
+            v60_prof_op_count[v60_prof_op_tmp]  <= v60_prof_op_count[v60_prof_op_tmp] + 1;
+            v60_prof_op_cycles[v60_prof_op_tmp] <= v60_prof_op_cycles[v60_prof_op_tmp] + v60_prof_delta;
+            if (v60_prof_delta < v60_prof_op_min[v60_prof_op_tmp])
+                v60_prof_op_min[v60_prof_op_tmp] <= v60_prof_delta;
+            if (v60_prof_delta > v60_prof_op_max[v60_prof_op_tmp])
+                v60_prof_op_max[v60_prof_op_tmp] <= v60_prof_delta;
+            v60_prof_total_instrs <= v60_prof_total_instrs + 1;
+        end
+        v60_prof_last_tick <= cycle_count;
+        v60_prof_started   <= 1'b1;
+    end
+end
+
+always @(posedge clk_sys) begin
+    if (v60_stateprof_enable && !rst && dut.cpu.cur_op == v60_stateprof_target_op) begin
+        v60_stateprof_cycles[dut.cpu.st] <= v60_stateprof_cycles[dut.cpu.st] + 1;
+        if (!v60_stateprof_prev_valid || dut.cpu.st != v60_stateprof_prev_st)
+            v60_stateprof_entries[dut.cpu.st] <= v60_stateprof_entries[dut.cpu.st] + 1;
+        v60_stateprof_prev_st    <= dut.cpu.st;
+        v60_stateprof_prev_valid <= 1'b1;
+    end else begin
+        v60_stateprof_prev_valid <= 1'b0;
+    end
+end
+
+always @(posedge clk_sys) begin
+    if (v60_memtrace_enable && !rst && v60_memtrace_printed < v60_memtrace_max) begin
+        // S_OP2_LD=11, S_WB_MEM=14 per rtl/cpu/v60/s32_v60.sv's st_t enum order
+        if (dut.cpu.cur_op == v60_memtrace_target_op &&
+            (dut.cpu.st == 7'd14 || dut.cpu.st == 7'd11)) begin
+            if (!v60_memtrace_prev_valid || dut.cpu.st != v60_memtrace_prev_st)
+                v60_memtrace_entry_tick <= cycle_count;
+            v60_memtrace_prev_st    <= dut.cpu.st;
+            v60_memtrace_prev_valid <= 1'b1;
+        end
+        else begin
+            if (v60_memtrace_prev_valid) begin
+                $display("V60_MEM_TRACE op=%02x state=%0d addr=%06x sel_wram=%0b sel_sprram=%0b sel_rom=%0b sel_palette=%0b wait_clk_sys=%0d",
+                          v60_memtrace_target_op, v60_memtrace_prev_st, dut.a,
+                          dut.sel_wram, dut.sel_sprram, dut.sel_rom, dut.sel_palette,
+                          cycle_count - v60_memtrace_entry_tick);
+                v60_memtrace_printed <= v60_memtrace_printed + 1;
+            end
+            v60_memtrace_prev_valid <= 1'b0;
+        end
+    end
+end
+
 // Keep the terminal proof gates in one place for both the legacy timed driver
 // and the externally clocked, savable visual profile.
 task automatic finalize_run;
 begin
     run_done = 1'b1;
+    if (v60_prof_enable) begin
+        integer v60_prof_buckets;
+        v60_prof_buckets = 0;
+        v60_prof_fd = $fopen(v60_prof_path, "w");
+        if (v60_prof_fd == 0)
+            $fatal(1, "cannot open V60_CYCLE_PROFILE_OUT path %s", v60_prof_path);
+        $fwrite(v60_prof_fd, "opcode_hex,count,total_clk_sys,min_clk_sys,max_clk_sys,avg_clk_sys\n");
+        for (i = 0; i < 256; i = i + 1) begin
+            if (v60_prof_op_count[i] != 0) begin
+                $fwrite(v60_prof_fd, "%02x,%0d,%0d,%0d,%0d,%0f\n",
+                        i, v60_prof_op_count[i], v60_prof_op_cycles[i],
+                        v60_prof_op_min[i], v60_prof_op_max[i],
+                        real'(v60_prof_op_cycles[i]) / real'(v60_prof_op_count[i]));
+                v60_prof_buckets = v60_prof_buckets + 1;
+            end
+        end
+        $fclose(v60_prof_fd);
+        $display("V60_CYCLE_PROFILE wrote %0d opcode buckets, %0d instructions, window frames [%0d,%0d] to %s",
+                  v60_prof_buckets, v60_prof_total_instrs,
+                  v60_prof_lo_frame, v60_prof_hi_frame, v60_prof_path);
+    end
+    if (v60_stateprof_enable) begin
+        integer v60_stateprof_j;
+        v60_stateprof_fd = $fopen(v60_stateprof_path, "w");
+        if (v60_stateprof_fd == 0)
+            $fatal(1, "cannot open V60_STATE_PROFILE_OUT path %s", v60_stateprof_path);
+        $fwrite(v60_stateprof_fd, "state_id,cycles,entries\n");
+        for (v60_stateprof_j = 0; v60_stateprof_j < 128; v60_stateprof_j = v60_stateprof_j + 1) begin
+            if (v60_stateprof_cycles[v60_stateprof_j] != 0)
+                $fwrite(v60_stateprof_fd, "%0d,%0d,%0d\n", v60_stateprof_j,
+                        v60_stateprof_cycles[v60_stateprof_j], v60_stateprof_entries[v60_stateprof_j]);
+        end
+        $fclose(v60_stateprof_fd);
+        $display("V60_STATE_PROFILE op=%02x wrote to %s",
+                  v60_stateprof_target_op, v60_stateprof_path);
+    end
     if (crc_fd != 0) begin
         $fclose(crc_fd);
         crc_fd = 0;
@@ -2287,6 +2483,8 @@ initial begin
     state_fd = 0;
     if (!$value$plusargs("STATE_START_FRAME=%d", state_start_frame))
         state_start_frame = 0;
+    if (!$value$plusargs("CPU_LOOP_TRACE_AT=%d", visual_loop_trace_start))
+        visual_loop_trace_start = 0;
     if ($value$plusargs("STATE_CRC=%s", state_path)) begin
         state_fd = $fopen(state_path, "w");
         if (state_fd == 0)
@@ -2304,6 +2502,34 @@ initial begin
         soak_frames = 30;
     if (!$value$plusargs("CYCLES=%d", max_cycles))
         max_cycles = 200000000;
+    v60_prof_enable = $test$plusargs("V60_CYCLE_PROFILE");
+    if (!$value$plusargs("V60_CYCLE_PROFILE_LO=%d", v60_prof_lo_frame))
+        v60_prof_lo_frame = 0;
+    if (!$value$plusargs("V60_CYCLE_PROFILE_HI=%d", v60_prof_hi_frame))
+        v60_prof_hi_frame = 999999;
+    if (!$value$plusargs("V60_CYCLE_PROFILE_OUT=%s", v60_prof_path))
+        v60_prof_path = "sim_output/diff/v60_cycle_profile.csv";
+    v60_prof_started = 1'b0;
+    v60_prof_total_instrs = 0;
+    for (i = 0; i < 256; i = i + 1) begin
+        v60_prof_op_count[i]  = 0;
+        v60_prof_op_cycles[i] = 0;
+        v60_prof_op_min[i]    = 64'hFFFF_FFFF_FFFF_FFFF;
+        v60_prof_op_max[i]    = 0;
+    end
+    v60_stateprof_enable = $value$plusargs("V60_STATE_PROFILE_OP=%h", v60_stateprof_target_op);
+    if (!$value$plusargs("V60_STATE_PROFILE_OUT=%s", v60_stateprof_path))
+        v60_stateprof_path = "sim_output/diff/v60_state_profile.csv";
+    v60_stateprof_prev_valid = 1'b0;
+    for (i = 0; i < 128; i = i + 1) begin
+        v60_stateprof_cycles[i]  = 0;
+        v60_stateprof_entries[i] = 0;
+    end
+    v60_memtrace_enable = $value$plusargs("V60_MEM_TRACE_OP=%h", v60_memtrace_target_op);
+    if (!$value$plusargs("V60_MEM_TRACE_MAX=%d", v60_memtrace_max))
+        v60_memtrace_max = 20;
+    v60_memtrace_printed    = 0;
+    v60_memtrace_prev_valid = 1'b0;
     dump_pixels = $test$plusargs("DUMP_PIXELS");
     dump_frame_diag = $test$plusargs("DUMP_FRAME_DIAG");
     dump_renderer_budget = $test$plusargs("DUMP_RENDERER_BUDGET");
@@ -2535,6 +2761,50 @@ initial begin
             break;
     end
 
+    // This is the legacy timed driver's own inline termination path -- it does
+    // NOT call task finalize_run (that copy serves the externally clocked,
+    // savable visual profile only; see its own "Keep the terminal proof gates
+    // in one place" comment, which is aspirational, not yet actually shared).
+    // The V60 cycle profiler dump has to be duplicated here too, or +GAME_ID
+    // runs through this default (non-SSV_VISUAL, non-EXTERNAL_CLOCK) path --
+    // i.e. every plain `run_gameplay_sims.sh`-style build -- silently never
+    // write a CSV despite v60_prof_enable being set correctly.
+    if (v60_prof_enable) begin
+        integer v60_prof_buckets;
+        v60_prof_buckets = 0;
+        v60_prof_fd = $fopen(v60_prof_path, "w");
+        if (v60_prof_fd == 0)
+            $fatal(1, "cannot open V60_CYCLE_PROFILE_OUT path %s", v60_prof_path);
+        $fwrite(v60_prof_fd, "opcode_hex,count,total_clk_sys,min_clk_sys,max_clk_sys,avg_clk_sys\n");
+        for (i = 0; i < 256; i = i + 1) begin
+            if (v60_prof_op_count[i] != 0) begin
+                $fwrite(v60_prof_fd, "%02x,%0d,%0d,%0d,%0d,%0f\n",
+                        i, v60_prof_op_count[i], v60_prof_op_cycles[i],
+                        v60_prof_op_min[i], v60_prof_op_max[i],
+                        real'(v60_prof_op_cycles[i]) / real'(v60_prof_op_count[i]));
+                v60_prof_buckets = v60_prof_buckets + 1;
+            end
+        end
+        $fclose(v60_prof_fd);
+        $display("V60_CYCLE_PROFILE wrote %0d opcode buckets, %0d instructions, window frames [%0d,%0d] to %s",
+                  v60_prof_buckets, v60_prof_total_instrs,
+                  v60_prof_lo_frame, v60_prof_hi_frame, v60_prof_path);
+    end
+    if (v60_stateprof_enable) begin
+        integer v60_stateprof_j;
+        v60_stateprof_fd = $fopen(v60_stateprof_path, "w");
+        if (v60_stateprof_fd == 0)
+            $fatal(1, "cannot open V60_STATE_PROFILE_OUT path %s", v60_stateprof_path);
+        $fwrite(v60_stateprof_fd, "state_id,cycles,entries\n");
+        for (v60_stateprof_j = 0; v60_stateprof_j < 128; v60_stateprof_j = v60_stateprof_j + 1) begin
+            if (v60_stateprof_cycles[v60_stateprof_j] != 0)
+                $fwrite(v60_stateprof_fd, "%0d,%0d,%0d\n", v60_stateprof_j,
+                        v60_stateprof_cycles[v60_stateprof_j], v60_stateprof_entries[v60_stateprof_j]);
+        end
+        $fclose(v60_stateprof_fd);
+        $display("V60_STATE_PROFILE op=%02x wrote to %s",
+                  v60_stateprof_target_op, v60_stateprof_path);
+    end
     if (crc_fd != 0)
         $fclose(crc_fd);
     if (state_fd != 0)
