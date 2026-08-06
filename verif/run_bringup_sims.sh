@@ -13,7 +13,7 @@ VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
-        +define+SIMULATION)
+        +define+SIMULATION +define+SSV_ST010_ENABLED)
 
 CORE_FILES=(
   rtl/ssv_pkg.sv
@@ -27,6 +27,7 @@ CORE_FILES=(
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_cached_sprite_renderer.sv
+ 
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
@@ -50,6 +51,7 @@ SSV_CORE_FILES=(
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_cached_sprite_renderer.sv
+ 
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv

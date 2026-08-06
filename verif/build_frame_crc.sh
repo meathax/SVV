@@ -32,7 +32,7 @@ VFLAGS=(--binary --timing --assert --threads 1
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH
         -Wno-CASEOVERLAP -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN
         -Wno-UNUSEDSIGNAL
-        +define+SIMULATION)
+        +define+SIMULATION +define+SSV_ST010_ENABLED)
 
 CORE=(
   rtl/ssv_pkg.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv

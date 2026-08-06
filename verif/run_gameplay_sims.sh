@@ -12,7 +12,7 @@ VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
-        +define+SIMULATION)
+        +define+SIMULATION +define+SSV_ST010_ENABLED)
 
 CORE=(
   rtl/ssv_pkg.sv rtl/mem/sdram.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv
