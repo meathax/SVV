@@ -367,6 +367,21 @@ always @(posedge clk) begin
     end
     else if (!ready) begin
         init_cnt <= init_cnt - 1'd1;
+        // Default SDRAM_A/SDRAM_BA to a fixed value on every init cycle,
+        // rather than implicitly retaining the previous value when init_cnt
+        // matches none of the case items below (the overwhelming majority of
+        // the ~65535 init cycles). cmd already defaults to CMD_NOP every
+        // cycle (top of this block), and a NOP is defined to ignore its
+        // address/bank inputs (JEDEC SDR SDRAM), so this default is never
+        // chip-visible -- it only removes the synthesized feedback mux
+        // ("keep old value unless one of ~17 case items matches") from
+        // SDRAM_A's fan-in. That mux measured a real setup violation
+        // (-0.299ns, 5 logic levels, init_cnt->SDRAM_A[8]) because deciding
+        // "did nothing match" required OR-ing many wide equality compares
+        // before selecting retain-vs-new-value. A pure decode-then-select
+        // against a fixed default needs no such OR-reduction.
+        SDRAM_A  <= 13'h0000;
+        SDRAM_BA <= 2'b00;
         // init: wait >100us, then PRE-all / 8x REF / MRS for EACH device.  A
         // device that never receives MRS returns garbage the moment it is first
         // addressed, and one that is never refreshed loses whatever it holds --
