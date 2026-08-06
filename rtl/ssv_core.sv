@@ -901,6 +901,17 @@ wire        st010_prg_valid;
 wire [15:0] st010_rdata;
 logic [1:0] st010_rd_cnt;
 
+// ST010 (uPD96050) DSP daughterboard hardware is only needed by drifto94/
+// stmblade -- not Dyna Gear or Vasara 2, the current release targets (see
+// docs/... incremental game-support workflow). cfg.has_st010 already gates
+// all of this DSP's runtime behavior correctly for every title regardless
+// of this switch (sel_st010 stays constant 0, the read mux is untouched,
+// sdr_p5_req never leaves 0) -- SSV_ST010_ENABLED additionally controls
+// whether the DSP's own logic is present in the bitstream at all, since a
+// runtime-idle instance still costs its full static ALM/resource footprint.
+// Re-add with `+define+SSV_ST010_ENABLED` (or the QSF equivalent) when
+// drifto94/stmblade become the active development target.
+`ifdef SSV_ST010_ENABLED
 upd96050_st010 st010 (
     .clk(clk_sys),
     .rst(cold_rst || !cfg.has_st010),
@@ -934,6 +945,11 @@ ssv_st010_prg_fetch st010_fetch (
     .sdr_req(sdr_p5_req), .sdr_addr(sdr_p5_addr),
     .sdr_dout(sdr_p5_dout), .sdr_ack(sdr_p5_ack)
 );
+`else
+assign st010_rdata = 16'd0;
+assign sdr_p5_req  = 1'b0;
+assign sdr_p5_addr = '0;
+`endif
 
 wire [7:0] sound_rdata;
 // ES5506 MLAB banks need 2 wait cycles: steal addr, then latch q → read_latch.

@@ -81,12 +81,29 @@ localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
 //   C3_OCC max=96 at_cap=51        <- line_counts saturated, i.e. the cap hit
 //   C3_DEM max=101 over_cap=31     <- true demand, and 31 lines DROPPED
 //
-// The pool is sized for the measured universal-profile occurrence census.
 // Entries store only the descriptor's low page bits; per-line page starts
 // reconstruct the upper cache-page bits, as in the original compact table.
 // LINE_SLOTS is a per-line guard; LINE_POOL_ENTRIES is the frame-wide bound.
+//
+// Sized 2026-08-05 against real measured evidence, not the prior "universal
+// profile occurrence census" (undocumented anywhere in this repo, and never
+// confirmed by an actual Quartus fit -- see docs/OPTIMIZATION_PRE_RBF.md's
+// own "Quartus fit pending" note). At 65,536 this table alone needs ~1,024
+// MLAB depth-slices (more than the device's entire 985-location MLAB budget)
+// or >553 M10K blocks (the device's entire M10K budget) -- confirmed by a
+// real build, not estimated. docs/M10K_REDUCTION.md separately measured
+// this exact structure against real Dyna Gear gameplay when it was sized as
+// a fixed 96-per-line x 240-line table (23,040 entries, the same frame-wide
+// total this pool now tracks dynamically): zero drops, peak occupancy only
+// 57-90 of the 96 per-line cap. 32,768 keeps ~1.5-2x headroom over that
+// measured Dyna Gear peak and costs ~30 M10K blocks (measured bits-per-block
+// ratio from the same doc), vs. never fitting at all. Vasara 2's actual
+// requirement is NOT independently measured -- this is a reasoned margin,
+// not a confirmed bound. Re-check via cache_overflow (wired to the overrun
+// LED) across both games' regression scenarios before treating this as
+// final; raise it if either game's cache_overflow ever asserts.
 localparam integer LINE_SLOTS = CACHE_ENTRIES;
-localparam integer LINE_POOL_ENTRIES = 65536;
+localparam integer LINE_POOL_ENTRIES = 32768;
 localparam integer LINE_POOL_ADDR_WIDTH = $clog2(LINE_POOL_ENTRIES);
 localparam integer LINE_POOL_COUNT_WIDTH = LINE_POOL_ADDR_WIDTH + 1;
 // Keep one additional carry bit in capacity checks. The allocator itself is
@@ -114,7 +131,8 @@ typedef enum logic [5:0] {
     BUILD_STORE,
     BUILD_BUCKET_READ, BUILD_BUCKET_WRITE, BUILD_ADVANCE,
     BUILD_PREFIX_READ, BUILD_PREFIX_WRITE,
-    BUILD_REINDEX_READ, BUILD_REINDEX_WAIT, BUILD_REINDEX_EVAL,
+    BUILD_REINDEX_READ, BUILD_REINDEX_WAIT,
+    BUILD_REINDEX_OFFSET, BUILD_REINDEX_PRESUM, BUILD_REINDEX_EVAL,
     BUILD_REINDEX_STORE, BUILD_REINDEX_BUCKET_READ,
     BUILD_REINDEX_BUCKET_WRITE,
     RENDER_COUNT_READ, RENDER_COUNT_WAIT,
@@ -143,6 +161,15 @@ logic [CACHE_ADDR_WIDTH:0] cache_count;
 logic [CACHE_ADDR_WIDTH-1:0] cache_read_index;
 logic [CACHE_ADDR_WIDTH:0] cache_render_index;
 logic [127:0] cache_q;
+// descriptor_cache's single read port (see the merged read below) must
+// execute unconditionally every cycle -- Quartus refuses to infer a RAM at
+// all ("uninferred due to asynchronous read logic") for an array whose read
+// only fires under an enable, per this repo's own documented anti-pattern
+// for M10K inference. cache_read_addr_r holds the last address used so an
+// unwanted cycle just re-reads the same word (a no-op: descriptor_cache is
+// never written outside BUILD_EVALUATE, well away from every state that
+// reads it), keeping cache_q's held value and latency identical to before.
+logic [CACHE_ADDR_WIDTH-1:0] cache_read_addr_r;
 logic [127:0] cache_decode_q;
 logic cache_pending;
 // Consecutive copies of the same ordinary (non-shadow, non-tilemap)
@@ -174,12 +201,12 @@ logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
 logic [7:0] line_count_addr;
 logic [LINE_COUNT_WIDTH-1:0] line_count_q;
-// The universal compact pool is frame-wide (65,536 entries), rather than the
-// old 240-line fixed table. Keeping this depth in M10K would consume most of
-// the remaining block budget on the Cyclone V. It has one read address per
-// render cycle and one build-time write address, so steer it to MLAB instead;
-// the later Quartus fit must confirm the expected ALM trade and timing.
-(* ramstyle = "MLAB, no_rw_check" *)
+// M10K, the placement docs/M10K_REDUCTION.md actually measured for this
+// table (21 blocks at 23,040 entries). A later, unmeasured change steered
+// this to MLAB at 3x the depth; that placement cannot work at any size in
+// the tens-of-thousands-of-entries range this table needs (see the sizing
+// comment above LINE_POOL_ENTRIES) -- reverted 2026-08-05.
+(* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_POOL_ENTRIES-1];
 // Page-boundary metadata is read and written with the same single-address
 // schedule as line_counts. Keep it in MLAB: it is frame-local bookkeeping,
@@ -193,7 +220,9 @@ logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 logic [LINE_POOL_ADDR_WIDTH-1:0] line_base_q;
 logic [LINE_POOL_COUNT_WIDTH-1:0] line_pool_alloc;
 logic [CACHE_ADDR_WIDTH:0] cache_scan_index;
-logic [127:0] cache_scan_q;
+// Wire alias, not a register: see the merged read at the cache_q assignment
+// below for why this and cache_q now share one descriptor_cache read port.
+wire  [127:0] cache_scan_q = cache_q;
 logic [7:0] clear_y;
 logic [7:0] bucket_y, bucket_last_y;
 logic [CACHE_ADDR_WIDTH-1:0] bucket_descriptor;
@@ -489,10 +518,34 @@ wire [15:0] cached_tile_mode =
 
 
 wire [3:0] build_offset_index = {global_w0[7:5], 1'b0};
-wire [15:0] build_offset_x =
-    offset_word(sprite_offsets, build_offset_index);
-wire [15:0] build_offset_y =
-    offset_word(sprite_offsets, build_offset_index + 1'd1);
+// Registered at the BUILD_GLOBAL_1->BUILD_LOCAL_WAIT/BUILD_PREFIX_READ
+// transition, as soon as global_w0 (and thus build_offset_index) is valid --
+// not read live here. The live combinational form put the CPU-writable
+// scroll[] table directly on the scroll[37]->line_bases rdaddr_reg setup
+// path (measured -1.256ns/16 logic levels): a 16-way offset_word() mux
+// sourced straight from an async register, feeding the same-cycle
+// build_sy_work/build_first_y arithmetic that BUILD_EVALUATE uses to set
+// line_count_addr. global_w0 is already stable three states before
+// BUILD_EVALUATE (BUILD_LOCAL_WAIT, BUILD_LOCAL_0, BUILD_LOCAL_1 all run in
+// between), so registering the lookup here removes the mux from that
+// critical cycle without adding any FSM latency or changing the value used.
+logic [15:0] build_offset_x, build_offset_y;
+// global_w2/w3 + build_offset_x/y, pre-summed once both operands are stable
+// (registered at BUILD_LOCAL_WAIT, two states -- BUILD_LOCAL_0,
+// BUILD_LOCAL_1 -- before BUILD_EVALUATE needs it). Addition mod 2^16 is
+// associative, and signed10()/signed8() below only ever look at the low 8-10
+// bits of the final sum, so splitting "local + global + offset" into
+// "local + (global + offset)" changes nothing about the computed value.
+// Measured evidence for doing this: after pipelining build_offset_x/y alone
+// (the earlier scroll[37]->line_bases fix), the *next*-worst path on this
+// same clk_sys->line_bases rdaddr_reg endpoint was global_w3->rdaddr_reg[3]
+// (-0.275ns at the Slow -40C corner) -- same arithmetic chain, just entering
+// through the other operand the first fix didn't touch. global_w2/w3 have
+// the same three-state head start build_offset_x/y already had, so this
+// removes them from the single-cycle BUILD_EVALUATE critical path the same
+// way, leaving only local_w2/w3 (which have no slack to pipeline: they are
+// captured the same cycle BUILD_EVALUATE is entered) as live inputs there.
+logic [15:0] build_gx_off_r, build_gy_off_r;
 logic [1:0] build_xbits, build_ybits;
 logic [3:0] build_xnum, build_ynum;
 logic [3:0] build_depth;
@@ -589,8 +642,8 @@ always_comb begin
     build_tilemap_sy = signed10(build_tilemap_sy_work[15:0]);
     build_tilemap_bottom = build_tilemap_sy + 18'sd65;
 
-    build_sx_work = signed10(local_w2 + global_w2 + build_offset_x);
-    build_sy_work = signed10(local_w3 + global_w3 + build_offset_y);
+    build_sx_work = signed10(local_w2 + build_gx_off_r);
+    build_sy_work = signed10(local_w3 + build_gy_off_r);
     build_offsx = signed8(flip_control);
     build_offsy = -(signed10(global_y_base) +
                     $signed({1'b0, global_y_adjust}) + 17'sd1);
@@ -724,6 +777,18 @@ wire [LINE_POOL_SUM_WIDTH-1:0] line_pool_end =
 // reads it, and during BUILD_CLEAR_LINES nothing reads line_count_q at all.
 // If a future change ever samples line_count_q one cycle earlier, this
 // attribute becomes a live sim-versus-silicon divergence.
+//
+// Address for descriptor_cache's single, unconditional read port: the
+// wanted address on a cycle that needs a fresh value, else cache_read_addr_r
+// (last cycle's address) so an uninvolved cycle just repeats the same read.
+wire [CACHE_ADDR_WIDTH-1:0] cache_read_addr =
+    (state == BUILD_REINDEX_READ) ? cache_scan_index[CACHE_ADDR_WIDTH-1:0] :
+    ((state == RENDER_READ) ||
+     ((state == RENDER_PREP) &&
+      (render_line_slot + 1'd1 < render_line_count)))
+        ? line_entry_descriptor
+        : cache_read_addr_r;
+
 always_ff @(posedge clk) begin
     if (rst) begin
         line_count_q <= '0;
@@ -732,7 +797,7 @@ always_ff @(posedge clk) begin
         line_entry_q <= '0;
         line_entry_page_q <= '0;
         line_page_q <= '0;
-        cache_scan_q <= '0;
+        cache_read_addr_r <= '0;
     end
     else begin
         line_count_q <= line_counts[line_count_addr];
@@ -782,13 +847,25 @@ always_ff @(posedge clk) begin
         // line_entry_q, so fetch that descriptor here for RENDER_ADVANCE.
         // Without this prefetch every slot after zero reuses cache_q[0] and
         // the ordinary-descriptor duplicate filter drops the whole line.
-        if ((state == RENDER_READ) ||
-            ((state == RENDER_PREP) &&
-             (render_line_slot + 1'd1 < render_line_count)))
-            cache_q <= descriptor_cache[line_entry_descriptor];
-        if (state == BUILD_REINDEX_READ)
-            cache_scan_q <= descriptor_cache[
-                cache_scan_index[CACHE_ADDR_WIDTH-1:0]];
+        // One read port, not two. RENDER_* (cache_q's old reader) and
+        // BUILD_REINDEX_READ (cache_scan_q's) are states of the same single
+        // FSM register and can never be active in the same cycle, so these
+        // were never really two simultaneous reads -- but writing them as
+        // two separately-conditioned reads of descriptor_cache made Quartus
+        // infer two physical M10K copies (26 blocks each, 52 total) to give
+        // each its own port. cache_scan_q is now a wire alias of cache_q
+        // (see its declaration above); merging the reads costs nothing
+        // functionally and halves this array's M10K footprint.
+        //
+        // The read itself must be unconditional (every cycle), not gated by
+        // an if/else on state, or Quartus refuses RAM inference entirely
+        // ("uninferred due to asynchronous read logic") -- so
+        // cache_read_addr selects the wanted address on a cycle that needs a
+        // fresh value, and otherwise re-selects cache_read_addr_r (last
+        // cycle's address), making the "do nothing" cycles a harmless
+        // re-read of the same word instead of a skipped read.
+        cache_read_addr_r <= cache_read_addr;
+        cache_q <= descriptor_cache[cache_read_addr];
         if (cache_we)
             descriptor_cache[cache_write_count[CACHE_ADDR_WIDTH-1:0]]
                 <= cache_write_data;
@@ -921,6 +998,10 @@ always_ff @(posedge clk) begin
         line_entry_addr <= '0;
         render_line_pages <= '0;
         target_y_latched <= 9'd0;
+        build_offset_x <= 16'd0;
+        build_offset_y <= 16'd0;
+        build_gx_off_r <= 16'd0;
+        build_gy_off_r <= 16'd0;
         sprite_code <= 20'd0;
         sprite_xnum <= 4'd0;
         sprite_ynum <= 4'd0;
@@ -1069,6 +1150,9 @@ always_ff @(posedge clk) begin
             BUILD_GLOBAL_1: begin
                 global_w2 <= spr_data;
                 global_w3 <= spr_data_next;
+                build_offset_x <= offset_word(sprite_offsets, build_offset_index);
+                build_offset_y <=
+                    offset_word(sprite_offsets, build_offset_index + 1'd1);
                 if (global_w1[15]) begin
                     line_count_addr <= 8'd0;
                     state <= BUILD_PREFIX_READ;
@@ -1091,7 +1175,17 @@ always_ff @(posedge clk) begin
             BUILD_GLOBAL_2: state <= BUILD_GLOBAL_WAIT;
             BUILD_GLOBAL_3: state <= BUILD_GLOBAL_WAIT;
 
-            BUILD_LOCAL_WAIT: state <= BUILD_LOCAL_0;
+            BUILD_LOCAL_WAIT: begin
+                // global_w2/w3 and build_offset_x/y are all valid by here
+                // (global_w2/w3 since BUILD_GLOBAL_1; build_offset_x/y
+                // registered that same transition, see their declaration
+                // above) -- pre-sum them now, two states ahead of
+                // BUILD_EVALUATE, for the same reason build_offset_x/y
+                // itself was pipelined.
+                build_gx_off_r <= global_w2 + build_offset_x;
+                build_gy_off_r <= global_w3 + build_offset_y;
+                state <= BUILD_LOCAL_0;
+            end
             BUILD_LOCAL_0: begin
                 local_w0 <= spr_data;
                 local_w1 <= spr_data_next;
@@ -1252,6 +1346,30 @@ always_ff @(posedge clk) begin
                 local_w1 <= cache_scan_q[47:32];
                 local_w2 <= cache_scan_q[31:16];
                 local_w3 <= cache_scan_q[15:0];
+                state <= BUILD_REINDEX_OFFSET;
+            end
+
+            // BUILD_REINDEX_OFFSET/PRESUM mirror the two-stage pipeline
+            // BUILD_LOCAL_WAIT/BUILD_GLOBAL_1 already run for the initial
+            // build pass (see build_offset_x/y and build_gx_off_r/
+            // build_gy_off_r's declarations above). The reindex pass reloads
+            // global_w0/w2/w3 fresh per cached descriptor in
+            // BUILD_REINDEX_WAIT above, so it needs the same two dependent
+            // register stages before build_screen_visible/build_first_y are
+            // valid for THIS descriptor -- reusing build_offset_x/y's stale
+            // value from whatever the initial build pass last computed would
+            // silently misjudge visibility/bucket placement for every
+            // reindexed descriptor whose sprite-offset table entry differs.
+            BUILD_REINDEX_OFFSET: begin
+                build_offset_x <= offset_word(sprite_offsets, build_offset_index);
+                build_offset_y <=
+                    offset_word(sprite_offsets, build_offset_index + 1'd1);
+                state <= BUILD_REINDEX_PRESUM;
+            end
+
+            BUILD_REINDEX_PRESUM: begin
+                build_gx_off_r <= global_w2 + build_offset_x;
+                build_gy_off_r <= global_w3 + build_offset_y;
                 state <= BUILD_REINDEX_EVAL;
             end
 

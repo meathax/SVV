@@ -876,33 +876,51 @@ end else begin : g_ram_block
 	// the whole hiscore module reporting only 768 memory bits. That is roughly
 	// 3.3% of the device spent on a high score table.
 	//
-	// The blocker is the write-first bypass below: q_a follows d_a on a write,
-	// and a TRUE dual-port array cannot promise that across ports on an M10K,
-	// so the tool falls back to registers. no_rw_check says it does not have to
-	// promise it. That is safe here rather than merely convenient -- neither
-	// deep instance has a consumer that reads an address in the cycle it writes
-	// it. hiscore_buffer's q_a is only read once buffer_write has been cleared,
-	// and hiscore_data's q_b is only read while we_b is low. The bypass mux
-	// itself stays, in a few ALMs, so behaviour is unchanged either way.
+	// no_rw_check waives same-address read/write coherency, which is safe
+	// here (neither deep instance has a consumer that reads an address in
+	// the cycle it writes it), but a SEPARATE Quartus 17 limitation still
+	// blocked M10K inference even with that attribute: a real fit
+	// (2026-08-05) showed "can't infer memory for variable 'ram'" firing
+	// on this exact array despite the ramstyle, and the unconditional-read
+	// restructuring attempted that day (both ports handled in one shared
+	// always block) STILL failed to infer -- reconfirmed by a real fit on
+	// 2026-08-06. Splitting into one always block per port (below) cleared
+	// the hard "can't infer" error but a real fit the same day then showed
+	// "uninferred due to asynchronous read logic" -- the pattern matcher
+	// wants an always_ff containing ONLY one write port and one
+	// unconditional registered read, nothing else. The we_a_d/d_a_d delay
+	// copies used for the write-first output bypass were sharing that same
+	// block; moved to their own block below so each RAM-access block is
+	// exactly the documented minimal TDP template. Behaviourally identical:
+	// every signal still updates on the same clock edge as before: this
+	// only changes which always block textually contains each assignment,
+	// not any dependency between them (we_a_d/d_a_d depend only on
+	// we_a/d_a, never on ram_q_a or vice versa).
 	(* ramstyle = "M10K, no_rw_check" *) reg [dWidth-1:0] ram [2**aWidth-1:0];
 
-	always @(posedge clk) begin
-		if (we_a) begin
-			ram[addr_a] <= d_a;
-			q_a <= d_a;
-		end
-		else begin
-			q_a <= ram[addr_a];
-		end
+	reg                 we_a_d, we_b_d;
+	reg [dWidth-1:0]    d_a_d,  d_b_d;
+	reg [dWidth-1:0]    ram_q_a, ram_q_b;
 
-		if (we_b) begin
-			ram[addr_b] <= d_b;
-			q_b <= d_b;
-		end
-		else begin
-			q_b <= ram[addr_b];
-		end
+	always @(posedge clk) begin
+		if (we_a) ram[addr_a] <= d_a;
+		ram_q_a <= ram[addr_a];
 	end
+
+	always @(posedge clk) begin
+		if (we_b) ram[addr_b] <= d_b;
+		ram_q_b <= ram[addr_b];
+	end
+
+	always @(posedge clk) begin
+		we_a_d  <= we_a;
+		d_a_d   <= d_a;
+		we_b_d  <= we_b;
+		d_b_d   <= d_b;
+	end
+
+	always @(*) q_a = we_a_d ? d_a_d : ram_q_a;
+	always @(*) q_b = we_b_d ? d_b_d : ram_q_b;
 
 end
 endgenerate
