@@ -102,3 +102,43 @@ proves nothing about a logic bug. Synthesis is a separate, explicit step at the 
 - Add arbitrary delays to fix a timing symptom.
 - Stack multiple unproven fixes.
 - Claim a fix without recorded, reproducible verification output.
+
+## Resource optimization techniques
+
+### DSP block reduction: narrow multiply operands to natural width
+
+Quartus synthesizes each `*` operator to a DSP block matching the declared width of both operands, even when the operands' actual value ranges are far narrower. **Redundant sign- or zero-extension before multiply silently causes Quartus to split one logical multiply across two physical DSP blocks** (e.g., "18x18 plus 36" + companion "Two Independent 18x18"), with no warning at all.
+
+**Fix:** narrow each operand to its analytically-derived natural bit width, nothing else. This is a pure width change with zero value change when the analysis is right — verify algebraically before committing.
+
+**Example:** ES5506 voice engine filter (`rtl/audio/ssv_es5506_voice.sv`, 2026-08-06):
+- `lp()`: two 18-bit signed values subtracted fit in 19 bits (range ±262142 < signed 19-bit's ±262144); narrowed from re-sign-extended 32-bit, freeing one DSP block per multiply.
+- `hp()` and `lerp()`: similar width-only narrowing, each recovered one DSP block.
+- **Measured result:** module DSP usage dropped from 63 to 57 blocks (synthesis stage estimate), zero RTL restructuring, zero added pipeline stages, exact numeric value preserved.
+
+**Process:**
+1. Identify a multiply where worst-case setup/hold fails by < 2 ns or DSP usage is critical.
+2. Measure the declared operand widths in the Fitter report (`grep -n "DSP Block Details" output_files/*.fit.rpt`); a logical multiply appearing twice means Quartus cascaded two physical blocks.
+3. Compute the minimum required bit width for each operand algebraically (e.g., for two N-bit signed values subtracted, result needs exactly N+1 bits to never overflow).
+4. Replace the operand with one narrowed to that natural width **without adding or removing `$signed()` / `$unsigned()` casts** — preserve the original arithmetic-mode structure exactly.
+5. Verify via `quartus_map`-only compile (seconds, not minutes): `Implemented N DSP elements` should drop in seconds vs. the full ~30-minute flow.
+
+**Caveat:** do not change operand signedness or accidentally alter behavior while narrowing. Confirm the narrowed operand still carries the identical numeric value.
+
+### M10K RAM inference: use Altera's literal true-dual-port write-first template
+
+Quartus 17 has a narrow "sweet spot" for M10K inference on dual-port RAM with write-first behavior. **Arrays that don't match Altera's exact documented template silently remain in logic** (costing thousands of ALMs per KiB) with no warning or diagnostic until a real Fitter run. Even seemingly-correct restructurings still fail if intermediate signals (delayed copies, multiplexed outputs) break the inference pattern.
+
+**Correct pattern:** one `always @(posedge clk)` block per port, containing **only** the array write, the same-cycle write-first bypass, and the unconditional registered read, driving output `q_*` directly.
+
+**Example:** hiscore RAM (`rtl/hiscore.v`, 2026-08-06):
+- **Wrong:** unconditional read + delayed write-first bypass (`we_a_d` / `d_a_d`) in one or even split blocks, feeding `q_a` through a downstream `always @(*)` mux. Fitter diagnosis: "uninferred due to asynchronous read logic" despite `(* ramstyle = "M10K" *)`.
+- **Right:** port A's block contains only write-first (`if (we_a) ... else ...`) + direct `q_a` assignment; port B identically structured. **This is what Altera's M10K NEW_DATA mode implements in hardware**, so it's the best-supported shape.
+- **Result:** array now infers directly into M10K blocks instead of spilling into 3,800+ register ALMs.
+
+**Process:**
+1. If synthesis `grep "uninferred due to" <build>/quartus.log` or Fitter report shows a `ramstyle` array refusing to infer, suspect the pattern.
+2. Read Altera's true-dual-port write-first template from vendor docs or existing working cores (e.g., jotego/jtcores reference).
+3. Restructure to match: **one always block per port, one unconditional read in `else`, write-first in `if`, q assigned directly — nothing else in that block**.
+4. Verify via a real Fitter run; check the per-entity register count in `output_files/*.map.rpt` — if the module's own register count was close to the array's bit count, it was in logic; after the fix, it should match only the non-array logic.
+5. Document the pattern and which arrays use it, so future readers don't accidentally "restructure" it into logic again.
