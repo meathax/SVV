@@ -6,7 +6,7 @@ order, region sizes, DIP switch names/values/defaults and the game metadata.
 Nothing is hand-transcribed, because ten sets of forty-odd CRCs is exactly
 where hand-transcription goes wrong.
 
-  python tools/gen_ssv_mras.py path/to/ssv.cpp mra/
+  python tools/gen_ssv_mras.py path/to/ssv.cpp releases/
 
 The universal profile and this generator cover exactly the sets named in
 ``ssv_supported_sets.py``.  The repository owner keeps parent archives for
@@ -459,7 +459,10 @@ def main():
                '  <setname>%s</setname>' % setname,
                '  <year>%s</year>' % g['year'],
                '  <manufacturer>%s</manufacturer>' % xml_escape(g['maker']),
-               '  <rbf>SSV</rbf>']
+               '  <rbf>SSV</rbf>',
+               '  <resolution>15kHz</resolution>',
+               '  <homebrew>no</homebrew>',
+               '  <bootleg>no</bootleg>']
         # The core emits the board's native raster. Presentation rotation is
         # MRA metadata, not a synthesizable/game-name branch. SSV only uses
         # ROT0 and ROT270, but fail loudly if MAME adds another orientation so

@@ -12,7 +12,7 @@ logic rst;
 logic ce_cpu;
 logic ce_pixel, ce_pix_x2;
 logic [8:0] hcnt, vcnt;
-logic hblank, vblank, hsync, vsync, vblank_pulse;
+logic hblank, vblank, hsync, vsync, vblank_pulse, irq3_pulse;
 
 ssv_tb_ce_cpu cpu_clock (
     .clk(clk), .rst(rst), .ce_cpu(ce_cpu)
@@ -23,7 +23,8 @@ ssv_video_timing video_clock (
     .active_width(9'd336), .active_height(9'd240),
     .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hblank), .vblank(vblank),
-    .hsync(hsync), .vsync(vsync), .vblank_pulse(vblank_pulse)
+    .hsync(hsync), .vsync(vsync), .vblank_pulse(vblank_pulse),
+    .irq3_pulse(irq3_pulse)
 );
 
 longint unsigned cpu_ticks, pixel_ticks;

@@ -72,18 +72,15 @@ module s32_v60 #(
     input             irq_n,         // level, active low
     input       [7:0] irq_vector,    // external vector (s32_intc), +0x40 applied here
     output reg        irq_ack,       // pulses when vector consumed
-    input             nmi_n,
+    input             nmi_n
 
-    // debug/trace
-    output reg [31:0] dbg_pc,
+`ifdef SIMULATION
+    // Simulation-only CPU observability.  Release synthesis has no debug
+    // mirror registers or status ports.
+    , output reg [31:0] dbg_pc,
     output            dbg_halted,
-    // Pulses one clk_sys cycle whenever an instruction retires into decode
-    // (ce-gated, not gated on interrupt-frame entry -- a simple "CPU is
-    // alive and making forward progress" heartbeat for the OSD debug HUD;
-    // not intended to be cycle-exact with any simulation-only retirement
-    // counter). Purely additive/observational: does not affect any existing
-    // signal or FSM transition.
     output            dbg_retire
+`endif
 );
 
 // ---------------------------------------------------------------------------
@@ -115,8 +112,10 @@ wire  [1:0] psw_el = psw_rest[25:24];
 wire        psw_is = psw_rest[28];
 
 reg halted;
+`ifdef SIMULATION
 assign dbg_halted = halted;
 assign dbg_retire = ce && (st == S_DECODE) && !halted;
+`endif
 
 // ---------------------------------------------------------------------------
 // Data/prefetch bus arbiter.  The CPU's DATA accesses drive dbus_* and observe
@@ -682,7 +681,9 @@ if (rst) begin
     dbus_req <= 0; dbus_we <= 0; irq_ack <= 0;
     dbus_addr <= 0; dbus_size <= 0; dbus_wdata <= 0;
     halted <= 0;
+`ifdef SIMULATION
     dbg_pc <= START_PC;
+`endif
     nmi_seen <= 0;
     nmi_r <= 0;
     xdiv_active <= 0;
@@ -822,7 +823,9 @@ else if (ce) begin
 
     // ------------------------------------------------------------------
     S_DECODE: begin
+`ifdef SIMULATION
         dbg_pc <= pc;
+`endif
         cur_op <= opcode;
         total_len <= 5'd2;      // default for F12 base
         // exception-frame defaults (A8): 2-word frame returning to current PC;

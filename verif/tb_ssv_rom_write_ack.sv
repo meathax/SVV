@@ -29,13 +29,12 @@ logic [1:0] sdr_wr_be;
 logic [23:0] rgb;
 logic ce_pixel, hs, vs, hb, vb;
 logic signed [15:0] audio_l, audio_r;
-logic [31:0] debug_pc;
-logic [23:0] debug_status;
 integer cycles;
 
 ssv_core dut (
     .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(rst), .cold_rst(rst), .ce_cpu(ce_cpu),
+    .watchdog_hold(1'b0),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -49,8 +48,7 @@ ssv_core dut (
     .in_p1(16'hffff), .in_p2(16'hffff),
     .in_system(16'hffff), .in_extra(16'hffff),
     .rgb(rgb), .ce_pixel(ce_pixel), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
-    .audio_l(audio_l), .audio_r(audio_r),
-    .debug_pc(debug_pc), .debug_status(debug_status)
+    .audio_l(audio_l), .audio_r(audio_r)
 );
 
 always_ff @(posedge clk_sys) begin

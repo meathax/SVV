@@ -4,6 +4,8 @@ set_global_assignment -name SDC_FILE SSV.sdc
 
 set_global_assignment -name SYSTEMVERILOG_FILE Arcade-SSV.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_host_guard.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_mode_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
 # rtl/video/ssv_sprite_decode.sv is intentionally absent: nothing in the build

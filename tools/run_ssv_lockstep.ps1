@@ -11,23 +11,35 @@ param(
     [ValidateSet('none','attract','gameplay')]
     [string]$ProofMode = 'none',
     [switch]$Diagnostic,
+    [switch]$TraceRegisters,
     [ValidateRange(10, 3600)]
     [int]$TimeoutSeconds = 300,
     [string]$Scenario = 'coin_start_p1_gameplay',
+    [ValidateRange(-1, 100000)]
+    [int]$CoinFrameLo = -1,
+    [ValidateRange(-1, 100000)]
+    [int]$CoinFrameHi = -1,
+    [ValidateRange(-1, 100000)]
+    [int]$InputStartFrameLo = -1,
+    [ValidateRange(-1, 100000)]
+    [int]$InputStartFrameHi = -1,
     [string]$Session = '',
     [string]$RtlRestore = '',
     [string]$RtlInputJournal = '',
     [ValidateRange(-1, 100000)]
     [int]$DumpIndexFrame = -1,
+    [ValidateRange(-1, 100000)]
+    [int]$CheckpointFrame = -1,
     [string]$ModelDir = 'C:\tmp\ssv_obj_visual_lockstep'
 )
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python -ErrorAction Stop).Source
-$mame = 'D:\Arcade\AI\mame\mame.exe'
-$mameSource = 'D:\Arcade\AI\MAMESOURCE\mame'
-$simSafe = 'C:\Users\meath\bin\verilator-sim-safe.exe'
+$mame = 'D:\arcade\ai\mameexe\mame.exe'
+$mameSource = 'D:\Arcade\AI\mame289'
+$mraDir = Join-Path $project 'releases'
+$simSafe = 'C:\Users\meath\bin\verilator-safe.exe'
 if (-not (Test-Path -LiteralPath $mame)) { throw "Missing MAME executable: $mame" }
 if (-not (Test-Path -LiteralPath $simSafe)) { throw "Missing safe simulator wrapper: $simSafe" }
 $restoreMetadata = $null
@@ -44,8 +56,14 @@ if ($RtlRestore) {
     }
     $restoreMetadata = Get-Content -Raw -LiteralPath $restoreMetadataPath |
         ConvertFrom-Json
-    if ($restoreMetadata.schema -ne 'ssv-verilator-checkpoint-v2') {
-        throw 'Checkpoint lockstep requires v2 metadata with an RTL-owned input identity'
+    if ($restoreMetadata.schema -notin @(
+            'ssv-verilator-checkpoint-v2','ssv-verilator-checkpoint-v3')) {
+        throw 'Checkpoint lockstep requires v2/v3 metadata with an RTL-owned input identity'
+    }
+    if ($restoreMetadata.schema -eq 'ssv-verilator-checkpoint-v3' -and
+        ([string]$restoreMetadata.coordinate.kind -ne 'frame' -or
+         [long]$restoreMetadata.coordinate.value -ne [long]$restoreMetadata.frame)) {
+        throw 'Checkpoint lockstep requires a committed software-frame coordinate'
     }
     if ($restoreMetadata.set -ne $Set -or $restoreMetadata.scenario -ne $Scenario -or
         $restoreMetadata.proof.mode -ne $ProofMode) {
@@ -73,7 +91,8 @@ if (Test-Path -LiteralPath $Session) {
 }
 
 $preflightArgs = @('--set',$Set,'--session',$Session,'--mame',$mame,
-    '--mame-source',$mameSource,'--scenario',$Scenario)
+    '--mame-source',$mameSource,'--mra-dir',$mraDir,
+    '--allow-unversioned-source','--scenario',$Scenario)
 if ($RtlRestore) {
     $preflightArgs += @('--start-frame',[string]$StartFrame,
         '--rtl-restore',$RtlRestore,'--input-journal',$RtlInputJournal)
@@ -96,7 +115,10 @@ $height = [int]$manifest.alignment.geometry.rtl[1]
 $dsw1 = [int]$manifest.alignment.mra_dips.DSW1
 $dsw2 = [int]$manifest.alignment.mra_dips.DSW2
 $gameId = [int]$manifest.game_id
-$descriptorBytes = [Convert]::FromHexString([string]$manifest.mra.descriptor_hex)
+$descriptorHex = [string]$manifest.mra.descriptor_hex
+$descriptorBytes = for ($offset = 0; $offset -lt $descriptorHex.Length; $offset += 2) {
+    [Convert]::ToByte($descriptorHex.Substring($offset, 2), 16)
+}
 $hasSt010 = (($descriptorBytes[9] -band 0x08) -ne 0)
 $requestedEndFrame = $StartFrame + $Frames - 1
 $proofFrame = -1
@@ -162,12 +184,10 @@ if ($RtlRestore) {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to seed neutral input packet' }
 }
 
-$buildArgs = @{ ModelDir = $ModelDir }
-if ($RtlRestore) { $buildArgs.Savable = $true }
+$buildArgs = @{ ModelDir = $ModelDir; Savable = $true }
 & (Join-Path $PSScriptRoot 'build_ssv_visual.ps1') @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Visual build failed: $LASTEXITCODE" }
-$printArgs = @{ ModelDir = $ModelDir; PrintExecutable = $true }
-if ($RtlRestore) { $printArgs.Savable = $true }
+$printArgs = @{ ModelDir = $ModelDir; PrintExecutable = $true; Savable = $true }
 $exe = (& (Join-Path $PSScriptRoot 'build_ssv_visual.ps1') @printArgs |
     Select-Object -Last 1)
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing visual executable: $exe" }
@@ -207,6 +227,18 @@ $frameLimit = if ($proofFrame -ge 0) {
 } else {
     $StartFrame + $Frames + 2
 }
+$automaticCheckpointFrame = if ($CheckpointFrame -ge 0) {
+    if ($CheckpointFrame -lt $StartFrame -or
+        $CheckpointFrame -gt $requestedEndFrame) {
+        throw "CheckpointFrame $CheckpointFrame lies outside $StartFrame..$requestedEndFrame"
+    }
+    $CheckpointFrame
+} else {
+    [Math]::Min([Math]::Max($StartFrame, $requestedEndFrame - 1),
+                $StartFrame + 49)
+}
+$automaticCheckpoint = Join-Path $Session `
+    ('rtl\auto-f{0:D6}.vltsv' -f $automaticCheckpointFrame)
 $rtlArgs = @(
     ('"+MAINROM={0}"' -f ($mainRom -replace '\\','/')),
     ('"+SPRROM={0}"' -f ($spriteRom -replace '\\','/')),
@@ -220,10 +252,26 @@ $rtlArgs = @(
     "+SCENARIO=$Scenario", "+FRAMES=$frameLimit", "+SOAK_FRAMES=$proofSoakFrames",
     '+CYCLES=9000000000000'
 )
+if ($CoinFrameLo -ge 0) { $rtlArgs += "+COIN_FRAME_LO=$CoinFrameLo" }
+if ($CoinFrameHi -ge 0) { $rtlArgs += "+COIN_FRAME_HI=$CoinFrameHi" }
+if ($InputStartFrameLo -ge 0) { $rtlArgs += "+START_FRAME_LO=$InputStartFrameLo" }
+if ($InputStartFrameHi -ge 0) { $rtlArgs += "+START_FRAME_HI=$InputStartFrameHi" }
+if ($proofFrame -lt 0) {
+    $rtlArgs += @(
+        ('"+CHECKPOINT={0}"' -f ($automaticCheckpoint -replace '\\','/')),
+        "+SAVE_FRAME=$automaticCheckpointFrame",
+        '+KEEP_RUNNING_AFTER_SAVE=1')
+}
 if (Test-Path -LiteralPath $st010Rom) {
     $rtlArgs += ('"+ST010ROM={0}"' -f ($st010Rom -replace '\\','/'))
 }
 if ($Diagnostic) { $rtlArgs += @('+VISUAL_DIAG', '+LIGHT_DIAG') }
+# Optional, default-off diagnostic only: replay a MAME-retire IRQ schedule
+# to separate natural IRQ phase drift from decode/renderer faults.  Never
+# affects ordinary lockstep runs or the release core.
+if ($env:SSV_LOCKSTEP_IRQ_SCHEDULE) {
+    $rtlArgs += ('"+DIFF_IRQ_SCHEDULE={0}"' -f ($env:SSV_LOCKSTEP_IRQ_SCHEDULE -replace '\\','/'))
+}
 if ($RtlRestore) {
     $rtlArgs += ('"+RESTORE={0}"' -f ($RtlRestore -replace '\\','/'))
 }
@@ -240,6 +288,10 @@ if ($ProofMode -eq 'attract') {
 }
 
 $rtlEnvironment = @{
+    # The native UCRT64 visual model dynamically loads SDL2 and the MinGW
+    # runtime from this directory. The unified safe launcher deliberately
+    # preserves its caller environment, so make the model's ABI explicit.
+    PATH = "C:\msys64\ucrt64\bin;$env:PATH"
     SSV_LOCKSTEP_DIR = $Session
     SSV_LOCKSTEP_SET = $Set
     SSV_LOCKSTEP_WIDTH = [string]$width
@@ -247,6 +299,7 @@ $rtlEnvironment = @{
     SSV_LOCKSTEP_DSW1 = [string]$dsw1
     SSV_LOCKSTEP_DSW2 = [string]$dsw2
     SSV_LOCKSTEP_TRACE = '1'
+    SSV_LOCKSTEP_TRACE_REGS = $(if ($TraceRegisters) { '1' } else { '0' })
     SSV_LOCKSTEP_START_FRAME = [string]$StartFrame
     SSV_LOCKSTEP_FIRST_COMPARABLE_TOKEN = [string]$firstComparableToken
     SSV_LOCKSTEP_RTL_STARTUP_MODE = $(if ($RtlRestore) {
@@ -254,10 +307,17 @@ $rtlEnvironment = @{
     SSV_LOCKSTEP_RESTORE_FRAME = $(if ($RtlRestore) {
         [string]([int]$restoreMetadata.frame) } else { '-1' })
 }
-$safeArgs = @('--comparison','--',('"{0}"' -f $exe)) + $rtlArgs
+function Set-SSVChildEnvironment([hashtable]$values) {
+    foreach ($entry in $values.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable(
+            $entry.Key, [string]$entry.Value, 'Process')
+    }
+}
+$safeArgs = @('sim','--comparison','--',('"{0}"' -f $exe)) + $rtlArgs
+Set-SSVChildEnvironment $rtlEnvironment
 $rtl = Start-Process -FilePath $simSafe -ArgumentList $safeArgs `
     -WorkingDirectory $project -RedirectStandardOutput $rtlLog `
-    -RedirectStandardError $rtlErr -Environment $rtlEnvironment -PassThru
+    -RedirectStandardError $rtlErr -PassThru
 
 # Do not start the reference emulator while the safe RTL wrapper is merely
 # queued for a shared simulation slot. A short bounded acquisition check keeps
@@ -355,15 +415,17 @@ $mameEnvironment = @{
     SSV_LOCKSTEP_CATCHUP_TARGET = $(if ($RtlRestore) {
         [string]$StartFrame } else { '-1' })
     SSV_LOCKSTEP_STRICT_INPUTS = $(if ($RtlRestore) { '1' } else { '0' })
+    SSV_LOCKSTEP_TRACE_REGS = $(if ($TraceRegisters) { '1' } else { '0' })
 }
 if ($DumpIndexFrame -ge 0) {
     $mameEnvironment['SSV_LOCKSTEP_DUMP_INDEX_FRAME'] = [string]$DumpIndexFrame
     $mameEnvironment['SSV_LOCKSTEP_DUMP_INDEX_PATH'] =
         (Join-Path $Session ("reference/frame_{0:D6}.index" -f $DumpIndexFrame))
 }
+Set-SSVChildEnvironment $mameEnvironment
 $mameProcess = Start-Process -FilePath $mame -ArgumentList $mameArgs `
     -WorkingDirectory $project -RedirectStandardOutput $mameLog `
-    -RedirectStandardError $mameErr -Environment $mameEnvironment -PassThru
+    -RedirectStandardError $mameErr -PassThru
 
 # The Lua adapter publishes readiness immediately, before game boot. Bound
 # this separately from the much longer gameplay timeout so a transient MAME

@@ -69,6 +69,7 @@ ssv_rom_loader loader (
 ssv_core core (
     .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk), .rst(core_rst), .cold_rst(core_rst), .ce_cpu(ce_cpu),
+    .watchdog_hold(1'b0),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),

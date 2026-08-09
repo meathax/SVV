@@ -29,6 +29,16 @@ module emu (
     output        HDMI_BLACKOUT,
     output        HDMI_BOB_DEINT,
 
+    output        FB_EN,
+    output  [4:0] FB_FORMAT,
+    output [11:0] FB_WIDTH,
+    output [11:0] FB_HEIGHT,
+    output [31:0] FB_BASE,
+    output [13:0] FB_STRIDE,
+    input         FB_VBL,
+    input         FB_LL,
+    output        FB_FORCE_BLANK,
+
     output        LED_USER,
     output  [1:0] LED_POWER,
     output  [1:0] LED_DISK,
@@ -93,7 +103,8 @@ localparam CONF_STR = {
     "SSV;;",
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-    "O[45:43],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
+    "O[44:43],Scale,Normal,Integer (Horizontal),V-Integer (Vertical);",
+    "O[50:49],Rotation,Horizontal,Vertical (CW),Vertical (CCW),Horizontal (Flipped);",
     // Was labelled "Scandoubler Fx" while no scandoubler existed. HQ2x is
     // gone with arcade_video; the line doubler that replaced it does not
     // filter, so the list is the scanline levels only. Any non-None setting
@@ -101,7 +112,6 @@ localparam CONF_STR = {
     "O[5:3],Video Fx,None,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
     "O[47:46],Stereo Mix,None,25%,50%,100%;",
     "O[6],Service Mode,Off,On;",
-    "O[7],Pause,Off,On;",
     "H1O[48],Autosave Hiscores,Off,On;",
     // Flip Screen, Demo Sounds, Difficulty, Lives, Free Play, Health and both
     // coinage nibbles are DIP switches and now live in the MRA's <switches>
@@ -140,20 +150,15 @@ assign VGA_DISABLE = 1'b0;
 assign HDMI_FREEZE = 1'b0;
 assign HDMI_BLACKOUT = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
+assign FB_FORCE_BLANK = 1'b0;
 assign AUDIO_S = 1'b1;
 // AUDIO_MIX is driven from the OSD at the bottom of this file.
 assign LED_POWER = 2'b00;
 // LED_DISK is driven below from the renderer overrun status.
 assign BUTTONS = 2'b00;
 
-assign DDRAM_BURSTCNT = 8'd0;
-assign DDRAM_ADDR = 29'd0;
-assign DDRAM_RD = 1'b0;
-assign DDRAM_DIN = 64'd0;
-assign DDRAM_BE = 8'd0;
-assign DDRAM_WE = 1'b0;
-
 wire clk_sys, clk_ram, clk_aux, pll_locked;
+wire pll_ready_sys, pll_ready_ram;
 pll pll (
     .refclk_clk(CLK_50M), .reset_reset(1'b0),
     .outclk0_clk(clk_ram), .outclk1_clk(clk_sys),
@@ -161,7 +166,10 @@ pll pll (
     .locked_export(pll_locked)
 );
 assign CLK_VIDEO = clk_sys;
-assign DDRAM_CLK = clk_ram;
+// Keep the established 2x system/DDR clock.  It is a platform clock, not a
+// per-frame data signal: muxing it with screen_rotate's video clock creates a
+// hardware clock mux and can make the HPS/HDMI path lose lock when rotation is
+// changed or when FB_EN changes at a frame boundary.
 
 wire [1:0] buttons;
 wire [63:0] status;
@@ -173,6 +181,7 @@ wire [31:0] joystick_0, joystick_1;
 // Driven by hps_io, consumed by the video chain at the bottom of this file.
 // There is no gamma_bus: gamma_corr went with arcade_video.
 wire        forced_scandoubler;
+wire        video_rotated;
 
 // High score save/load nets. The module itself is instantiated further down,
 // next to ssv_core; these are declared here because hps_io and ssv_core both
@@ -189,8 +198,7 @@ wire        hs_upload, hs_upload_req;
 wire  [7:0] nv_data_to_hps;
 wire        nv_upload_req, nv_ioctl_wait;
 wire        nv_init_busy, nv_init_done;
-wire        nvram_transfer = (ioctl_download || ioctl_upload) &&
-                             (ioctl_index == 16'd8);
+wire        nvram_transfer;
 
 logic hs_upload_req_q, nv_upload_req_q;
 logic hs_upload_pending, nv_upload_pending;
@@ -202,7 +210,7 @@ localparam logic [2:0] UP_IDLE = 3'd0, UP_SIGNAL = 3'd1,
                        UP_GAP = 3'd4;
 
 always_ff @(posedge clk_sys) begin
-    if (!pll_locked) begin
+    if (!pll_ready_sys) begin
         hs_upload_req_q    <= 1'b0;
         nv_upload_req_q    <= 1'b0;
         hs_upload_pending  <= 1'b0;
@@ -287,6 +295,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     // H2 hides the three CRT Adjust amounts while CRT Adjust itself is Off.
     .status_menumask({13'd0, ~status[24], ~hs_configured, 1'b0}),
     .forced_scandoubler(forced_scandoubler),
+    .video_rotated(video_rotated),
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
 
@@ -324,26 +333,25 @@ assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
 // 21702 value was 42.4 ppm fast relative to video and visibly accumulated an
 // ES5506/frame-boundary phase error in current Dyna Gear lockstep evidence.
 //
-// Pause also stops the CPU while the OSD is open, which is what a player
-// expects from opening a menu mid-game and costs one gate. status[7] remains
-// the explicit manual pause; the renderer keeps running either way, so the
-// last frame stays on screen.
+// The OSD is deliberately not part of the emulation pause path. MiSTer may
+// retune or redraw video while the menu is open, so freezing the CPU here can
+// disturb the frame/audio phase and make HDMI sync fragile. Keep only pauses
+// required for data transfers and hiscore RAM transactions.
 //
 // hs_pause is the hiscore module asking for the CPU to be still while it
 // reads or writes the score table. It is a registered output over there, so
-// feeding game_pause straight back into its `paused` input is a handshake and
+// feeding game_pause straight back into its paused input is a handshake and
 // not a combinational loop.
 wire hs_pause;
-wire game_pause = status[7] | OSD_STATUS | hs_pause |
-                  nvram_transfer | nv_init_busy;
+wire game_pause;
 
 logic ce_cpu;
 logic [15:0] cpu_acc;
 always_ff @(posedge clk_sys) begin
     logic [16:0] sum;
-    if (!pll_locked || game_pause) begin
+    if (!pll_ready_sys || game_pause) begin
         ce_cpu <= 1'b0;
-        if (!pll_locked) cpu_acc <= 16'd0;
+        if (!pll_ready_sys) cpu_acc <= 16'd0;
     end
     else begin
         sum = {1'b0, cpu_acc} + {1'b0, ssv_pkg::SSV_CPU_INC};
@@ -353,22 +361,28 @@ always_ff @(posedge clk_sys) begin
 end
 
 wire sdram_ready;
-logic sdram_ready_meta, sdram_ready_sys;
-always_ff @(posedge clk_sys) begin
-    if (!pll_locked) begin
-        sdram_ready_meta <= 1'b0;
-        sdram_ready_sys <= 1'b0;
-    end
-    else begin
-        sdram_ready_meta <= sdram_ready;
-        sdram_ready_sys <= sdram_ready_meta;
-    end
-end
-
+wire sdram_ready_sys;
 wire rom_loaded;
-wire [26:0] download_max_addr;
-wire loader_reset = ~pll_locked;
-wire video_reset = RESET | status[0] | buttons[1] | ~pll_locked;
+wire loader_reset, video_reset;
+wire core_cold_reset, core_reset;
+wire wdog_rst;
+
+ssv_host_guard u_host_guard (
+    .clk_sys(clk_sys), .clk_ram(clk_ram),
+    .pll_locked_async(pll_locked),
+    .reset_request(RESET | status[0] | buttons[1]),
+    .sdram_ready_async(sdram_ready),
+    .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload),
+    .ioctl_index(ioctl_index),
+    .rom_loaded(rom_loaded),
+    .nv_init_done(nv_init_done), .nv_init_busy(nv_init_busy),
+    .hs_pause(hs_pause), .wdog_rst(wdog_rst),
+    .pll_ready_sys(pll_ready_sys), .pll_ready_ram(pll_ready_ram),
+    .sdram_ready_sys(sdram_ready_sys),
+    .nvram_transfer(nvram_transfer), .game_pause(game_pause),
+    .loader_reset(loader_reset), .video_reset(video_reset),
+    .core_cold_reset(core_cold_reset), .core_reset(core_reset)
+);
 
 // The loader commits the decoded descriptor one cycle after accepting byte
 // 15. Delay that event by a second cycle so the NVRAM bridge samples the new
@@ -388,24 +402,42 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
-// After ROM download, read two program words from SDRAM before the CPU is
-// released. The comparison values are a Dyna Gear bring-up signature only;
-// probe completion is universal, but the signature flag is not meaningful for
-// the other nine profiles. Expected LE packing matches the loader/sim model:
-//   addr 0x000000 -> 0x207a (reset stub BR)
-//   addr 0x01f3d0 -> 0x0c7a (BR16 over "12345678")
-logic        probe_done, probe_req, probe_seen;
-logic  [1:0] probe_step;
-logic [15:0] probe_sig0, probe_sig1;
-logic        dynagear_rom_sig_ok;
-wire         probe_active = rom_loaded && sdram_ready_sys &&
-                            nv_init_done && !ioctl_download && !probe_done;
-
-wire wdog_rst;
-wire core_cold_reset = video_reset | ioctl_download | ~rom_loaded |
-                       ~sdram_ready_sys | ~nv_init_done | ~probe_done;
-wire core_reset = core_cold_reset | wdog_rst;
 assign LED_USER = ~rom_loaded;
+
+`ifdef SIMULATION
+// Release builds contain no reset-cause state or diagnostic ports.  The
+// simulation-only edge log makes an unsolicited reset distinguishable between
+// watchdog, host persistence, media readiness, PLL and front-panel sources.
+logic sim_video_reset_d, sim_core_reset_d, sim_wdog_rst_d;
+wire [9:0] sim_reset_causes = {
+    wdog_rst, ~nv_init_done, ~sdram_ready_sys, ~rom_loaded,
+    nvram_transfer,
+    ioctl_download && ((ioctl_index == 16'd0) || (ioctl_index == 16'd1)),
+    ~pll_ready_sys, buttons[1], status[0], RESET
+};
+initial begin
+    sim_video_reset_d = 1'b0;
+    sim_core_reset_d  = 1'b0;
+    sim_wdog_rst_d    = 1'b0;
+end
+always @(posedge clk_sys) begin
+    if (video_reset !== sim_video_reset_d)
+        $display("SSV_VIDEO_RESET_%s time=%0t causes=%b",
+                 video_reset ? "ASSERT" : "RELEASE",
+                 $time, sim_reset_causes);
+    if (core_reset !== sim_core_reset_d)
+        $display("SSV_CORE_RESET_%s time=%0t causes=%b",
+                 core_reset ? "ASSERT" : "RELEASE",
+                 $time, sim_reset_causes);
+    if (wdog_rst !== sim_wdog_rst_d)
+        $display("SSV_WDOG_RESET_%s time=%0t mode=%0d counter=%0d",
+                 wdog_rst ? "ASSERT" : "RELEASE",
+                 $time, game_cfg.wdog_mode, core.wdog_cycle_cnt);
+    sim_video_reset_d <= video_reset;
+    sim_core_reset_d  <= core_reset;
+    sim_wdog_rst_d    <= wdog_rst;
+end
+`endif
 
 wire ld_wr_req, ld_wr_ack;
 wire ld_ioctl_wait;
@@ -435,8 +467,7 @@ ssv_rom_loader loader (
     .sdr_wr_din(ld_wr_din), .sdr_wr_be(ld_wr_be),
     .sdr_wr_ack(ld_wr_ack), .rom_loaded(rom_loaded),
     .st010_drom_we(st010_drom_we),
-    .st010_drom_wa(st010_drom_wa), .st010_drom_wd(st010_drom_wd),
-    .download_max_addr(download_max_addr)
+    .st010_drom_wa(st010_drom_wa), .st010_drom_wd(st010_drom_wd)
 );
 
 // While cold-zeroing, descriptor bytes (index 1) must continue to flow, but
@@ -450,44 +481,8 @@ wire core_p0_req;
 wire [SDR_AW:1] core_p0_addr;
 wire p0_ack;
 wire [15:0] p0_dout;
-wire p0_req  = probe_active ? probe_req  : core_p0_req;
-wire [SDR_AW:1] p0_addr = probe_active ?
-    (probe_step[0] ? SDR_AW'(27'h1F3D0 >> 1) : SDR_AW'(27'h0 >> 1)) :
-    core_p0_addr;
-
-always_ff @(posedge clk_sys) begin
-    if (loader_reset || ioctl_download || !rom_loaded) begin
-        probe_done <= 1'b0;
-        probe_req  <= 1'b0;
-        probe_seen <= 1'b0;
-        probe_step <= 2'd0;
-        probe_sig0 <= 16'hffff;
-        probe_sig1 <= 16'hffff;
-        dynagear_rom_sig_ok <= 1'b0;
-    end
-    else if (!probe_done && sdram_ready_sys) begin
-        if (p0_ack && probe_seen) begin
-            probe_req  <= 1'b0;
-            probe_seen <= 1'b0;
-            if (probe_step == 2'd0) begin
-                probe_sig0 <= p0_dout;
-                probe_step <= 2'd1;
-            end
-            else begin
-                probe_sig1 <= p0_dout;
-                dynagear_rom_sig_ok <= (game_cfg.game_id == 4'd0) &&
-                    (probe_sig0 == 16'h207a) && (p0_dout == 16'h0c7a);
-                probe_done <= 1'b1;
-            end
-        end
-        else if (!probe_req) begin
-            probe_req  <= 1'b1;
-            probe_seen <= 1'b0;
-        end
-        else if (probe_req && !probe_seen)
-            probe_seen <= 1'b1;
-    end
-end
+wire p0_req  = core_p0_req;
+wire [SDR_AW:1] p0_addr = core_p0_addr;
 
 // Graphics row fetch: one 128-bit p2 burst per 16-pixel tile row. p1 (64-bit,
 // 4-word burst) is now unused by this core and is left tied off below -- it is
@@ -579,7 +574,7 @@ assign nv_modified = core_wr_req && core_wr_ack &&
 // docs/issues/SDRAM_MODULE_CONTRACT.md; the failure is reproduced by
 // verif/tb_ssv_sdram_module_contract.sv.
 sdram sdram (
-    .clk(clk_ram), .init(~pll_locked), .ready(sdram_ready),
+    .clk(clk_ram), .init(~pll_ready_ram), .ready(sdram_ready),
     .SDRAM_DQ(SDRAM_DQ), .SDRAM_A(SDRAM_A), .SDRAM_BA(SDRAM_BA),
     .SDRAM_DQML(SDRAM_DQML), .SDRAM_DQMH(SDRAM_DQMH),
     .SDRAM_nCS(SDRAM_nCS), .SDRAM_nCAS(SDRAM_nCAS),
@@ -712,19 +707,12 @@ wire [15:0] dsw2_port = {8'hff, sw[1]};
 wire [23:0] core_rgb;
 wire core_ce, core_hs, core_vs, core_hb, core_vb;
 wire signed [15:0] core_audio_l, core_audio_r;
-wire [31:0] debug_pc;
-wire [23:0] debug_status;
-// Cabinet bookkeeping diagnostics: visible to simulation/SignalTap without
-// changing the game's input protocol or consuming an OSD status field.
-wire [1:0] coin_lockout_diag;
-wire [15:0] coin_counter0_diag, coin_counter1_diag;
-
 ssv_core core (
     .cfg(game_cfg),
     .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
-    .ce_cpu(ce_cpu),
+    .ce_cpu(ce_cpu), .watchdog_hold(game_pause),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
-    .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack && !probe_active),
+    .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr),
     .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
     .sdr_wr_req(core_wr_req), .sdr_wr_addr(core_wr_addr),
@@ -746,10 +734,7 @@ ssv_core core (
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
-    .coin_lockout(coin_lockout_diag),
-    .coin_counter0(coin_counter0_diag),
-    .coin_counter1(coin_counter1_diag),
-    .debug_pc(debug_pc), .debug_status(debug_status)
+    .coin_lockout()
 );
 
 // ---------------------------------------------------------------------------
@@ -777,7 +762,9 @@ hiscore #(
     .reset(core_reset),
     .paused(game_pause),
     .autosave(status[48]),
-    .OSD_STATUS(OSD_STATUS),
+    // Do not trigger the hiscore scan when the OSD opens: that path pauses
+    // the game CPU and can destabilize video/audio synchronization.
+    .OSD_STATUS(1'b0),
 
     .ioctl_upload(hs_upload),
     .ioctl_upload_req(hs_upload_req),
@@ -886,8 +873,31 @@ wire ce_pix_x2;
 localparam int CRT_HTOTAL = 454;
 localparam int CRT_VTOTAL = 262;
 
-reg crt_on;
-always_ff @(posedge clk_sys) if (av_ce) crt_on <= status[24];
+wire       sd_on;
+wire       crt_on;
+wire [4:0] crt_hsize_idx;
+wire signed [5:0] crt_hpos;
+wire signed [5:0] crt_vshift;
+wire [1:0] rotation;
+wire [1:0] aspect;
+wire [1:0] scale_select;
+
+ssv_video_mode_guard u_video_mode_guard (
+    .clk(clk_sys), .rst(video_reset),
+    .native_ce(av_ce), .native_hsync(av_hs), .native_vblank(av_vb),
+    .sd_request(forced_scandoubler | (|status[5:3])),
+    .crt_request(status[24]),
+    .crt_hsize_request(status[29:25]),
+    .crt_hpos_request(status[35:30]),
+    .crt_vshift_request(status[40:36]),
+    .rotation_request(status[50:49]),
+    .aspect_request(status[2:1]),
+    .scale_request(status[44:43]),
+    .sd_on(sd_on), .crt_on(crt_on),
+    .crt_hsize_idx(crt_hsize_idx),
+    .crt_hpos(crt_hpos), .crt_vshift(crt_vshift),
+    .rotation(rotation), .aspect(aspect), .scale_select(scale_select)
+);
 
 // H-Size is offered as an INDEX, not as raw two's complement, so that the
 // shrink end can be cut short. Shrinking speeds the read up, which puts MORE
@@ -902,18 +912,10 @@ always_ff @(posedge clk_sys) if (av_ce) crt_on <= status[24];
 // defect; it is fixed here rather than restored. Indices 0..15 are +0..+15 and
 // indices 16..27 are -12..-1, which is what the OSD list enumerates; the
 // subtraction below is 5-bit and wraps to exactly that (16 - 28 = -12).
-wire [4:0] crt_hsize_idx = status[29:25];
-reg signed [4:0] crt_hsize;
-always_ff @(posedge clk_sys) if (av_ce)
-    crt_hsize <= (crt_hsize_idx <= 5'd15) ? $signed(crt_hsize_idx)
-                                          : $signed(crt_hsize_idx - 5'd28);
-
-reg signed [5:0] crt_hpos;
-always_ff @(posedge clk_sys) if (av_ce) crt_hpos <= $signed(status[35:30]);
+wire signed [4:0] crt_hsize =
+    (crt_hsize_idx <= 5'd15) ? $signed(crt_hsize_idx)
+                             : $signed(crt_hsize_idx - 5'd28);
 wire signed [8:0] crt_hoffset = 9'($signed(crt_hpos));
-
-reg signed [5:0] crt_vshift;
-always_ff @(posedge clk_sys) if (av_ce) crt_vshift <= 6'($signed(status[40:36]));
 
 // Read clock enable, restarted on the module's hs_ref_out -- never on the raw
 // HSync, or the read rate and the module's read counter drift apart and the
@@ -1033,8 +1035,8 @@ always_ff @(posedge clk_sys) begin
     else if (crt_adj_fall)    crt_de_osd <= 1'b0;
 end
 
-// Any Fx selection implies doubling, the same rule arcade_video used.
-wire sd_on = forced_scandoubler | (|status[5:3]);
+// Any Fx selection implies doubling, the same rule arcade_video used. The
+// request is committed by u_video_mode_guard at a VBlank line boundary.
 
 // The doubler needs an enable at exactly twice the pixel rate and in phase
 // with it. That now comes from ssv_video_timing, which runs ONE accumulator at
@@ -1070,39 +1072,73 @@ assign VGA_SL   = status[4:3];
 wire vga_de_in = sd_on   ? ~(sd_hb | sd_vb)
                : crt_on  ? crt_de_osd
                :           ~(av_hb | av_vb);
-wire [1:0] aspect = status[2:1];
+wire rotation_active = (rotation == 2'd1) || (rotation == 2'd2);
+
+// Follow the established MiSTer vertical-core contract: present the native
+// cabinet aspect as 4:3 horizontally and 3:4 after framebuffer rotation.
+wire [11:0] scale_aspect_x = (aspect == 0)
+    ? (rotation_active ? 12'd3 : 12'd4)
+    : {10'd0, aspect - 1'b1};
+wire [11:0] scale_aspect_y = (aspect == 0)
+    ? (rotation_active ? 12'd4 : 12'd3)
+    : 12'd0;
+
+// Keep only the useful modes: best-fit HV integer for horizontal games and
+// V-integer for rotated vertical games such as Vasara and Vasara 2.
+logic [2:0] scale_mode;
+always_comb begin
+    case (scale_select)
+        2'd1: scale_mode = 3'd4;
+        2'd2: scale_mode = 3'd1;
+        default: scale_mode = 3'd0;
+    endcase
+end
+wire rotate_ddram_clk, rotate_ddram_we, rotate_ddram_rd;
+wire [7:0] rotate_ddram_burstcnt;
+wire [28:0] rotate_ddram_addr;
+wire [63:0] rotate_ddram_din;
+wire [7:0] rotate_ddram_be;
+
+screen_rotate u_screen_rotate (
+    .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL),
+    .VGA_R(VGA_R), .VGA_G(VGA_G), .VGA_B(VGA_B),
+    .VGA_HS(VGA_HS), .VGA_VS(VGA_VS), .VGA_DE(vga_de_in),
+    .rotate_ccw(rotation == 2'd2),
+    .no_rotate((rotation == 2'd0) || (rotation == 2'd3)),
+    .flip(rotation == 2'd3),
+    .video_rotated(video_rotated),
+    .FB_EN(FB_EN), .FB_FORMAT(FB_FORMAT), .FB_WIDTH(FB_WIDTH),
+    .FB_HEIGHT(FB_HEIGHT), .FB_BASE(FB_BASE), .FB_STRIDE(FB_STRIDE),
+    .FB_VBL(FB_VBL), .FB_LL(FB_LL),
+    .DDRAM_CLK(rotate_ddram_clk), .DDRAM_BUSY(DDRAM_BUSY),
+    .DDRAM_BURSTCNT(rotate_ddram_burstcnt), .DDRAM_ADDR(rotate_ddram_addr),
+    .DDRAM_DIN(rotate_ddram_din), .DDRAM_BE(rotate_ddram_be),
+    .DDRAM_WE(rotate_ddram_we), .DDRAM_RD(rotate_ddram_rd)
+);
+
+assign DDRAM_CLK      = clk_ram;
+assign DDRAM_BURSTCNT = rotate_ddram_burstcnt;
+assign DDRAM_ADDR     = rotate_ddram_addr;
+assign DDRAM_DIN      = rotate_ddram_din;
+assign DDRAM_BE       = rotate_ddram_be;
+assign DDRAM_WE       = rotate_ddram_we;
+assign DDRAM_RD       = rotate_ddram_rd;
 
 video_freak u_video_freak (
     .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL), .VGA_VS(VGA_VS),
     .HDMI_WIDTH(HDMI_WIDTH), .HDMI_HEIGHT(HDMI_HEIGHT),
     .VGA_DE(VGA_DE), .VIDEO_ARX(VIDEO_ARX), .VIDEO_ARY(VIDEO_ARY),
     .VGA_DE_IN(vga_de_in),
-    .ARX((aspect == 0) ? 12'd4 : {10'd0, aspect - 1'b1}),
-    .ARY((aspect == 0) ? 12'd3 : 12'd0),
+    .ARX(scale_aspect_x), .ARY(scale_aspect_y),
     .CROP_SIZE(12'd0), .CROP_OFF(5'd0),
-    .SCALE(status[45:43])
+    .SCALE(scale_mode)
 );
 
 assign AUDIO_L = game_pause ? 16'd0 : core_audio_l;
 assign AUDIO_R = game_pause ? 16'd0 : core_audio_r;
 assign AUDIO_MIX = status[47:46];
 
-// The scanline renderer latches a sticky flag when it misses a line deadline
-// or truncates a descriptor/line-slot list. Nothing else reads debug_status,
-// so on hardware that failure was silent -- it just drops sprites. Drive the
-// I/O board's HDD LED from it so the first board bring-up can see it.
-// {1'b1, value} is the MiSTer override encoding.
-wire renderer_overrun = debug_status[16];
-assign LED_DISK = {1'b1, renderer_overrun};
-
-// Boot diagnostics that only ssv_diag_video ever consumed. They are kept
-// because they are cheap and are what a bring-up bisect reaches for first.
-// dynagear_rom_sig_ok checks two Dyna-specific words; other descriptors use
-// probe_done only and must not interpret this flag as a universal media hash.
-// Sunk here so removing their reader does not leave Quartus warnings about
-// dangling nets.
-wire unused_debug = &{1'b0, debug_pc, debug_status, download_max_addr,
-                      probe_sig0, probe_sig1, dynagear_rom_sig_ok};
+assign LED_DISK = 1'b1;
 
 wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,

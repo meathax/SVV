@@ -113,9 +113,10 @@ module upd96050_st010 (
 
     input               int_req,
     output              p0,
-    output              p1,
-
-    // verification taps
+    output              p1
+`ifdef SIMULATION
+    ,
+    // Simulation-only verification taps; omitted from the release wrapper.
     output              dbg_retire,
     output       [13:0] dbg_pc,
     output       [15:0] dbg_a,
@@ -127,6 +128,7 @@ module upd96050_st010 (
     output       [15:0] dbg_l,
     output       [15:0] dbg_m,
     output       [15:0] dbg_n
+`endif
 );
 
 //==========================================================================
@@ -225,14 +227,16 @@ upd96050 dsp (
     .host_ram_din(cpu_wdata[7:0]),
     .host_ram_dout(win_dout),
 
-    .int_req(int_req), .p0(p0), .p1(p1),
-
+    .int_req(int_req), .p0(p0), .p1(p1)
+`ifdef SIMULATION
+    ,
     .dbg_retire(dbg_retire), .dbg_pc(dbg_pc),
     .dbg_a(dbg_a), .dbg_b(dbg_b),
     .dbg_flaga(), .dbg_flagb(),
     .dbg_k(dbg_k), .dbg_l(dbg_l), .dbg_m(dbg_m), .dbg_n(dbg_n),
     .dbg_dp(dbg_dp), .dbg_rp(), .dbg_tr(), .dbg_trb(),
     .dbg_dr(dbg_dr), .dbg_sr(dbg_sr), .dbg_so(), .dbg_idb(), .dbg_sp()
+`endif
 );
 
 endmodule

@@ -62,7 +62,7 @@ ssv_video_timing #(.PIXEL_INC(PIXEL_INC)) u_timing (
     .ce_pixel(av_ce), .ce_pix_x2(ce_pix_x2),
     .hcnt(hcnt), .vcnt(vcnt),
     .hblank(av_hb), .vblank(av_vb),
-    .hsync(av_hs), .vsync(av_vs), .vblank_pulse(vbp)
+    .hsync(av_hs), .vsync(av_vs), .vblank_pulse(vbp), .irq3_pulse()
 );
 
 logic av_hs_d2;

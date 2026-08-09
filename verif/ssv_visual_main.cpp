@@ -51,6 +51,11 @@ const char* value_plusarg(int argc, char** argv, const char* name) {
     return nullptr;
 }
 
+bool enabled_plusarg(int argc, char** argv, const char* name) {
+    const char* value = value_plusarg(argc, argv, name);
+    return value && std::string(value) == "1";
+}
+
 bool parse_unsigned(const char* value, unsigned long long& result) {
     if (!value || !*value) return false;
     char* end = nullptr;
@@ -300,6 +305,8 @@ int main(int argc, char** argv) {
         model->final();
         return 3;
     }
+    const bool keep_running_after_save =
+        enabled_plusarg(argc, argv, "KEEP_RUNNING_AFTER_SAVE");
 
     bool automatic_save_attempted = false;
     int exit_code = 0;
@@ -351,7 +358,7 @@ int main(int argc, char** argv) {
             // +SAVE_FRAME is the bounded-chunk automation path: save one safe
             // native-frame checkpoint and release the simulator slot. F5 and
             // Ctrl+S remain interactive and continue running after the save.
-            if (automatic_request)
+            if (automatic_request && !keep_running_after_save)
                 break;
         }
     }

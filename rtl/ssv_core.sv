@@ -16,6 +16,10 @@ module ssv_core #(
     input              rst,
     input              cold_rst,
     input              ce_cpu,
+    // MiSTer persistence pauses stop the V60, preventing the game from
+    // servicing its physical watchdog. Freeze only for explicit host pauses;
+    // normal CPU and bus stalls must still trip the board watchdog.
+    input              watchdog_hold,
 
     // Per-game configuration. The Dyna Gear record (ssv_pkg::cfg_dynagear)
     // reproduces the behaviour that used to be hardwired here.
@@ -95,12 +99,11 @@ module ssv_core #(
     // Sticky one-shot after exactly WDOG_TIMEOUT_CYCLES without the correct
     // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
-    // Cabinet diagnostics, updated from accepted low-byte $21000e writes.
-    output logic [1:0] coin_lockout,
-    output logic [15:0] coin_counter0,
-    output logic [15:0] coin_counter1,
-    output logic [31:0] debug_pc,
-    output logic [23:0] debug_status
+    output logic [1:0] coin_lockout
+`ifdef SIMULATION
+    , output logic [31:0] debug_pc
+    , output logic [23:0] debug_status
+`endif
 );
 
 import ssv_pkg::*;
@@ -127,7 +130,6 @@ logic  [1:0] m_be;
 logic        cpu_irq_ack;
 logic        irq_n;
 logic  [7:0] irq_vector;
-logic        cpu_halted;
 
 // Dedicated wide instruction-fetch port (FAST_IFETCH): prefetch reads whole
 // 8-byte ROM icache lines at clk_sys latency, bypassing the ce-gated 16-bit
@@ -144,6 +146,9 @@ wire         if_ack = if_served;
  `define FAST_IFETCH_EN 1'b1
 `endif
 
+`ifdef SIMULATION
+logic cpu_halted;
+`endif
 s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
     .if_req(if_req), .if_addr(if_addr), .if_data(if_data), .if_ack(if_ack),
@@ -151,7 +156,10 @@ s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .bus_size(c_size), .bus_wdata(c_wdata),
     .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(irq_n), .irq_vector(irq_vector), .irq_ack(cpu_irq_ack),
-    .nmi_n(1'b1), .dbg_pc(debug_pc), .dbg_halted(cpu_halted)
+    .nmi_n(1'b1)
+`ifdef SIMULATION
+    , .dbg_pc(debug_pc), .dbg_halted(cpu_halted), .dbg_retire()
+`endif
 );
 
 s32_v60_bus bus_adapter (
@@ -359,14 +367,18 @@ endgenerate
 
 logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
+logic irq3_pulse;
 logic video_enable;
 wire [8:0] active_width = active_width_cfg(cfg);
 wire [8:0] active_height = active_height_cfg(cfg);
 ssv_video_timing timing (
-    .clk(clk_sys), .rst(rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
+    // A watchdog machine reset must not restart the raster halfway through a
+    // frame. Renderers may blank while restarting, but sync remains continuous.
+    .clk(clk_sys), .rst(cold_rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
     .active_width(active_width), .active_height(active_height),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
-    .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse)
+    .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse),
+    .irq3_pulse(irq3_pulse)
 );
 
 logic [8:0] renderer_target_y;
@@ -445,8 +457,6 @@ wire [31:0] obj_plot_pen;
 wire bg_rom_req, obj_rom_req;
 wire [SDR_AW:4] bg_rom_addr, obj_rom_addr;
 wire bg_busy, bg_done, obj_busy, obj_done;
-logic renderer_overrun;
-
 assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_addr;
 // p2 is one shared SDRAM port with two clients. obj_busy picks who drives
 // req/addr -- but the ack has to be steered as well. Both fetchers are level
@@ -454,7 +464,7 @@ assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_
 // own the port makes it latch the other renderer's tile data as its own.
 //
 // That is reachable: renderer_line_start is not gated on renderer_busy (a
-// still-busy renderer only *records* renderer_overrun), so a line that misses
+// still-busy renderer can overlap a later line start, so a line that misses
 // its deadline starts the background renderer while the object renderer is
 // still fetching. Both then sit in WAIT_ACK on the same ack. Simulation never
 // hits it because the behavioural SDRAM is fast enough that lines never
@@ -531,13 +541,6 @@ ssv_cached_sprite_renderer sprite_renderer (
     .busy(obj_busy), .done(obj_done)
 );
 
-always_ff @(posedge clk_sys) begin
-    if (rst)
-        renderer_overrun <= 1'b0;
-    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
-        renderer_overrun <= 1'b1;
-end
-
 wire vector_we = m_req && m_we && sel_irqvec;
 wire ack_we    = m_req && m_we && sel_irqack;
 wire enable_we = m_req && m_we && sel_irqen;
@@ -549,7 +552,7 @@ ssv_irq irqs (
     .line0_pulse(ce_pixel && (hcnt == 9'd0) && (vcnt == 9'd0)),
     .irq_level1_line0(cfg.irq_level1_line0),
     .clk(clk_sys), .rst(rst), .cold_rst(cold_rst),
-    .vblank_pulse(vblank_pulse),
+    .vblank_pulse(irq3_pulse),
     .vector_we(vector_we), .vector_level(irq_reg_level),
     .vector_data(m_wdata),
     .enable_we(enable_we), .enable_be(m_be), .enable_data(m_wdata),
@@ -934,8 +937,10 @@ upd96050_st010 st010 (
     // go nowhere on the daughterboard.
     .int_req(1'b0), .p0(), .p1(),
 
+`ifdef SIMULATION
     .dbg_retire(), .dbg_pc(), .dbg_a(), .dbg_b(), .dbg_dp(), .dbg_dr(),
     .dbg_sr(), .dbg_k(), .dbg_l(), .dbg_m(), .dbg_n()
+`endif
 );
 
 ssv_st010_prg_fetch st010_fetch (
@@ -1085,13 +1090,30 @@ wire        wdog_kick = m_req && wdog_addr_hit &&
                         ((cfg.wdog_mode == 2'd1) ? !m_we :
                          (cfg.wdog_mode == 2'd2) ?  m_we : 1'b0);
 
+`ifdef SIMULATION
+// These messages are deliberately simulation-only.  They record the accepted
+// transaction edge (not merely a bus request) and the resulting sticky reset,
+// which is the useful distinction when diagnosing a real-game reset.
+logic sim_wdog_rst_d;
+initial sim_wdog_rst_d = 1'b0;
+always @(posedge clk_sys) begin
+    if (wdog_kick)
+        $display("SSV_WDOG_KICK mode=%0d rw=%0d addr=%06x cycle=%0d",
+                 cfg.wdog_mode, m_we, a, wdog_cycle_cnt);
+    if (wdog_rst !== sim_wdog_rst_d)
+        $display("SSV_WDOG_TRIP state=%0d mode=%0d cycle=%0d",
+                 wdog_rst, cfg.wdog_mode, wdog_cycle_cnt);
+    sim_wdog_rst_d <= wdog_rst;
+end
+
+`endif
+
 // MAME ssv_state::lockout_w / lockout_inv_w. Both variants use data bit 1
 // for coin slot 0 and bit 0 for slot 1; only the lockout polarity changes.
 // Counter 0 is driven by bit 3 and counter 1 by bit 2, and bookkeeping counts
 // low-to-high transitions rather than every write that leaves a bit asserted.
 wire lockout_write = m_req && m_we && (a == 24'h21000e) && m_be[0] &&
                      ack_r && !ack_r_d;
-logic [1:0] coin_counter_drive;
 wire [15:0] in_system_gated = in_system |
     {14'd0, coin_lockout[1], coin_lockout[0]};
 
@@ -1100,18 +1122,10 @@ always_ff @(posedge clk_sys) begin
     // machine_reset(); retain them across a watchdog reset.
     if (cold_rst) begin
         coin_lockout <= 2'b00; // cabinet starts unlocked
-        coin_counter_drive <= 2'b00;
-        coin_counter0 <= 16'd0;
-        coin_counter1 <= 16'd0;
     end
     else if (lockout_write) begin
         coin_lockout[0] <= cfg.lockout_inverted ?  m_wdata[1] : ~m_wdata[1];
         coin_lockout[1] <= cfg.lockout_inverted ?  m_wdata[0] : ~m_wdata[0];
-        if (!coin_counter_drive[0] && m_wdata[3])
-            coin_counter0 <= coin_counter0 + 1'd1;
-        if (!coin_counter_drive[1] && m_wdata[2])
-            coin_counter1 <= coin_counter1 + 1'd1;
-        coin_counter_drive <= {m_wdata[2], m_wdata[3]};
     end
 end
 
@@ -1130,7 +1144,7 @@ always_ff @(posedge clk_sys) begin
         else if (wdog_kick) begin
             wdog_cycle_cnt <= '0;
         end
-        else if (!wdog_rst) begin
+        else if (!watchdog_hold && !wdog_rst) begin
             if (wdog_cycle_cnt ==
                 WDOG_COUNTER_WIDTH'(WDOG_TIMEOUT_CYCLES - 1))
                 wdog_rst <= 1'b1;
@@ -1218,11 +1232,14 @@ always_ff @(posedge clk_sys) begin
                         // program space's unmapped value are both zero.
                         4'h0: read_mux <= (cfg.wdog_mode == 2'd1)
                             ? 16'h0000 : 16'h0000;
-                        4'h1: read_mux <= in_dsw1;
-                        4'h2: read_mux <= in_dsw2;
-                        4'h4: read_mux <= in_p1;
-                        4'h5: read_mux <= in_p2;
-                        4'h6: read_mux <= in_system_gated;
+                        // MAME's portr() values are eight-bit ports on this
+                        // 16-bit V60 map. The handler zero-extends them; the
+                        // wrapper's high byte is only internal idle padding.
+                        4'h1: read_mux <= {8'h00, in_dsw1[7:0]};
+                        4'h2: read_mux <= {8'h00, in_dsw2[7:0]};
+                        4'h4: read_mux <= {8'h00, in_p1[7:0]};
+                        4'h5: read_mux <= {8'h00, in_p2[7:0]};
+                        4'h6: read_mux <= {8'h00, in_system_gated[7:0]};
                         default: read_mux <= 16'h0000;
                     endcase
                 end
@@ -1233,10 +1250,9 @@ always_ff @(posedge clk_sys) begin
         end
     end
 end
-
-always_comb debug_status = {
-    cpu_halted, video_enable, irq_n, vb, hb, ext_busy, ext_done, renderer_overrun,
-    irq_requested, irq_enabled
-};
+`ifdef SIMULATION
+always_comb debug_status = {cpu_halted, video_enable, irq_n, vb, hb, ext_busy,
+                            ext_done, 1'b0, irq_requested, irq_enabled};
+`endif
 
 endmodule

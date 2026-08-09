@@ -21,6 +21,7 @@ always #5 clk_sys = ~clk_sys;
 
 logic boot_rst = 1;
 logic wdog_rst;
+logic watchdog_hold = 1'b0;
 
 ssv_pkg::ssv_cfg_t cfg_under_test;
 initial begin
@@ -49,17 +50,15 @@ logic [15:0] sdr_p4_dout;
 logic [23:0] rgb;
 logic ce_pixel, hs, vs, hb, vb;
 logic signed [15:0] audio_l, audio_r;
-logic [31:0] debug_pc;
-logic [23:0] debug_status;
 logic [15:0] input_system = 16'hffff;
 logic [1:0] coin_lockout;
-logic [15:0] coin_counter0, coin_counter1;
 
-integer i, cycles;
+integer i, cycles, accepted_kicks;
 
 ssv_core #(.WDOG_TIMEOUT_CYCLES(TEST_TIMEOUT_CYCLES)) dut (
     .cfg(cfg_under_test),
     .clk_sys(clk_sys), .rst(rst), .cold_rst(boot_rst), .ce_cpu(ce_cpu),
+    .watchdog_hold(watchdog_hold),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -75,9 +74,7 @@ ssv_core #(.WDOG_TIMEOUT_CYCLES(TEST_TIMEOUT_CYCLES)) dut (
     .rgb(rgb), .ce_pixel(ce_pixel), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
     .audio_l(audio_l), .audio_r(audio_r),
     .wdog_rst(wdog_rst),
-    .coin_lockout(coin_lockout),
-    .coin_counter0(coin_counter0), .coin_counter1(coin_counter1),
-    .debug_pc(debug_pc), .debug_status(debug_status)
+    .coin_lockout(coin_lockout)
 );
 
 always_ff @(posedge clk_sys) begin
@@ -90,7 +87,15 @@ always_ff @(posedge clk_sys) begin
     sdr_p4_dout <= 16'd0;
 end
 
-task automatic kick_watchdog(input bit do_write = 1'b0);
+initial accepted_kicks = 0;
+always @(posedge clk_sys)
+    if (dut.wdog_kick)
+        accepted_kicks = accepted_kicks + 1;
+
+task automatic kick_watchdog(input bit do_write = 1'b0,
+                             input bit expect_kick = 1'b1);
+    integer kicks_before;
+    kicks_before = accepted_kicks;
     // Claim the bus from an idle edge. The real V60 remains live in this
     // integration test, so merely releasing a previous force can expose one
     // of its requests and leave ack_r/read_mux posted for the next helper.
@@ -119,6 +124,10 @@ task automatic kick_watchdog(input bit do_write = 1'b0);
     release dut.m_we;
     release dut.m_addr;
     release dut.m_be;
+    repeat (1) @(posedge clk_sys); #1;
+    if (accepted_kicks != kicks_before + (expect_kick ? 1 : 0))
+        $fatal(1, "watchdog accepted-kick count changed by %0d, expected %0d",
+               accepted_kicks - kicks_before, expect_kick ? 1 : 0);
 endtask
 
 task automatic write_lockout(input logic [7:0] data);
@@ -256,6 +265,41 @@ initial begin : watchdog_test
     $display("PASS tb_ssv_watchdog timeout trips at %0d master cycles",
              TEST_TIMEOUT_CYCLES);
 
+    // A MiSTer host pause stops the V60, so it cannot perform the watchdog
+    // access. Holding must preserve elapsed time rather than grant a fresh
+    // interval, and it must remain safe for longer than a complete timeout.
+    feed_wdog_to_rst = 1'b0;
+    boot_rst = 1;
+    repeat (4) @(posedge clk_sys);
+    @(negedge clk_sys);
+    boot_rst = 0;
+    repeat (TEST_TIMEOUT_CYCLES / 4) begin
+        @(posedge clk_sys); #1;
+    end
+    @(negedge clk_sys);
+    watchdog_hold = 1'b1;
+    repeat (TEST_TIMEOUT_CYCLES + 8) begin
+        @(posedge clk_sys); #1;
+        if (wdog_rst)
+            $fatal(1, "watchdog advanced while host pause was held");
+    end
+    @(negedge clk_sys);
+    watchdog_hold = 1'b0;
+    for (i = 0; i < TEST_TIMEOUT_CYCLES -
+         (TEST_TIMEOUT_CYCLES / 4) - 1; i = i + 1) begin
+        @(posedge clk_sys); #1;
+        if (wdog_rst)
+            $fatal(1, "watchdog tripped early after host pause at %0d", i + 1);
+    end
+    @(posedge clk_sys); #1;
+    if (!wdog_rst)
+        $fatal(1, "watchdog pause did not preserve elapsed interval");
+    feed_wdog_to_rst = 1'b1;
+    repeat (2) @(posedge clk_sys); #1;
+    if (wdog_rst)
+        $fatal(1, "watchdog pause trip did not self-clear through reset");
+    $display("PASS tb_ssv_watchdog host pause freezes elapsed interval");
+
     // Phase 2: correct-direction strobes restart the complete interval.
     feed_wdog_to_rst = 1'b1;
     boot_rst = 1;
@@ -280,8 +324,20 @@ initial begin : watchdog_test
     if (read0 !== 16'h0000)
         $fatal(1, "unmapped I/O returned %04x, expected zero", read0);
     bus_read(24'h210008, read0);
-    if (read0 !== 16'hffff)
-        $fatal(1, "mapped idle P1 returned %04x, expected ffff", read0);
+    if (read0 !== 16'h00ff)
+        $fatal(1, "mapped idle P1 returned %04x, expected 00ff", read0);
+    bus_read(24'h210002, read0);
+    if (read0 !== 16'h00ff)
+        $fatal(1, "mapped idle DSW1 returned %04x, expected 00ff", read0);
+    bus_read(24'h210004, read0);
+    if (read0 !== 16'h00ff)
+        $fatal(1, "mapped idle DSW2 returned %04x, expected 00ff", read0);
+    bus_read(24'h21000a, read0);
+    if (read0 !== 16'h00ff)
+        $fatal(1, "mapped idle P2 returned %04x, expected 00ff", read0);
+    bus_read(24'h21000c, read0);
+    if (read0 !== 16'h00ff)
+        $fatal(1, "mapped idle SYSTEM returned %04x, expected 00ff", read0);
     bus_read(24'h500008, read0);
     if (read0 !== 16'hffff)
         $fatal(1, "Dyna decoded-idle input window returned %04x", read0);
@@ -351,16 +407,6 @@ initial begin : watchdog_test
     if (!coin_lockout[0] || dut.in_system_gated[0] !== 1'b1)
         $fatal(1, "normal lockout did not force active-low coin released");
 
-    // Counter 0 is data bit 3 and counts rising edges only.
-    write_lockout(8'h09);
-    write_lockout(8'h09);
-    if (coin_counter0 !== 16'd1)
-        $fatal(1, "held counter drive counted more than one edge");
-    write_lockout(8'h01);
-    write_lockout(8'h09);
-    if (coin_counter0 !== 16'd2 || coin_counter1 !== 16'd0)
-        $fatal(1, "coin counter rising-edge diagnostics mismatch");
-
     cfg_under_test.lockout_inverted = 1'b1;
     write_lockout(8'h03);
     if (!coin_lockout[0])
@@ -369,7 +415,7 @@ initial begin : watchdog_test
     if (coin_lockout[0] || dut.in_system_gated[0] !== 1'b0)
         $fatal(1, "inverted lockout did not unlock/live-gate coin");
     input_system = 16'hffff;
-    $display("PASS tb_ssv_watchdog shared lockout/counter semantics");
+    $display("PASS tb_ssv_watchdog shared lockout semantics");
 
     // MAME machine_reset() clears only pending IRQ causes. The board's
     // scroll/CRTC RAM, video-enable latch, IRQ mask/vector RAM and cabinet
@@ -377,9 +423,8 @@ initial begin : watchdog_test
     // is cold. Program representative state, issue a focused soft reset, and
     // require exact retention without a game-name conditional.
     cfg_under_test.lockout_inverted = 1'b0;
-    // Non-default lockout and counter-drive latches. The latter must remain
-    // asserted so repeating this write after reset cannot create false edges.
-    write_lockout(8'h0c);              // video off, both slots locked/drives high
+    // Program a non-default lockout state alongside retained board state.
+    write_lockout(8'h0c);              // video off, both slots locked
     bus_write_word(24'h230030, 16'h0006); // IRQ level-3 vector
     bus_write_word(24'h260000, 16'h0008); // enable level 3
     force dut.vblank_pulse = 1'b1;
@@ -387,8 +432,7 @@ initial begin : watchdog_test
     release dut.vblank_pulse;
     if (dut.video_enable !== 1'b0 || dut.scroll[49] !== 16'd1 ||
         dut.irq_enabled !== 8'h08 || dut.irqs.vectors[3] !== 3'd6 ||
-        dut.irq_requested !== 8'h08 || coin_lockout !== 2'b11 ||
-        coin_counter0 !== 16'd3 || coin_counter1 !== 16'd1)
+        dut.irq_requested !== 8'h08 || coin_lockout !== 2'b11)
         $fatal(1, "soft-reset retention precondition mismatch");
 
     // Restart the interval after setup, then let the descriptor-selected
@@ -401,15 +445,24 @@ initial begin : watchdog_test
     end
     if (!wdog_rst)
         $fatal(1, "watchdog did not drive the retention soft reset");
+    // A watchdog is a machine reset, not a video-clock reset. Restarting the
+    // raster here creates a shortened frame/sync interval and can make HDMI
+    // receivers lose lock exactly when a game trips its watchdog.
+    while (!dut.ce_pixel) begin
+        @(posedge clk_sys); #1;
+    end
+    cycles = dut.hcnt;
+    do begin
+        @(posedge clk_sys); #1;
+    end while (!dut.ce_pixel);
+    if (dut.hcnt !== ((cycles == 453) ? 0 : cycles + 1))
+        $fatal(1, "watchdog reset interrupted raster: hcnt %0d -> %0d",
+               cycles, dut.hcnt);
     repeat (2) @(posedge clk_sys); #1;
     if (dut.video_enable !== 1'b0 || dut.scroll[49] !== 16'd1 ||
         dut.irq_enabled !== 8'h08 || dut.irqs.vectors[3] !== 3'd6 ||
-        dut.irq_requested !== 8'h00 || coin_lockout !== 2'b11 ||
-        coin_counter0 !== 16'd3 || coin_counter1 !== 16'd1)
+        dut.irq_requested !== 8'h00 || coin_lockout !== 2'b11)
         $fatal(1, "watchdog soft reset lost retained board state");
-    write_lockout(8'h0c);
-    if (coin_counter0 !== 16'd3 || coin_counter1 !== 16'd1)
-        $fatal(1, "soft reset lost retained coin counter edge state");
     $display("PASS tb_ssv_watchdog soft reset retains video/CRTC/IRQ/bookkeeping");
 
     // Phase 3: the WRONG direction must NOT kick. This is the half that
@@ -425,10 +478,9 @@ initial begin : watchdog_test
     boot_rst = 0;
     repeat (4) @(posedge clk_sys);
     if (dut.video_enable !== 1'b1 || dut.scroll[49] !== 16'd0 ||
-        dut.irq_enabled !== 8'h00 || dut.irqs.vectors[3] !== 3'd0 ||
-        coin_counter0 !== 16'd0)
+        dut.irq_enabled !== 8'h00 || dut.irqs.vectors[3] !== 3'd0)
         $fatal(1, "cold reset did not initialize retained board state");
-    kick_watchdog(WDOG_MODE != 2);   // deliberately the wrong direction
+    kick_watchdog(WDOG_MODE != 2, 1'b0);   // deliberately the wrong direction
     repeat (TEST_TIMEOUT_CYCLES) begin
         @(posedge clk_sys); #1;
     end

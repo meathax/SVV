@@ -122,16 +122,16 @@ module upd96050 (
 
     input               int_req,
     output              p0,
-    output              p1,
-
-    //------------------------------------------------------------------------
-    // Debug / verification. Synthesis drops these when left unconnected.
-    //------------------------------------------------------------------------
-    output              dbg_retire,      // 1 clk, instruction fully committed
+    output              p1
+`ifdef SIMULATION
+    ,
+    // Simulation-only DSP observability.  Release synthesis has no debug
+    // mirror outputs or associated fanout.
+    output              dbg_retire,
     output       [13:0] dbg_pc,
     output       [15:0] dbg_a,
     output       [15:0] dbg_b,
-    output        [5:0] dbg_flaga,       // {s1,s0,c,z,ov1,ov0}
+    output        [5:0] dbg_flaga,
     output        [5:0] dbg_flagb,
     output       [15:0] dbg_k,
     output       [15:0] dbg_l,
@@ -146,6 +146,7 @@ module upd96050 (
     output       [15:0] dbg_so,
     output       [15:0] dbg_idb,
     output        [3:0] dbg_sp
+`endif
 );
 
 //==========================================================================
@@ -581,6 +582,7 @@ integer i;
 // One clk wide, asserted on the first clk after the multiplier has committed,
 // so every architectural register (including M and N) is final when it is high.
 logic retire_r;
+`ifdef SIMULATION
 assign dbg_retire = retire_r;
 assign dbg_pc = pc; assign dbg_a = areg; assign dbg_b = breg;
 assign dbg_flaga = flaga; assign dbg_flagb = flagb;
@@ -588,6 +590,7 @@ assign dbg_k = k; assign dbg_l = l; assign dbg_m = m; assign dbg_n = n;
 assign dbg_dp = dp; assign dbg_rp = rp; assign dbg_tr = tr; assign dbg_trb = trb;
 assign dbg_dr = dr; assign dbg_sr = sr_val; assign dbg_so = so;
 assign dbg_idb = idb; assign dbg_sp = sp;
+`endif
 
 always_ff @(posedge clk) begin
     if (rst) begin

@@ -118,15 +118,26 @@ def executable_source_tag(version: str) -> str | None:
     return f"mame{int(numeric.group(1))}{int(numeric.group(2)):03d}"
 
 
-def tagged_source_file(source_root: Path, revision: str,
-                       relative: str) -> dict[str, object]:
+def tagged_source_file(source_root: Path, revision: str, relative: str,
+                       allow_unversioned_source: bool = False) -> dict[str, object]:
     spec = f"{revision}:{relative}"
     blob = subprocess.run(
         source_git(source_root, "show", spec),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     if blob.returncode != 0:
-        raise FileNotFoundError(f"MAME source checkout has no {spec}")
+        if not allow_unversioned_source:
+            raise FileNotFoundError(f"MAME source checkout has no {spec}")
+        path = source_root / relative
+        if not path.is_file():
+            raise FileNotFoundError(f"MAME source tree has no {relative}")
+        return {
+            "git_spec": None,
+            "git_object": None,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+            "provenance": "unversioned source-tree file hash",
+        }
     object_id = subprocess.run(
         source_git(source_root, "rev-parse", spec),
         check=True, text=True, stdout=subprocess.PIPE,
@@ -215,10 +226,14 @@ def main() -> int:
     parser.add_argument("--session", required=True, type=Path)
     parser.add_argument("--mame", type=Path, default=Path(r"D:\Arcade\AI\mame\mame.exe"))
     parser.add_argument("--mame-source", type=Path,
-                        default=Path(r"D:\Arcade\AI\MAMESOURCE\mame"))
+                        default=Path(r"D:\Arcade\AI\mame289"))
     parser.add_argument("--rom-dir", type=Path, default=ROOT / "rom")
     parser.add_argument("--image-root", type=Path, default=ROOT / "sim_output" / "rom")
-    parser.add_argument("--mra-dir", type=Path, default=ROOT / "mra")
+    parser.add_argument("--mra-dir", type=Path, default=ROOT / "releases")
+    parser.add_argument(
+        "--allow-unversioned-source", action="store_true",
+        help="accept hashes from a source tree without the executable's Git tag",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--scenario", default="coin_start_p1_gameplay")
     parser.add_argument("--start-frame", type=int)
@@ -301,8 +316,21 @@ def main() -> int:
         )
         checkpoint_journal = checkpoint.get("input_journal", {})
         checkpoint_scenario = checkpoint.get("input_identity", {})
+        checkpoint_schema = checkpoint.get("schema")
+        checkpoint_frame_coordinate = (
+            checkpoint_schema != "ssv-verilator-checkpoint-v3"
+            or (
+                checkpoint.get("coordinate", {}).get("kind") == "frame"
+                and checkpoint.get("coordinate", {}).get("value")
+                == checkpoint.get("frame")
+            )
+        )
         checks.update({
-            "checkpoint_schema": checkpoint.get("schema") == "ssv-verilator-checkpoint-v2",
+            "checkpoint_schema": checkpoint_schema in {
+                "ssv-verilator-checkpoint-v2",
+                "ssv-verilator-checkpoint-v3",
+            },
+            "checkpoint_frame_coordinate": checkpoint_frame_coordinate,
             "checkpoint_set": checkpoint.get("set") == args.set,
             "checkpoint_scenario": checkpoint.get("scenario") == args.scenario,
             "checkpoint_frame_precedes_start": checkpoint.get("frame") == args.start_frame - 1,
@@ -379,7 +407,10 @@ def main() -> int:
         source_revision(args.mame_source, runtime_source_tag)
         if runtime_source_tag else "unversioned"
     )
-    checks["mame_executable_source_tag"] = runtime_source_revision != "unversioned"
+    checks["mame_executable_source_tag"] = (
+        runtime_source_revision != "unversioned"
+        or args.allow_unversioned_source
+    )
 
     pertinent_source_files = (
         "src/mame/seta/ssv.cpp",
@@ -395,7 +426,8 @@ def main() -> int:
     for relative in pertinent_source_files:
         if runtime_source_tag:
             source_files[relative] = tagged_source_file(
-                args.mame_source, runtime_source_tag, relative
+                args.mame_source, runtime_source_tag, relative,
+                args.allow_unversioned_source,
             )
         path = args.mame_source / relative
         audit_source_files[relative] = {
@@ -423,6 +455,11 @@ def main() -> int:
             "mame_source_revision": runtime_source_revision,
             "mame_source_binding": (
                 "executable-declared release tag; binary identity pinned by SHA-256"
+            ),
+            "mame_source_provenance": (
+                "Git release tag"
+                if runtime_source_revision != "unversioned"
+                else "unversioned source-tree file hashes; executable SHA-256 pinned"
             ),
             "source_files": source_files,
             "audit_source_revision": source_revision(args.mame_source),

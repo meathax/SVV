@@ -182,8 +182,6 @@ reg				checking_scores = 1'b0;				// Is state machine currently checking game RA
 reg				reading_scores = 1'b0;				// Is state machine currently reading game RAM for highscore dump
 reg				writing_scores = 1'b0;				// Is state machine currently restoring hiscore data to game RAM
 
-reg	[3:0]		initialised;						// Number of times state machine has been initialised (debug only)
-
 assign configured = downloaded_config;
 assign downloading_config = ioctl_download && (ioctl_index==HS_CONFIGINDEX);
 assign parsing_header = downloading_config && (ioctl_addr<HS_HEADERLENGTH);
@@ -420,7 +418,6 @@ begin
 			next_state <= SM_INIT_RESTORE;
 			state <= SM_TIMER;
 			counter <= 1'b0;
-			initialised <= initialised + 1'b1;
 			restoring_dump <= 1'b1;
 		end
 		else

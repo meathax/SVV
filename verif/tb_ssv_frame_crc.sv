@@ -51,7 +51,9 @@ import "DPI-C" function void ssv_visual_trace_bus(
     input int unsigned address,
     input int unsigned data,
     input int unsigned lanes,
-    input int unsigned device
+    input int unsigned device,
+    input logic [31:0] v60_regs [0:31],
+    input int unsigned v60_psw
 );
 import "DPI-C" function int ssv_visual_frame_commit(
     input int unsigned frame,
@@ -543,6 +545,7 @@ wire core_rst = core_cold_rst | wdog_rst;
 ssv_core dut (
     .cfg(sim_cfg),
     .clk_sys(clk_sys), .rst(core_rst), .cold_rst(core_cold_rst), .ce_cpu(ce_cpu),
+    .watchdog_hold(1'b0),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -1160,6 +1163,37 @@ task automatic apply_inputs(input integer f);
     in_extra = 16'hffff;
     in_p1 = 16'hffff;
     in_system = 16'hffff;
+    // Drift Out '94 asks for a driver name before the race. Its accelerator
+    // is hardware bit 2 (MAME's P1 Button 2); four separate edges enter the name and
+    // leave the entry screen. Keep this in a verification-only scenario so
+    // the shared synthesizable core remains entirely descriptor-driven.
+    if (scenario == "drifto94_gameplay") begin
+        if (f >= 30 && f < 34) in_system[0] = 1'b0; // COIN1
+        if (f >= 80 && f < 85) in_p1[0] = 1'b0;     // START
+        // Name entry becomes input-active well after the start edge. Keep all
+        // four presses inside that screen instead of losing early edges to
+        // the title-to-name transition.
+        if ((f >= 170 && f < 175) ||
+            (f >= 190 && f < 195) ||
+            (f >= 210 && f < 215) ||
+            (f >= 230 && f < 235)) in_p1[2] = 1'b0; // accelerator
+        // After the fourth character the selector lands directly on END.
+        // Confirm it without moving away from that position.
+        if (f >= 245 && f < 250) in_p1[2] = 1'b0;   // confirm END
+        if (f >= 360 && f < 390) in_p1[4] = 1'b0;   // steer right in race
+        if (f >= 340 && f < 410) in_p1[2] = 1'b0;   // accelerate in race
+        if (f >= 450 && f < 455) in_p1[2] = 1'b0;   // choose displayed car
+        if (f >= 500 && f < 505) in_p1[1] = 1'b0;   // confirm car/spec screen
+        if (f >= 550 && f < 555) in_p1[3] = 1'b0;   // confirm next prompt
+        if (f >= 600 && f < 605) in_p1[0] = 1'b0;   // dismiss pre-race prompt
+        if (f >= 640 && f < 700) in_p1[2] = 1'b0;   // accelerate in gameplay
+        if (f >= 660 && f < 690) in_p1[4] = 1'b0;   // steer right in gameplay
+        if (f >= 820 && f < 1200) in_p1[2] = 1'b0;  // accelerate through race start
+        if ((f >= 860 && f < 910) ||
+            (f >= 1040 && f < 1090)) in_p1[4] = 1'b0; // steer right
+        if ((f >= 930 && f < 960) ||
+            (f >= 1120 && f < 1170)) in_p1[5] = 1'b0; // steer left
+    end
     // Diagnostic-only probe: a much longer, more forgiving coin+start hold
     // than coin_start_p1's 4-frame pulses, used to check whether a title's
     // coin-accept window is simply longer than that script assumes. Not
@@ -1461,7 +1495,7 @@ always_ff @(posedge clk_sys) begin
                 ssv_visual_trace_bus(
                     post_ve_frames, cycle_count, debug_pc, dut.m_we, dut.a,
                     dut.m_we ? dut.m_wdata : dut.m_rdata, dut.m_be,
-                    visual_trace_device);
+                    visual_trace_device, dut.cpu.r, dut.cpu.psw);
         end
         if (visual_diag) begin
         if (dut.line_buffer_start) visual_line_starts <= visual_line_starts + 1;
@@ -1620,8 +1654,9 @@ always_ff @(posedge clk_sys) begin
             ve_seen <= 1'b1;
 `ifdef SSV_VISUAL
         if (dut.lockout_write && visual_diag)
-            $display("SSV_VISUAL_LOCKOUT_WRITE cycle=%0d pc=%08x data=%04x video_enable=%0b",
-                     cycle_count, debug_pc, dut.m_wdata, dut.video_enable);
+            $display("SSV_VISUAL_LOCKOUT_WRITE cycle=%0d hcnt=%0d vcnt=%0d pc=%08x data=%04x video_enable=%0b",
+                     cycle_count, dut.hcnt, dut.vcnt, debug_pc,
+                     dut.m_wdata, dut.video_enable);
 `endif
 
         // Multi-shot PPM: frames ppm_start + k*ppm_step for k in [0, ppm_count).
@@ -1938,7 +1973,13 @@ always_ff @(posedge clk_sys) begin
                     end
                     last_vb_retire = retire_count;
                 end
-                apply_inputs(post_ve_frames);
+                // The surface committed below is the interval that just
+                // ended.  MAME captures that same interval before applying
+                // packet N+1, so the RTL owner must select N+1 here.  Using
+                // N labels the newly selected input as the already-completed
+                // surface and creates a one-frame visual/input skew as soon
+                // as a non-neutral packet begins.
+                apply_inputs(post_ve_frames + 1);
 `ifdef SSV_VISUAL
                 // ssv_visual_present caches the completed native surface.
                 // Commit only after the CRC/state streams above are flushed;

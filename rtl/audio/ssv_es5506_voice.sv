@@ -214,23 +214,16 @@ function automatic logic signed [15:0] lerp(
     input logic signed [15:0] b,
     input logic [31:0] acc
 );
-    // frac is 9 bits by construction (acc[10:2]), so 512-frac ranges 1..512
-    // and fits in 10 bits unsigned -- both terms below were previously
-    // computed as full 32-bit values (32'sd512 - 32'(frac), 32'(frac)) for a
-    // pair of numbers that never exceed 10 significant bits, again forcing a
-    // doubled-up DSP multiplier for no numeric reason. frac_inv keeps the
-    // exact same unsigned-operand structure the original had (neither
-    // frac_inv nor frac is wrapped in $signed() here, matching
-    // "32'sd512 - 32'(frac)" and "32'(frac)" being unsigned expressions in
-    // the original) -- only the bit width changes, not which operand is
-    // signed vs unsigned, so the multiply's arithmetic is unchanged.
+    // The fraction is 9 bits by construction (acc[10:2]). Keep the
+    // interpolation products in the original 32-bit expression width:
+    // narrowing the unsigned fraction operands makes SystemVerilog size the
+    // multiply before assignment, which truncates negative PCM products and
+    // produces loud static bursts.
     logic [8:0] frac;
-    logic [9:0] frac_inv;
     logic signed [31:0] t;
     begin
         frac = acc[10:2];
-        frac_inv = 10'd512 - {1'b0, frac};
-        t = $signed(a) * frac_inv + $signed(b) * frac;
+        t = $signed(a) * (32'sd512 - 32'(frac)) + $signed(b) * 32'(frac);
         lerp = t[24:9];
     end
 endfunction

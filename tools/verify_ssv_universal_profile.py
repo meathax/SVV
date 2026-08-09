@@ -57,7 +57,8 @@ def main() -> int:
         fail("Arcade-SSV.qpf does not select the sole Arcade-SSV revision", errors)
 
     by_set: dict[str, tuple[Path, ET.Element]] = {}
-    for path in sorted((repo / "mra").glob("*.mra")):
+    release_dir = repo / "releases"
+    for path in sorted(release_dir.glob("*.mra")):
         root = ET.parse(path).getroot()
         setname = (root.findtext("setname") or "").strip()
         if setname in by_set:
@@ -77,6 +78,13 @@ def main() -> int:
         path, root = by_set[setname]
         if (root.findtext("rbf") or "").strip() != "SSV":
             fail(f"{setname}: MRA does not select SSV.rbf", errors)
+
+        if (root.findtext("resolution") or "").strip() != "15kHz":
+            fail(f"{setname}: MRA resolution must be 15kHz", errors)
+        if (root.findtext("homebrew") or "").strip() != "no":
+            fail(f"{setname}: MRA homebrew must be no", errors)
+        if (root.findtext("bootleg") or "").strip() != "no":
+            fail(f"{setname}: MRA bootleg must be no", errors)
 
         rotation = (root.findtext("rotation") or "").strip()
         if rotation not in ("horizontal", "vertical (ccw)"):
@@ -205,6 +213,10 @@ def main() -> int:
                 f"missing-qualified={sorted(missing_required)}",
                 errors,
             )
+
+    release_rbfs = sorted(release_dir.glob("SSV_????????.rbf"))
+    if not release_rbfs:
+        fail("releases: no dated SSV_YYYYMMDD.rbf release bitstream", errors)
 
     if errors:
         for message in errors:

@@ -97,6 +97,12 @@ run_one tb_ssv_clock_ratio \
   rtl/ssv_pkg.sv rtl/ssv_video_timing.sv verif/ssv_tb_ce_cpu.sv \
   verif/tb_ssv_clock_ratio.sv
 
+run_one tb_ssv_host_guard \
+  rtl/ssv_host_guard.sv verif/tb_ssv_host_guard.sv
+
+run_one tb_ssv_video_mode_guard \
+  rtl/ssv_video_mode_guard.sv verif/tb_ssv_video_mode_guard.sv
+
 run_one tb_ssv_input_matrix \
   verif/tb_ssv_input_matrix.sv
 

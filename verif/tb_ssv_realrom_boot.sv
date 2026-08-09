@@ -61,6 +61,7 @@ logic booted;
 ssv_core dut (
     .cfg(ssv_pkg::cfg_dynagear()),
     .clk_sys(clk_sys), .rst(rst), .cold_rst(rst), .ce_cpu(ce_cpu),
+    .watchdog_hold(1'b0),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),

@@ -9,6 +9,7 @@ local trace_start_frame = tonumber(os.getenv("SSV_LOCKSTEP_START_FRAME")) or 0
 local startup_mode = os.getenv("SSV_LOCKSTEP_REFERENCE_STARTUP_MODE") or "cold-lockstep"
 local catchup_target = tonumber(os.getenv("SSV_LOCKSTEP_CATCHUP_TARGET")) or -1
 local strict_inputs = os.getenv("SSV_LOCKSTEP_STRICT_INPUTS") == "1"
+local trace_registers = os.getenv("SSV_LOCKSTEP_TRACE_REGS") == "1"
 local dump_index_frame = tonumber(os.getenv("SSV_LOCKSTEP_DUMP_INDEX_FRAME")) or -1
 local dump_index_path = os.getenv("SSV_LOCKSTEP_DUMP_INDEX_PATH")
 local first_comparable_token = assert(
@@ -53,8 +54,15 @@ local function atomic_write(relative, data, binary)
     stream:write(data)
     stream:flush()
     stream:close()
-    os.remove(target)
-    assert(os.rename(temporary, target), "cannot publish " .. target)
+    -- Windows readers do not always grant delete sharing. The coordinator's
+    -- token read is very short, but a remove/rename can still land inside it.
+    -- Retry the same atomic publish until that handle closes instead of
+    -- aborting an otherwise deterministic multi-minute reference run.
+    for _ = 1, 1000 do
+        os.remove(target)
+        if os.rename(temporary, target) then return end
+    end
+    error("cannot publish " .. target)
 end
 
 local function read_integer(relative)
@@ -251,11 +259,24 @@ local function trace_bus(rw, device, offset, data, mask)
     local lane_mask = ((lanes & 1) ~= 0 and 0x00ff or 0) |
                       ((lanes & 2) ~= 0 and 0xff00 or 0)
     trace_sequence = trace_sequence + 1
-    trace_buffer[#trace_buffer + 1] = string.format(
-        '{"frame":%d,"cycle":%d,"pc":%d,"cpu":0,"event":"bus",' ..
-        '"rw":"%s","address":%d,"data":%d,"lanes":%d,"device":%d}\n',
-        frame, trace_sequence, cpu_pc(), rw, offset & 0xfffffe,
-        data & lane_mask & 0xffff, lanes, device)
+    local fields = {
+        string.format('"frame":%d', frame),
+        string.format('"cycle":%d', trace_sequence),
+        string.format('"pc":%d', cpu_pc()),
+        '"cpu":0', '"event":"bus"', string.format('"rw":"%s"', rw),
+        string.format('"address":%d', offset & 0xfffffe),
+        string.format('"data":%d', data & lane_mask & 0xffff),
+        string.format('"lanes":%d', lanes),
+        string.format('"device":%d', device)
+    }
+    if trace_registers then
+        for index = 0, 31 do
+            fields[#fields + 1] = string.format('"r%d":%u', index,
+                                                 cpu_state("R" .. index))
+        end
+        fields[#fields + 1] = string.format('"psw":%u', cpu_state("PSW"))
+    end
+    trace_buffer[#trace_buffer + 1] = "{" .. table.concat(fields, ",") .. "}\n"
 end
 
 local function with_trace_suppressed(callback)
@@ -301,26 +322,27 @@ local function capture_state(token)
                    crc16_words(0x1c0002, 63),
                    crc16_words(0x140000, 1024)
         end)
-    local state = string.format(
-        '{"frame":%d,"producer":"reference","pc":%d,' ..
-        '"r0":%u,"psw":%u,"list512_crc":%u,"spr8k_crc":%u,' ..
-        '"scroll63_crc":%u,"pal512_crc":%u}\n',
-        token, cpu_pc(), cpu_state("R0"), cpu_state("PSW"),
-        list512_crc, spr8k_crc, scroll63_crc, pal512_crc)
-    if dsp then
-        state = string.format(
-            '{"frame":%d,"producer":"reference","pc":%d,' ..
-            '"r0":%u,"psw":%u,"list512_crc":%u,"spr8k_crc":%u,' ..
-            '"scroll63_crc":%u,"pal512_crc":%u,' ..
-            '"st010_pc":%u,"st010_a":%u,"st010_b":%u,' ..
-            '"st010_dp":%u,"st010_dr":%u,"st010_k":%u,' ..
-            '"st010_l":%u,"st010_m":%u,"st010_n":%u}\n',
-            token, cpu_pc(), cpu_state("R0"), cpu_state("PSW"),
-            list512_crc, spr8k_crc, scroll63_crc, pal512_crc,
-            dsp_state("PC"), dsp_state("A"), dsp_state("B"),
-            dsp_state("DP"), dsp_state("DR"), dsp_state("K"),
-            dsp_state("L"), dsp_state("M"), dsp_state("N"))
+    local fields = {
+        string.format('"frame":%d', token), '"producer":"reference"',
+        string.format('"pc":%d', cpu_pc()),
+        string.format('"list512_crc":%u', list512_crc),
+        string.format('"spr8k_crc":%u', spr8k_crc),
+        string.format('"scroll63_crc":%u', scroll63_crc),
+        string.format('"pal512_crc":%u', pal512_crc)
+    }
+    for index = 0, 31 do
+        fields[#fields + 1] = string.format('"r%d":%u', index,
+                                             cpu_state("R" .. index))
     end
+    fields[#fields + 1] = string.format('"psw":%u', cpu_state("PSW"))
+    if dsp then
+        for _, name in ipairs({"PC", "A", "B", "DP", "DR", "K", "L", "M", "N"}) do
+            fields[#fields + 1] = string.format('"st010_%s":%u',
+                                                 string.lower(name),
+                                                 dsp_state(name))
+        end
+    end
+    local state = "{" .. table.concat(fields, ",") .. "}\n"
     local stream = assert(io.open(path("reference_state.jsonl"), "a"))
     stream:setvbuf("line")
     stream:write(state)
@@ -379,8 +401,9 @@ ssv_lockstep_ve_tap = program:install_write_tap(
     function(offset, data, mask)
         if (mask & 0x00ff) ~= 0 and (data & 0x80) ~= 0 and not armed then
             print(string.format(
-                "SSV_LOCKSTEP_BOOT_VIDEO_ENABLE screen_frame=%d pc=%08x watchdog_reads=%d",
-                tonumber(screen:frame_number()), cpu_pc(), boot_watchdog_reads))
+                "SSV_LOCKSTEP_BOOT_VIDEO_ENABLE screen_frame=%d to_frame_zero=%.12f frame_period=%.12f pc=%08x watchdog_reads=%d",
+                tonumber(screen:frame_number()), screen:time_until_pos(0, 0),
+                screen.frame_period, cpu_pc(), boot_watchdog_reads))
             armed = true
         end
     end)

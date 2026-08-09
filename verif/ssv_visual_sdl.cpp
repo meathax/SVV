@@ -927,7 +927,8 @@ extern "C" int ssv_visual_system() { return g_system; }
 extern "C" void ssv_visual_trace_bus(
     unsigned long long frame, unsigned long long cycle, unsigned int pc,
     unsigned int write, unsigned int address, unsigned int data,
-    unsigned int lanes, unsigned int device) {
+    unsigned int lanes, unsigned int device,
+    const svLogicVecVal* v60_regs, unsigned int v60_psw) {
     init_lockstep_path();
     if (g_lockstep_dir.empty() || g_lockstep_trace_stopped ||
         env_int("SSV_LOCKSTEP_TRACE", 1) == 0 ||
@@ -935,16 +936,20 @@ extern "C" void ssv_visual_trace_bus(
     unsigned int normalized = 0;
     if (lanes & 1u) normalized |= data & 0x00ffu;
     if (lanes & 2u) normalized |= data & 0xff00u;
-    char line[320];
-    const int count = std::snprintf(
-        line, sizeof(line),
-        "{\"frame\":%llu,\"cycle\":%llu,\"pc\":%u,\"cpu\":0,"
-        "\"event\":\"bus\",\"rw\":\"%c\",\"address\":%u,"
-        "\"data\":%u,\"lanes\":%u,\"device\":%u}\n",
-        frame, cycle, pc, write ? 'w' : 'r', address, normalized,
-        lanes & 3u, device);
-    if (count > 0)
-        g_lockstep_trace_buffer.append(line, size_t(std::min(count, int(sizeof(line) - 1))));
+    std::ostringstream line;
+    line << "{\"frame\":" << frame << ",\"cycle\":" << cycle
+         << ",\"pc\":" << pc << ",\"cpu\":0,\"event\":\"bus\","
+         << "\"rw\":\"" << (write ? 'w' : 'r') << "\",\"address\":"
+         << address << ",\"data\":" << normalized << ",\"lanes\":"
+         << (lanes & 3u) << ",\"device\":" << device;
+    if (env_int("SSV_LOCKSTEP_TRACE_REGS", 0) != 0 && v60_regs) {
+        for (int index = 0; index < 32; ++index) {
+            line << ",\"r" << index << "\":" << v60_regs[index].aval;
+        }
+        line << ",\"psw\":" << v60_psw;
+    }
+    line << "}\n";
+    g_lockstep_trace_buffer.append(line.str());
 }
 extern "C" int ssv_visual_frame_commit(
     unsigned int frame, unsigned int p1_pressed, unsigned int p2_pressed,

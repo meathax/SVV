@@ -69,7 +69,7 @@ $gameId = [int]$setEntry.Value
 # Checkpoint runs must use the same MRA-owned DIP defaults as cold lockstep.
 # The old Dyna-only FF/FD literal silently gave every other set the wrong
 # cabinet configuration, which makes a restored archive ineligible evidence.
-$mraPath = Get-ChildItem -LiteralPath (Join-Path $project 'mra') -Filter '*.mra' |
+$mraPath = Get-ChildItem -LiteralPath (Join-Path $project 'releases') -Filter '*.mra' |
     Where-Object {
         try {
             ([xml](Get-Content -Raw -LiteralPath $_.FullName)).misterromdescription.setname -eq $Set
@@ -358,7 +358,12 @@ if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
     $process.WaitForExit()
     throw "Checkpoint chunk exceeded the $TimeoutSeconds-second wall-clock ceiling"
 }
-if ($process.ExitCode -ne 0) {
+# Start-Process can leave ExitCode unset until redirected output has drained
+# and the process object has been refreshed, even though the bounded wait
+# above already observed termination.
+$process.WaitForExit()
+$process.Refresh()
+if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
     throw "Checkpoint visual exited $($process.ExitCode); inspect $stdoutLog and $stderrLog"
 }
 if (-not (Test-Path -LiteralPath $Checkpoint) -or

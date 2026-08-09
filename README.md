@@ -98,7 +98,7 @@ Quartus 17 is required. To run analysis and synthesis only:
 ./tools/build-ssv.ps1 -MapOnly
 ```
 
-For a complete compile that copies the bitstream to `releases/SSV.rbf`:
+For a complete compile that copies a dated bitstream to `releases/SSV_YYYYMMDD.rbf`:
 
 ```powershell
 ./tools/build-ssv.ps1

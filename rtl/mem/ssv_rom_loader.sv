@@ -36,10 +36,7 @@ module ssv_rom_loader (
     output logic       st010_drom_we,
     output logic [10:0] st010_drom_wa,
     output logic [15:0] st010_drom_wd,
-    output logic       rom_loaded,
-    // Highest index-0 stream address accepted during the active download.
-    // Used by the diagnostic overlay; does not affect load behavior.
-    output logic [26:0] download_max_addr
+    output logic       rom_loaded
 );
 
 import ssv_pkg::*;
@@ -221,7 +218,6 @@ always_ff @(posedge clk) begin
         sdr_wr_din  <= '0;
         sdr_wr_be   <= 2'b00;
         rom_loaded  <= 1'b0;
-        download_max_addr <= 27'd0;
         st010_drom_we <= 1'b0;
         st010_drom_wa <= '0;
         st010_drom_wd <= '0;
@@ -253,8 +249,6 @@ always_ff @(posedge clk) begin
 
         if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&
             ioctl_index == 8'd0 && ioctl_addr < stream_end_cfg(cfg)) begin
-            if (ioctl_addr > download_max_addr)
-                download_max_addr <= ioctl_addr;
             if (!ioctl_addr[0])
                 byte_lo <= ioctl_dout;
             else begin
@@ -279,7 +273,6 @@ always_ff @(posedge clk) begin
             ioctl_index == 8'd0 && ioctl_addr == 27'd0) begin
             rom_loaded  <= 1'b0;
             index0_seen <= 1'b1;
-            download_max_addr <= 27'd0;
         end
 
         if (mem_ready && !ioctl_download && index0_seen &&

@@ -16,6 +16,9 @@
 *.summary
 /cr_ie_info.json
 
+# MiSTer release artifacts are intentionally committed.
+!/releases/*.rbf
+
 # Simulation output.
 /obj_dir/
 /verif/obj_*/
@@ -33,6 +36,10 @@
 
 # Local scratch and editor files.
 /scratch/
+/.tmp/
+/.codex-mister-build/
+/artifacts/
+/.mcp.json
 *.bak
 /tmp/
 /c5_pin_model_dump.txt

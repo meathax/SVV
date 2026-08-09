@@ -160,7 +160,8 @@ try {
         $source = Join-Path $repoRoot "output_files\Arcade-SSV.rbf"
         $releaseDir = Join-Path $repoRoot "releases"
         New-Item -ItemType Directory -Force $releaseDir | Out-Null
-        $destination = Join-Path $releaseDir "SSV.rbf"
+        $releaseName = "SSV_{0}.rbf" -f (Get-Date -Format "yyyyMMdd")
+        $destination = Join-Path $releaseDir $releaseName
         $staging = "$destination.upload"
         Copy-Item -LiteralPath $source -Destination $staging -Force
         $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
@@ -169,7 +170,7 @@ try {
             throw 'Staged RBF hash does not match the Quartus output.'
         }
         Move-Item -LiteralPath $staging -Destination $destination -Force
-        Write-Host "Built releases\SSV.rbf (SHA256 $sourceHash)"
+        Write-Host "Built releases\$releaseName (SHA256 $sourceHash)"
     }
 }
 finally {

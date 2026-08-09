@@ -9,6 +9,7 @@
 # --------------------------------------------------------------------------
 
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
+set_global_assignment -name VERILOG_MACRO "MISTER_FB"
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
 set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
 set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
@@ -90,8 +91,6 @@ set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
 #enable it only if 8bit indexed mode is used in core
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 
-#do not enable DEBUG_NOHDMI in release!
-#set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
@@ -336,6 +335,8 @@ set_global_assignment -name QIP_FILE sys/sys.qip
 set_global_assignment -name SDC_FILE SSV.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE "Arcade-SSV.sv"
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_host_guard.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_mode_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
