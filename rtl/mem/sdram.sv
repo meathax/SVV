@@ -615,7 +615,7 @@ function automatic logic [12:0] cas_addr(input logic [AW:1] a, input logic ap);
 endfunction
 
 reg [15:0] dq_in;
-reg [3:0]  cl_pipe;
+reg [5:0]  cl_pipe;
 reg [15:0] cap_buf [0:7];
 
 always @(posedge clk) dq_in <= SDRAM_DQ;
@@ -655,7 +655,7 @@ always @(posedge clk) begin
         ref_cnt  <= 10'd0;
         dqm      <= 2'b11;
         row_open <= 4'd0;   // init's PRE-all leaves every bank closed
-        cl_pipe  <= 4'b0000;
+        cl_pipe  <= 6'b000000;
         ack_stretch <= 0;
         rr_next <= 3'd0;
     end
@@ -683,8 +683,8 @@ always @(posedge clk) begin
         if (ref_cnt == REF_CYC[9:0]) begin ref_cnt <= 0; ref_pend <= 1'b1; end
 
         // Read capture after CL2 and the centred IOE register above.
-        cl_pipe <= {cl_pipe[2:0], 1'b0};
-        if (cl_pipe[3]) begin
+        cl_pipe <= {cl_pipe[4:0], 1'b0};
+        if (cl_pipe[2]) begin
             cap_buf[rd_captured[2:0]] <= dq_in;
             rd_captured <= rd_captured + 1'd1;
             if (rd_captured + 1'd1 == rd_total) begin
