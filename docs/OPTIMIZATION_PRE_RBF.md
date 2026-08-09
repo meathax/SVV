@@ -1,5 +1,44 @@
 # Pre-RBF optimization notes
 
+## Exact RTL resource pass (10 Aug 2026, no Quartus/RBF)
+
+- V60 MUL/MULU now uses the existing 32-cycle magnitude shift-add result for
+  both writeback and overflow.  The completion path previously instantiated
+  two additional 32x32 multipliers only to recompute signed and unsigned
+  overflow.  Exhaustive byte plus randomized half/word comparison covered
+  931,072 operand/mode cases with zero result or flag mismatches.
+- The sprite descriptor cache stores an 88-bit resolved visual record instead
+  of eight raw 16-bit words.  Coordinate, flip, code, size and scroll controls
+  are frozen at the vblank cache boundary, removing 40 bits per entry and the
+  duplicate render-side coordinate network while preserving list priority.
+- Added frame-wide line-pool high-water telemetry.  Seven runnable qualified
+  sets completed visible-SDL startup/attract samples without overflow; Dyna
+  Gear was highest at 11,060 entries.  Ultra X remains untested because its
+  private `sim_output/rom/ultrax/st010.bin` is absent.  The pool is reduced
+  from 32,768 to 24,576 entries: over 2x the measured peak and above the older
+  23,040-entry gameplay table.  Dyna Gear's before/after frame-CRC stream is
+  byte-identical at the reduced depth.
+- Hiscore configuration fields are one packed 16x48 MLAB table rather than
+  four tiny independent memories, and the persistent/temporary 256-byte
+  stores occupy opposite halves of one 512x8 true-dual-port M10K rather than
+  two blocks.
+
+Verification: Slang parsed the V60 and cached-renderer tops with zero errors or
+warnings; Icarus elaborated the packed hiscore module.  Visible-SDL Verilator
+completed Cairn Blade through native frame 120 and Dyna Gear, Vasara, Vasara 2,
+Drift Out '94, Storm Blade and Twin Eagle II through frame 60 with empty error
+logs and no `CACHE_OVR`.  Cairn Blade matched the historical `fc93d295` frame
+checksum and Dyna Gear matched `9c39477d`; Dyna Gear's complete CRC artifact
+SHA-256 stayed `D635A394...94077ACD8` before/after the pool reduction.
+
+Resource savings remain estimates until an explicitly authorized Quartus map
+and fit.  Expected structural changes are: two fewer V60 32x32 multipliers,
+81,920 fewer descriptor-cache bits, 57,344 fewer line-pool bits (one 8,192-row
+M10K tier), four config-table M10Ks moved to MLAB, and two score-store M10Ks
+merged to one.  The repository profile audit currently stops because
+`releases/Arcade-SSV.rbf` is intentionally absent; no stale release was
+created to satisfy it.
+
 ## Universal release integration pass (9 Aug 2026, no Verilator/Quartus)
 
 - Removed the `SSV_ST010_ENABLED` compile-time fork. The DSP and p5 program

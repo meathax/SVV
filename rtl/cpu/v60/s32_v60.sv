@@ -249,8 +249,7 @@ reg [5:0]  mdcnt;
 reg [31:0] mdop;
 reg [31:0] movd_lo, movd_hi;     // MOVD 64-bit transfer buffer
 reg        divx_mem;             // DIVX/DIVUX: op2 dividend/result is in memory
-reg [31:0] md_savb;              // MUL: second operand, kept for overflow flag
-reg        md_sign;
+reg        md_sign;              // MUL result sign (iterative magnitude product)
 reg        md_qsign, md_rsign;   // divide result signs
 reg        md_divov;             // DIV: signed min/-1 overflow (dest unchanged)
 // DIVX/DIVUX use a 64-bit dividend.  Keeping this path separate from the
@@ -3610,10 +3609,18 @@ task automatic exec_op;
 
     // ------------ multiply / divide (iterative) ------------
     8'h81, 8'h83, 8'h85, 8'h91, 8'h93, 8'h95: begin // MUL/MULU
-        mdop <= dimext(a, d2);
-        mdacc <= {32'b0, dimext(b, d2)};
-        md_savb <= dimext(b, d2);   // retained for the width-correct overflow flag
-        md_sign <= !cur_op[4] ? 1'b0 : 1'b0;
+        logic [31:0] ma, mb, sa, sb;
+        logic mul_signed;
+        mul_signed = !cur_op[4];
+        sa = (d2==2'd0) ? {{24{a[7]}}, a[7:0]} :
+             (d2==2'd1) ? {{16{a[15]}}, a[15:0]} : a;
+        sb = (d2==2'd0) ? {{24{b[7]}}, b[7:0]} :
+             (d2==2'd1) ? {{16{b[15]}}, b[15:0]} : b;
+        ma = (mul_signed && sa[31]) ? (~sa + 1'b1) : dimext(a, d2);
+        mb = (mul_signed && sb[31]) ? (~sb + 1'b1) : dimext(b, d2);
+        mdop <= ma;
+        mdacc <= {32'b0, mb};
+        md_sign <= mul_signed & (sa[31] ^ sb[31]);
         mdcnt <= 6'd32;
         st <= S_MULDIV;
     end
@@ -4111,33 +4118,28 @@ task automatic md_finish;
     d2 = f12_dim2(cur_op);
     case (cur_op)
     8'h81, 8'h83, 8'h85, 8'h91, 8'h93, 8'h95: begin
-        // Overflow was a constant-0 upper-word test (always false for byte/half)
-        // and, for signed MUL, tested the unsigned product's high half (audit
-        // R20 V60-6).  Compute the exact width-correct signed/unsigned product
-        // overflow from the retained operands.
-        logic [63:0] uprod;
-        logic signed [63:0] sprod;
-        logic signed [31:0] sa32, sb32;
-        uprod = {32'b0, mdop} * {32'b0, md_savb};                 // unsigned product
-        sa32  = (d2==2'd0) ? {{24{mdop[7]}},   mdop[7:0]}   :
-                (d2==2'd1) ? {{16{mdop[15]}},  mdop[15:0]}  : mdop;
-        sb32  = (d2==2'd0) ? {{24{md_savb[7]}},md_savb[7:0]}:
-                (d2==2'd1) ? {{16{md_savb[15]}},md_savb[15:0]} : md_savb;
-        sprod = $signed({{32{sa32[31]}}, sa32}) * $signed({{32{sb32[31]}}, sb32});
-        set_zs(mdacc[31:0], d2);
+        // mdacc is the magnitude product produced by the existing serial
+        // shift-add engine.  Earlier code instantiated TWO fresh 32x32
+        // combinational multipliers here solely to recover signed/unsigned
+        // overflow, despite already having the complete 64-bit product.
+        // Apply the saved sign once and inspect the magnitude's upper bits.
+        // This retains MAME's unusual signed rule: every non-zero negative
+        // product has OV set because its sign-extended bit pattern has
+        // non-zero bits above the operand width.
+        logic [63:0] product;
+        logic upper_nonzero;
+        product = md_sign ? (~mdacc + 1'b1) : mdacc;
+        upper_nonzero = (d2==2'd0) ? (mdacc[63:8]  != 0) :
+                        (d2==2'd1) ? (mdacc[63:16] != 0) :
+                                     (mdacc[63:32] != 0);
+        set_zs(product[31:0], d2);
         // MAME opMUL/opMULU: OV = (product >> width) != 0 on the product's
         // unsigned bit pattern (signed product for MUL, unsigned for MULU).
         // For byte/half MAME shifts the 32-bit value; for word, the 64-bit one.
         // A negative signed product therefore also sets OV (e.g. MUL.W -1*1).
-        if (!cur_op[4])  // MUL (signed)
-            f_ov <= (d2==2'd0) ? (sprod[31:8]  != 0) :
-                    (d2==2'd1) ? (sprod[31:16] != 0) :
-                                 (sprod[63:32] != 0);
-        else             // MULU (unsigned)
-            f_ov <= (d2==2'd0) ? (uprod[31:8]  != 0) :
-                    (d2==2'd1) ? (uprod[31:16] != 0) :
-                                 (uprod[63:32] != 0);
-        wb_op2(mdacc[31:0], d2);
+        f_ov <= !cur_op[4] ? ((md_sign && (mdacc != 0)) | upper_nonzero)
+                           : upper_nonzero;
+        wb_op2(product[31:0], d2);
     end
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5: begin // DIV: quotient (signed applied)
         logic [31:0] q;

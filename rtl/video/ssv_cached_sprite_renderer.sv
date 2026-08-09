@@ -65,6 +65,11 @@ localparam logic [16:0] LAST_LOCAL  = 17'h1fffc;
 wire [8:0] LAST_PIXEL = ssv_pkg::active_width_cfg(cfg) - 1'd1;
 wire [8:0] ACTIVE_HEIGHT = ssv_pkg::active_height_cfg(cfg);
 localparam integer CACHE_ADDR_WIDTH = $clog2(CACHE_ENTRIES);
+// Vblank resolves all CPU-writable coordinate/flip/scroll controls into a
+// compact visual descriptor.  Both union arms are exactly 88 bits:
+// ordinary = type,sx,sy,code,size,depth,flip,color; tilemap =
+// type,sy,mode,unknown,scroll-x,map-y-bias,group.
+localparam integer DESC_WIDTH = 88;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_COUNT_VALUE = CACHE_ENTRIES;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
     CACHE_ENTRIES - 1;
@@ -97,13 +102,16 @@ localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
 // total this pool now tracks dynamically): zero drops, peak occupancy only
 // 57-90 of the 96 per-line cap. 32,768 keeps ~1.5-2x headroom over that
 // measured Dyna Gear peak and costs ~30 M10K blocks (measured bits-per-block
-// ratio from the same doc), vs. never fitting at all. Vasara 2's actual
-// requirement is NOT independently measured -- this is a reasoned margin,
-// not a confirmed bound. Re-check via cache_overflow (wired to the overrun
-// LED) across both games' regression scenarios before treating this as
-// final; raise it if either game's cache_overflow ever asserts.
+// ratio from the same doc), vs. never fitting at all. Frame-wide high-water
+// telemetry added in Aug 2026 measured 11,060 as the largest of seven locally
+// runnable qualified-set startup/attract samples (Dyna Gear; no overflow).
+// 24,576 is the next useful M10K packing boundary above twice that peak and
+// also exceeds the older 23,040-entry gameplay table that completed without
+// drops. Ultra X still needs its private ST010 image for the same simulation
+// gate, so cache_overflow remains a sticky hardware guard rather than assuming
+// the measurement is a proof for every future scene.
 localparam integer LINE_SLOTS = CACHE_ENTRIES;
-localparam integer LINE_POOL_ENTRIES = 32768;
+localparam integer LINE_POOL_ENTRIES = 24576;
 localparam integer LINE_POOL_ADDR_WIDTH = $clog2(LINE_POOL_ENTRIES);
 localparam integer LINE_POOL_COUNT_WIDTH = LINE_POOL_ADDR_WIDTH + 1;
 // Keep one additional carry bit in capacity checks. The allocator itself is
@@ -160,7 +168,7 @@ logic [CACHE_ADDR_WIDTH:0] cache_write_count;
 logic [CACHE_ADDR_WIDTH:0] cache_count;
 logic [CACHE_ADDR_WIDTH-1:0] cache_read_index;
 logic [CACHE_ADDR_WIDTH:0] cache_render_index;
-logic [127:0] cache_q;
+logic [DESC_WIDTH-1:0] cache_q;
 // descriptor_cache's single read port (see the merged read below) must
 // execute unconditionally every cycle -- Quartus refuses to infer a RAM at
 // all ("uninferred due to asynchronous read logic") for an array whose read
@@ -170,7 +178,7 @@ logic [127:0] cache_q;
 // never written outside BUILD_EVALUATE, well away from every state that
 // reads it), keeping cache_q's held value and latency identical to before.
 logic [CACHE_ADDR_WIDTH-1:0] cache_read_addr_r;
-logic [127:0] cache_decode_q;
+logic [DESC_WIDTH-1:0] cache_decode_q;
 logic cache_pending;
 // Consecutive copies of the same ordinary (non-shadow, non-tilemap)
 // descriptor write the same pens to the same pixels.  Keep one descriptor of
@@ -178,24 +186,21 @@ logic cache_pending;
 // idempotent draw.  Shadow operations are deliberately excluded because a
 // repeated shadow darkens the prior result again, and tilemaps have their own
 // group-aware suppression below.
-logic [127:0] last_render_descriptor;
+logic [DESC_WIDTH-1:0] last_render_descriptor;
 logic        last_render_descriptor_valid;
 // Build-time counterpart to the render-time duplicate suppression above.
 // Consecutive identical ordinary descriptors are idempotent in MAME draw
 // order, so keeping one copy avoids filling every affected scanline bucket
 // with reset-list duplicates before the renderer ever sees them.
-logic [127:0] build_last_descriptor;
+logic [DESC_WIDTH-1:0] build_last_descriptor;
 logic        build_last_descriptor_valid;
 // After storing the last cache slot, finish its line buckets then stop.
 logic cache_stop_after_bucket;
-// One array, not two. The 128-bit form was measured at 22 M10K; splitting it
-// into 53/75-bit halves to steer packing was predicted to give 18 but the
-// Fitter RAM Summary reports 16 + 14 = 30 -- eight blocks WORSE than the
-// single array it replaced. Block RAM is the binding resource on this part
-// (530 of 553), so the measurement wins over the prediction. Do not re-split
-// without a fit report showing a real reduction.
+// One array, not two. Pre-resolving the record removes 40 stored bits per
+// entry and the render-side global/local coordinate network. Keep it as one
+// physical memory: an earlier split packing hint measured eight blocks worse.
 (* ramstyle = "M10K, no_rw_check" *)
-logic [127:0] descriptor_cache [0:CACHE_ENTRIES-1];
+logic [DESC_WIDTH-1:0] descriptor_cache [0:CACHE_ENTRIES-1];
 
 (* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
@@ -222,7 +227,7 @@ logic [LINE_POOL_COUNT_WIDTH-1:0] line_pool_alloc;
 logic [CACHE_ADDR_WIDTH:0] cache_scan_index;
 // Wire alias, not a register: see the merged read at the cache_q assignment
 // below for why this and cache_q now share one descriptor_cache read port.
-wire  [127:0] cache_scan_q = cache_q;
+wire  [DESC_WIDTH-1:0] cache_scan_q = cache_q;
 logic [7:0] clear_y;
 logic [7:0] bucket_y, bucket_last_y;
 logic [CACHE_ADDR_WIDTH-1:0] bucket_descriptor;
@@ -302,14 +307,24 @@ logic  [2:0] fetch_row;
 logic [31:0] plane01, plane23, plane45, plane67;
 logic [127:0] pens;
 
-wire [15:0] cached_tilemaps_offsy = cache_decode_q[127:112];
-wire [15:0] cached_g0 = cache_decode_q[111:96];
-wire [15:0] cached_g2 = cache_decode_q[95:80];
-wire [15:0] cached_g3 = cache_decode_q[79:64];
-wire [15:0] cached_l0 = cache_decode_q[63:48];
-wire [15:0] cached_l1 = cache_decode_q[47:32];
-wire [15:0] cached_l2 = cache_decode_q[31:16];
-wire [15:0] cached_l3 = cache_decode_q[15:0];
+wire compact_tilemap = cache_decode_q[87];
+// Ordinary descriptor arm.
+wire signed [16:0] compact_sx = cache_decode_q[86:70];
+wire signed [16:0] compact_sy = cache_decode_q[69:53];
+wire [19:0] compact_code = cache_decode_q[52:33];
+wire  [3:0] compact_xnum = cache_decode_q[32:29];
+wire  [3:0] compact_ynum = cache_decode_q[28:25];
+wire  [3:0] compact_depth = cache_decode_q[24:21];
+wire        compact_flip_x = cache_decode_q[20];
+wire        compact_flip_y = cache_decode_q[19];
+wire  [8:0] compact_color = cache_decode_q[18:10];
+// Tilemap descriptor arm.
+wire signed [16:0] compact_tilemap_sy = cache_decode_q[86:70];
+wire [15:0] compact_tile_mode = cache_decode_q[69:54];
+wire [15:0] compact_tile_unknown = cache_decode_q[53:38];
+wire signed [17:0] compact_tile_scroll_x = cache_decode_q[37:20];
+wire [16:0] compact_tile_map_y_bias = cache_decode_q[19:3];
+wire  [2:0] compact_tile_group = cache_decode_q[2:0];
 
 logic  [1:0] calc_xbits, calc_ybits;
 logic  [3:0] calc_xnum, calc_ynum;
@@ -349,42 +364,30 @@ logic [15:0] prep_coordinate_control, prep_flip_control;
 
 logic signed [16:0] eval_sx, eval_sy;
 logic signed [17:0] eval_line_rel;
+logic signed [17:0] compact_bottom;
+logic [7:0] compact_first_y, compact_last_y;
 
-// Finish coordinate transforms from the registered first-level sums.  This
-// is the second half of the decode pipeline; the sprite-offset mux and the
-// three-input local/global/offset sums are no longer in this path.
+// Coordinates are resolved once during vblank and stored in the compact
+// record.  The per-scanline path only subtracts Y to select the tile row.
 always_comb begin
-    logic signed [16:0] sx_work;
-    logic signed [16:0] sy_work;
-
-    sx_work = prep_sx_work;
-    sy_work = prep_sy_work;
-
-    if (prep_flip_control[14]) begin
-        sy_work = -sy_work;
-        if (!prep_flip_control[15])
-            sy_work = sy_work - 17'sd16;
-    end
-    if (prep_flip_control[12])
-        sx_work = -sx_work + 17'sd256;
-
-    if (prep_coordinate_control == 16'h7140) begin
-        eval_sx = prep_sprites_offsx + sx_work;
-        eval_sy = prep_sprites_offsy - sy_work;
-    end
-    else if (prep_coordinate_control[11]) begin
-        eval_sx = prep_sprites_offsx + sx_work -
-                  $signed({9'd0, prep_xnum, 3'd0});
-        eval_sy = prep_sprites_offsy - sy_work -
-                  $signed({10'd0, prep_ynum, 2'd0});
-    end
-    else begin
-        eval_sx = prep_sprites_offsx + sx_work;
-        eval_sy = prep_sprites_offsy - sy_work -
-                  $signed({9'd0, prep_ynum, 3'd0});
-    end
-
+    eval_sx = prep_sx_work;
+    eval_sy = prep_sy_work;
     eval_line_rel = $signed({1'b0, target_y_latched}) - eval_sy;
+end
+
+always_comb begin
+    if (compact_tilemap)
+        compact_bottom = compact_tilemap_sy + 18'sd65;
+    else
+        compact_bottom = compact_sy +
+                         $signed({1'b0, compact_ynum, 3'd0});
+    compact_first_y = (compact_tilemap ? compact_tilemap_sy : compact_sy) < 0
+                    ? 8'd0
+                    : (compact_tilemap ? compact_tilemap_sy[7:0]
+                                       : compact_sy[7:0]);
+    compact_last_y = (compact_bottom > $signed({9'd0, ACTIVE_HEIGHT}))
+                   ? ACTIVE_HEIGHT[7:0] - 1'd1
+                   : compact_bottom[7:0] - 1'd1;
 end
 
 function automatic logic signed [10:0] signed10(input logic [15:0] value);
@@ -501,23 +504,16 @@ endfunction
 
 wire signed [10:0] global_y_base_s = signed10(global_y_base);
 
-wire [3:0] cached_offset_index = {cached_g0[7:5], 1'b0};
-wire [15:0] selected_offset_x =
-    offset_word(sprite_offsets, cached_offset_index);
-wire [15:0] selected_offset_y =
-    offset_word(sprite_offsets, cached_offset_index + 1'd1);
-wire [4:0] cached_tilemap_base = {cached_l0[2:0], 2'b00};
-wire [15:0] cached_tile_scroll_x =
-    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base);
-wire [15:0] cached_tile_scroll_y =
-    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 1'd1);
-wire [15:0] cached_tile_unknown =
-    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 2'd2);
-wire [15:0] cached_tile_mode =
-    tilemap_scroll_word(tilemap_scrolls, cached_tilemap_base + 2'd3);
-
-
 wire [3:0] build_offset_index = {global_w0[7:5], 1'b0};
+wire [4:0] build_tilemap_base = {local_w0[2:0], 2'b00};
+wire [15:0] build_tile_scroll_x =
+    tilemap_scroll_word(tilemap_scrolls, build_tilemap_base);
+wire [15:0] build_tile_scroll_y =
+    tilemap_scroll_word(tilemap_scrolls, build_tilemap_base + 1'd1);
+wire [15:0] build_tile_unknown =
+    tilemap_scroll_word(tilemap_scrolls, build_tilemap_base + 2'd2);
+wire [15:0] build_tile_mode =
+    tilemap_scroll_word(tilemap_scrolls, build_tilemap_base + 2'd3);
 // Registered at the BUILD_GLOBAL_1->BUILD_LOCAL_WAIT/BUILD_PREFIX_READ
 // transition, as soon as global_w0 (and thus build_offset_index) is valid --
 // not read live here. The live combinational form put the CPU-writable
@@ -564,52 +560,27 @@ logic build_tilemap_active;
 logic signed [17:0] build_tilemap_sy_work;
 logic signed [16:0] build_tilemap_sy;
 logic signed [17:0] build_tilemap_bottom;
+logic signed [17:0] build_tile_scroll_x_work;
+logic [16:0] build_tile_map_y_bias;
+logic [19:0] build_code;
+logic build_flip_x, build_flip_y;
 
 always_comb begin
-    calc_xbits = local_control[14] ? cached_l2[11:10]
-                                   : cached_g0[11:10];
-    calc_ybits = local_control[14] ? cached_l3[11:10]
-                                   : cached_g0[9:8];
-    calc_depth = local_control[14] ? cached_l2[15:12]
-                                   : cached_g0[15:12];
-    calc_xnum = 4'd1 << calc_xbits;
-    calc_ynum = 4'd1 << calc_ybits;
-    calc_tilemap = (cached_l0 <= 16'd7) && (cached_l1 == 16'd0) &&
-                   (calc_xbits == 2'd0) && (calc_ybits == 2'd3);
-    calc_tilemap_active = calc_tilemap && (cached_g0[4:0] != 0) &&
-                          (cached_l0 != 0);
-    calc_tilemap_sy_work = signed10(cached_l3);
-    if (local_control[12])
-        calc_tilemap_sy_work = calc_tilemap_sy_work - 18'sd32;
-    else if (coordinate_control[11]) begin
-        if (coordinate_control[12])
-            calc_tilemap_sy_work = calc_tilemap_sy_work -
-                                   signed10(cached_tilemaps_offsy);
-        else
-            calc_tilemap_sy_work = calc_tilemap_sy_work +
-                                   signed10(cached_tilemaps_offsy);
-    end
-    calc_tilemap_sy = signed10(calc_tilemap_sy_work[15:0]);
+    calc_xbits = 2'd0;
+    calc_ybits = 2'd0;
+    calc_xnum = compact_xnum;
+    calc_ynum = compact_ynum;
+    calc_depth = compact_depth;
+    calc_tilemap = compact_tilemap;
+    calc_tilemap_active = compact_tilemap;
+    calc_tilemap_sy_work = compact_tilemap_sy;
+    calc_tilemap_sy = compact_tilemap_sy;
     calc_tilemap_bottom = calc_tilemap_sy + 18'sd65;
-    calc_tile_scroll_x_work = $signed({2'b00, cached_tile_scroll_x});
-    if ((cached_tile_unknown & 16'h05ff) == 16'h0440)
-        calc_tile_scroll_x_work = calc_tile_scroll_x_work - 18'sd16;
-    else if ((cached_tile_unknown & 16'h05ff) == 16'h0401)
-        calc_tile_scroll_x_work = calc_tile_scroll_x_work - 18'sd32;
-
-    calc_tile_map_y = {8'd0, target_y_latched} +
-                      {1'b0, cached_tile_scroll_y} +
-                      {{6{global_y_base_s[10]}}, global_y_base_s} +
-                      {1'b0, global_y_adjust} + 17'd2;
-
-    calc_code = expand_code(cfg, cached_l0, cached_l1);
-    if ((calc_xnum == 4'd2) && (calc_ynum == 4'd4))
-        calc_code = calc_code & 20'hffff8;
-
-    calc_flip_x = cached_l1[15] ^
-                  (flip_control[12] && !flip_control[13]);
-    calc_flip_y = cached_l1[14] ^
-                  (flip_control[14] && !flip_control[13]);
+    calc_tile_scroll_x_work = compact_tile_scroll_x;
+    calc_tile_map_y = compact_tile_map_y_bias + {8'd0, target_y_latched};
+    calc_code = compact_code;
+    calc_flip_x = compact_flip_x;
+    calc_flip_y = compact_flip_y;
 
     calc_height = {calc_ynum, 3'd0};
 end
@@ -641,6 +612,22 @@ always_comb begin
     end
     build_tilemap_sy = signed10(build_tilemap_sy_work[15:0]);
     build_tilemap_bottom = build_tilemap_sy + 18'sd65;
+    build_tile_scroll_x_work = $signed({2'b00, build_tile_scroll_x});
+    if ((build_tile_unknown & 16'h05ff) == 16'h0440)
+        build_tile_scroll_x_work = build_tile_scroll_x_work - 18'sd16;
+    else if ((build_tile_unknown & 16'h05ff) == 16'h0401)
+        build_tile_scroll_x_work = build_tile_scroll_x_work - 18'sd32;
+    build_tile_map_y_bias = {1'b0, build_tile_scroll_y} +
+                            {{6{global_y_base_s[10]}}, global_y_base_s} +
+                            {1'b0, global_y_adjust} + 17'd2;
+
+    build_code = expand_code(cfg, local_w0, local_w1);
+    if ((build_xnum == 4'd2) && (build_ynum == 4'd4))
+        build_code = build_code & 20'hffff8;
+    build_flip_x = local_w1[15] ^
+                   (flip_control[12] && !flip_control[13]);
+    build_flip_y = local_w1[14] ^
+                   (flip_control[14] && !flip_control[13]);
 
     build_sx_work = signed10(local_w2 + build_gx_off_r);
     build_sy_work = signed10(local_w3 + build_gy_off_r);
@@ -701,10 +688,17 @@ always_comb begin
     end
 end
 
-wire [127:0] cache_write_data = {
-    tilemaps_offsy, global_w0, global_w2, global_w3,
-    local_w0, local_w1, local_w2, local_w3
+wire [DESC_WIDTH-1:0] ordinary_cache_write_data = {
+    1'b0, build_sx, build_sy, build_code,
+    build_xnum, build_ynum, build_depth,
+    build_flip_x, build_flip_y, local_w1[8:0], 10'd0
 };
+wire [DESC_WIDTH-1:0] tilemap_cache_write_data = {
+    1'b1, build_tilemap_sy, build_tile_mode, build_tile_unknown,
+    build_tile_scroll_x_work, build_tile_map_y_bias, local_w0[2:0]
+};
+wire [DESC_WIDTH-1:0] cache_write_data = build_tilemap
+    ? tilemap_cache_write_data : ordinary_cache_write_data;
 wire build_is_duplicate = build_last_descriptor_valid &&
                           (cache_write_data == build_last_descriptor) &&
                           !build_tilemap && !build_depth[3];
@@ -1338,15 +1332,8 @@ always_ff @(posedge clk) begin
             BUILD_REINDEX_READ: state <= BUILD_REINDEX_WAIT;
 
             BUILD_REINDEX_WAIT: begin
-                tilemaps_offsy <= cache_scan_q[127:112];
-                global_w0 <= cache_scan_q[111:96];
-                global_w2 <= cache_scan_q[95:80];
-                global_w3 <= cache_scan_q[79:64];
-                local_w0 <= cache_scan_q[63:48];
-                local_w1 <= cache_scan_q[47:32];
-                local_w2 <= cache_scan_q[31:16];
-                local_w3 <= cache_scan_q[15:0];
-                state <= BUILD_REINDEX_OFFSET;
+                cache_decode_q <= cache_scan_q;
+                state <= BUILD_REINDEX_EVAL;
             end
 
             // BUILD_REINDEX_OFFSET/PRESUM mirror the two-stage pipeline
@@ -1360,36 +1347,15 @@ always_ff @(posedge clk) begin
             // value from whatever the initial build pass last computed would
             // silently misjudge visibility/bucket placement for every
             // reindexed descriptor whose sprite-offset table entry differs.
-            BUILD_REINDEX_OFFSET: begin
-                build_offset_x <= offset_word(sprite_offsets, build_offset_index);
-                build_offset_y <=
-                    offset_word(sprite_offsets, build_offset_index + 1'd1);
-                state <= BUILD_REINDEX_PRESUM;
-            end
+            BUILD_REINDEX_OFFSET: state <= BUILD_REINDEX_EVAL;
 
-            BUILD_REINDEX_PRESUM: begin
-                build_gx_off_r <= global_w2 + build_offset_x;
-                build_gy_off_r <= global_w3 + build_offset_y;
-                state <= BUILD_REINDEX_EVAL;
-            end
+            BUILD_REINDEX_PRESUM: state <= BUILD_REINDEX_EVAL;
 
             BUILD_REINDEX_EVAL: begin
-                if (build_screen_visible) begin
-                    bucket_y <= build_first_y;
-                    bucket_last_y <= build_last_y;
-                    line_count_addr <= build_first_y;
-                    state <= BUILD_REINDEX_BUCKET_READ;
-                end
-                else if (cache_scan_index + 1'd1 < cache_write_count) begin
-                    cache_scan_index <= cache_scan_index + 1'd1;
-                    state <= BUILD_REINDEX_READ;
-                end
-                else begin
-                    cache_count <= cache_write_count;
-                    cache_ready <= 1'b1;
-                    cache_busy <= 1'b0;
-                    state <= IDLE;
-                end
+                bucket_y <= compact_first_y;
+                bucket_last_y <= compact_last_y;
+                line_count_addr <= compact_first_y;
+                state <= BUILD_REINDEX_BUCKET_READ;
             end
 
             // Retained to preserve subsequent state encodings. Normal second
@@ -1477,9 +1443,9 @@ always_ff @(posedge clk) begin
                 prep_tilemap_active <= calc_tilemap_active;
                 prep_tilemap_sy <= calc_tilemap_sy;
                 prep_tilemap_bottom <= calc_tilemap_bottom;
-                prep_tile_mode <= cached_tile_mode;
-                prep_tile_unknown <= cached_tile_unknown;
-                prep_tile_group <= cached_l0[2:0];
+                prep_tile_mode <= compact_tile_mode;
+                prep_tile_unknown <= compact_tile_unknown;
+                prep_tile_group <= compact_tile_group;
                 prep_tile_map_y <= calc_tile_map_y;
                 prep_tile_scroll_x_work <= calc_tile_scroll_x_work;
                 prep_height <= calc_height;
@@ -1489,20 +1455,13 @@ always_ff @(posedge clk) begin
                 prep_depth <= calc_depth;
                 prep_flip_x <= calc_flip_x;
                 prep_flip_y <= calc_flip_y;
-                prep_color <= cached_l1[8:0];
-                prep_sx_work <= signed10(
-                    cached_l2 + cached_g2 + selected_offset_x
-                );
-                prep_sy_work <= signed10(
-                    cached_l3 + cached_g3 + selected_offset_y
-                );
-                prep_sprites_offsx <= signed8(flip_control);
-                prep_sprites_offsy <= -(
-                    signed10(global_y_base) +
-                    $signed({1'b0, global_y_adjust}) + 17'sd1
-                );
-                prep_coordinate_control <= coordinate_control;
-                prep_flip_control <= flip_control;
+                prep_color <= compact_color;
+                prep_sx_work <= compact_sx;
+                prep_sy_work <= compact_sy;
+                prep_sprites_offsx <= '0;
+                prep_sprites_offsy <= '0;
+                prep_coordinate_control <= '0;
+                prep_flip_control <= '0;
                 state <= RENDER_EVAL;
             end
             RENDER_EVAL: begin
@@ -1806,6 +1765,8 @@ integer sim_line_demand_max;
 integer sim_line_demand_total;
 integer sim_line_demand_i;
 integer sim_duplicate_skips;
+integer sim_line_pool_peak;
+integer sim_line_pool_builds;
 
 initial begin
     for (sim_line_demand_i = 0; sim_line_demand_i < 240;
@@ -1814,6 +1775,8 @@ initial begin
     sim_line_demand_max = 0;
     sim_line_demand_total = 0;
     sim_duplicate_skips = 0;
+    sim_line_pool_peak = 0;
+    sim_line_pool_builds = 0;
 end
 
 always_ff @(posedge clk) begin
@@ -1827,6 +1790,16 @@ always_ff @(posedge clk) begin
         sim_line_demand_total <= sim_line_demand_total + 1;
         if (sim_line_demand[bucket_y] + 1 > sim_line_demand_max)
             sim_line_demand_max <= sim_line_demand[bucket_y] + 1;
+    end
+    if ((state == BUILD_PREFIX_WRITE) && (line_count_addr == 8'd239)) begin
+        sim_line_pool_builds <= sim_line_pool_builds + 1;
+        if (line_pool_end > sim_line_pool_peak)
+            sim_line_pool_peak <= line_pool_end;
+        $display("LINE_POOL build=%0d used=%0d peak=%0d capacity=%0d",
+                 sim_line_pool_builds + 1, line_pool_end,
+                 (line_pool_end > sim_line_pool_peak)
+                     ? line_pool_end : sim_line_pool_peak,
+                 LINE_POOL_ENTRIES);
     end
 end
 `endif

@@ -245,47 +245,38 @@ wire length_we = downloading_config & parsing_config & (ioctl_addr[2:0] == 3'd3 
 wire startdata_we = downloading_config & parsing_config & (ioctl_addr[2:0] == 3'd4 + CFG_LENGTHWIDTH); 
 wire enddata_we = downloading_config & parsing_config & (ioctl_addr[2:0] == 3'd5 + CFG_LENGTHWIDTH);
 
-// RAM chunks used to store configuration data
-// - Address table
-dpram_hs #(.aWidth(CFG_ADDRESSWIDTH),.dWidth(24))
-address_table(
-	.clk(clk),
-	.addr_a(config_upload_addr),
-	.we_a(address_we & ioctl_wr),
-	.d_a(address_data_in),
-	.addr_b(counter),
-	.q_b(addr_base)
-);
-// Length table - variable width depending on CFG_LENGTHWIDTH
-dpram_hs #(.aWidth(CFG_ADDRESSWIDTH),.dWidth(CFG_LENGTHWIDTH*8))
-length_table(
-	.clk(clk),
-	.addr_a(config_upload_addr),
-	.we_a(length_we & ioctl_wr),
-	.d_a(length_data_in),
-	.addr_b(counter),
-	.q_b(length)
-);
-// - Start data table
-dpram_hs #(.aWidth(CFG_ADDRESSWIDTH),.dWidth(8))
-startdata_table(
-	.clk(clk),
-	.addr_a(config_upload_addr),
-	.we_a(startdata_we & ioctl_wr), 
-	.d_a(data_from_hps),
-	.addr_b(counter),
-	.q_b(start_val)
-);
-// - End data table
-dpram_hs #(.aWidth(CFG_ADDRESSWIDTH),.dWidth(8))
-enddata_table(
-	.clk(clk),
-	.addr_a(config_upload_addr),
-	.we_a(enddata_we & ioctl_wr),
-	.d_a(data_from_hps),
-	.addr_b(counter),
-	.q_b(end_val)
-);
+// Pack the four tiny per-entry tables into one record memory.  Quartus charged
+// a complete RAM block for each independently described 16-word table.  The
+// fields share the same upload/read addresses and their write strobes are
+// mutually exclusive, so one 16x48 (or 16x56 for CFG_LENGTHWIDTH=2) MLAB has
+// identical registered-read behavior with a fraction of the physical cost.
+localparam CFG_LENGTHBITS = CFG_LENGTHWIDTH * 8;
+localparam CFG_RECORDWIDTH = 40 + CFG_LENGTHBITS;
+localparam CFG_LENGTH_LSB = 24;
+localparam CFG_START_LSB = CFG_LENGTH_LSB + CFG_LENGTHBITS;
+localparam CFG_END_LSB = CFG_START_LSB + 8;
+(* ramstyle = "MLAB, no_rw_check" *)
+reg [CFG_RECORDWIDTH-1:0] config_table [0:(1<<CFG_ADDRESSWIDTH)-1];
+reg [CFG_RECORDWIDTH-1:0] config_q;
+reg [CFG_RECORDWIDTH-1:0] config_stage;
+
+always @(posedge clk) begin
+	if (address_we & ioctl_wr)
+		config_stage[23:0] <= address_data_in;
+	if (length_we & ioctl_wr)
+		config_stage[CFG_LENGTH_LSB +: CFG_LENGTHBITS] <= length_data_in;
+	if (startdata_we & ioctl_wr)
+		config_stage[CFG_START_LSB +: 8] <= data_from_hps;
+	if (enddata_we & ioctl_wr)
+		config_table[config_upload_addr] <=
+			{data_from_hps, config_stage[CFG_END_LSB-1:0]};
+	config_q <= config_table[counter];
+end
+
+assign addr_base = config_q[23:0];
+assign length = config_q[CFG_LENGTH_LSB +: CFG_LENGTHBITS];
+assign start_val = config_q[CFG_START_LSB +: 8];
+assign end_val = config_q[CFG_END_LSB +: 8];
 
 // LOCAL CHANGE (SSV): one role per port, so these two can live in block RAM.
 //
@@ -320,25 +311,23 @@ wire [HS_SCOREWIDTH-1:0] hs_data_wraddr = downloading_dump
 wire               [7:0] hs_data_wrdata = downloading_dump ? data_from_hps
                                                            : hiscore_buffer_out;
 
-// RAM chunk used to store valid hiscore data
-sdp_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
-hiscore_data (
+// Pack the persistent and temporary 256-byte stores into the two halves of
+// one 512x8 true-dual-port M10K.  The old pair of simple-dual-port instances
+// each consumed a complete block even though together they hold only 4096
+// bits.  Port A exclusively addresses the persistent half and port B the
+// temporary half, so simultaneous accesses remain independent and the FSM's
+// read latency/write-first behaviour is unchanged.
+dpram_hs #(.aWidth(HS_SCOREWIDTH+1),.dWidth(8))
+hiscore_storage (
 	.clk(clk),
-	.wr_addr(hs_data_wraddr),
-	.we(hs_data_we),
-	.d(hs_data_wrdata),
-	.rd_addr(data_addr),
-	.q(hiscore_data_out)
-);
-// RAM chunk used to store temporary high score data
-sdp_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
-hiscore_buffer (
-	.clk(clk),
-	.wr_addr(buffer_addr),
-	.we(buffer_write),
-	.d(data_from_ram),
-	.rd_addr(buffer_addr),
-	.q(hiscore_buffer_out)
+	.addr_a({1'b0, hs_data_we ? hs_data_wraddr : data_addr}),
+	.we_a(hs_data_we),
+	.d_a(hs_data_wrdata),
+	.q_a(hiscore_data_out),
+	.addr_b({1'b1, buffer_addr}),
+	.we_b(buffer_write),
+	.d_b(data_from_ram),
+	.q_b(hiscore_buffer_out)
 );
 
 assign data_to_ram = hiscore_data_out;
@@ -918,35 +907,5 @@ end else begin : g_ram_block
 
 end
 endgenerate
-
-endmodule
-
-// LOCAL CHANGE (SSV): the two score-data arrays are simple dual-port in this
-// integration: one port only writes and one port only reads. Describing them
-// through the generic true-dual-port dpram_hs above repeatedly made Quartus 17
-// reject RAM inference ("uninferred due to asynchronous read logic") and
-// implement roughly 1,387 ALMs of registers and muxes. This literal one-write,
-// one-unconditional-registered-read shape maps to a Cyclone V M10K.
-// Same-address read-during-write is deliberately unspecified; the hiscore FSM
-// never consumes a location on the cycle it writes that location.
-module sdp_hs #(
-	parameter dWidth=8,
-	parameter aWidth=8
-)(
-	input								clk,
-	input			[aWidth-1:0]	wr_addr,
-	input			[dWidth-1:0]	d,
-	input								we,
-	input			[aWidth-1:0]	rd_addr,
-	output reg	[dWidth-1:0]	q
-);
-
-	(* ramstyle = "M10K, no_rw_check" *) reg [dWidth-1:0] ram [2**aWidth-1:0];
-
-	always @(posedge clk) begin
-		if (we)
-			ram[wr_addr] <= d;
-		q <= ram[rd_addr];
-	end
 
 endmodule
