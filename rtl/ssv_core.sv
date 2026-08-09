@@ -637,6 +637,7 @@ logic [SDR_AW:1] ext_p0_addr_r;
 // Forward-declared: icache lookup suppresses re-arming a completed ROM read
 // while the V60 bus still holds m_req (ack_r driven in the read-mux block).
 logic        ack_r;
+logic        ack_r_d;
 logic [15:0] read_mux;
 logic        read_wait;
 // MAME's drifto94_unknown_r() returns machine().rand(). A tiny deterministic
@@ -904,17 +905,11 @@ wire        st010_prg_valid;
 wire [15:0] st010_rdata;
 logic [1:0] st010_rd_cnt;
 
-// ST010 (uPD96050) DSP daughterboard hardware is only needed by drifto94/
-// stmblade -- not Dyna Gear or Vasara 2, the current release targets (see
-// docs/... incremental game-support workflow). cfg.has_st010 already gates
-// all of this DSP's runtime behavior correctly for every title regardless
-// of this switch (sel_st010 stays constant 0, the read mux is untouched,
-// sdr_p5_req never leaves 0) -- SSV_ST010_ENABLED additionally controls
-// whether the DSP's own logic is present in the bitstream at all, since a
-// runtime-idle instance still costs its full static ALM/resource footprint.
-// Re-add with `+define+SSV_ST010_ENABLED` (or the QSF equivalent) when
-// drifto94/stmblade become the active development target.
-`ifdef SSV_ST010_ENABLED
+// The project ships one universal RBF, so this daughterboard must always be
+// present in synthesis. cfg.has_st010 is the only selection mechanism: it
+// parks the DSP and fetcher for titles without the board, while Drift Out '94,
+// Storm Blade and Twin Eagle II can enable the same hardware at ROM-load time.
+// Never put this instance behind a compile-time game/profile define.
 upd96050_st010 st010 (
     .clk(clk_sys),
     .rst(cold_rst || !cfg.has_st010),
@@ -935,10 +930,10 @@ upd96050_st010 st010 (
 
     // MAME never wires the uPD96050's INT on SSV, and the DSP's P0/P1 outputs
     // go nowhere on the daughterboard.
-    .int_req(1'b0), .p0(), .p1(),
+    .int_req(1'b0), .p0(), .p1()
 
 `ifdef SIMULATION
-    .dbg_retire(), .dbg_pc(), .dbg_a(), .dbg_b(), .dbg_dp(), .dbg_dr(),
+    , .dbg_retire(), .dbg_pc(), .dbg_a(), .dbg_b(), .dbg_dp(), .dbg_dr(),
     .dbg_sr(), .dbg_k(), .dbg_l(), .dbg_m(), .dbg_n()
 `endif
 );
@@ -950,11 +945,6 @@ ssv_st010_prg_fetch st010_fetch (
     .sdr_req(sdr_p5_req), .sdr_addr(sdr_p5_addr),
     .sdr_dout(sdr_p5_dout), .sdr_ack(sdr_p5_ack)
 );
-`else
-assign st010_rdata = 16'd0;
-assign sdr_p5_req  = 1'b0;
-assign sdr_p5_addr = '0;
-`endif
 
 wire [7:0] sound_rdata;
 // ES5506 MLAB banks need 2 wait cycles: steal addr, then latch q → read_latch.
@@ -1082,7 +1072,6 @@ assign m_ack   = ack_r;
 // MAME's WATCHDOG_TIMER first appears at ssv.cpp:2513, after the drifto94 and
 // stmblade machine configs, so those two have no watchdog. Left unconditional,
 // this counter would reset them forever and never be kicked by vasara.
-logic       ack_r_d;
 localparam int WDOG_COUNTER_WIDTH = $clog2(WDOG_TIMEOUT_CYCLES + 1);
 logic [WDOG_COUNTER_WIDTH-1:0] wdog_cycle_cnt;
 wire        wdog_addr_hit = sel_io && (a[4:1] == 4'h0) && ack_r && !ack_r_d;

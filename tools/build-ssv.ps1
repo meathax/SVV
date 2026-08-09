@@ -53,6 +53,21 @@ function Assert-BuildPolicy {
         }
     }
 
+    if (([regex]::Matches($qsf, '(?m)^source\s+files\.qip\s*$')).Count -ne 1) {
+        throw 'Arcade-SSV.qsf must source files.qip exactly once.'
+    }
+    if ($qsf -match '(?m)^set_global_assignment -name (SYSTEMVERILOG_FILE|VERILOG_FILE|QIP_FILE|SDC_FILE)\b') {
+        throw 'User source declarations belong in files.qip, not Arcade-SSV.qsf.'
+    }
+    if ($qsf -match '(?m)^set_global_assignment -name VERILOG_MACRO "(?:DBG|DEBUG|DIAG|TRACE)_') {
+        throw 'Release QSF contains a diagnostic Verilog macro.'
+    }
+
+    $coreRtl = Get-Content -LiteralPath (Join-Path $repoRoot 'rtl\ssv_core.sv') -Raw
+    if ($coreRtl.Contains('SSV_ST010_ENABLED')) {
+        throw 'ST010 must be runtime descriptor-gated, not compile-time gated.'
+    }
+
     $processorMatch = [regex]::Match(
         $qsf,
         '(?m)^set_global_assignment -name NUM_PARALLEL_PROCESSORS\s+(\d+)\s*$'

@@ -111,11 +111,6 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
-# TEMPORARY INSTRUMENTATION -- DELETE WITH THE PROBE PAINT IN Arcade-SSV.sv.
-# Paints the SDRAM readback result to the screen so the black-screen regression
-# can be measured on hardware instead of inferred. Not a shippable build.
-set_global_assignment -name VERILOG_MACRO "DBG_SDRAM_PAINT=1"
-
 source sys/sys.tcl
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7
@@ -336,29 +331,4 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to LED_*
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to BTN_*
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BTN_*
 source files.qip
-set_global_assignment -name QIP_FILE sys/sys.qip
-set_global_assignment -name SDC_FILE SSV.sdc
-set_global_assignment -name SYSTEMVERILOG_FILE "Arcade-SSV.sv"
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_host_guard.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_mode_guard.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_fetch.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_palette_ram.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_line_buffer4.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_bg_renderer.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_cached_sprite_renderer.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_mlab32_sdp.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_rom_loader.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_nvram_bridge.sv
-set_global_assignment -name QIP_FILE rtl/pll/pll.qip
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

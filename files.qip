@@ -34,10 +34,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
 
 # ST010 (NEC uPD96050) DSP, needed by Drift Out '94, Storm Blade and Twin
-# Eagle II. ssv_core instantiates the wrapper and the program prefetcher
-# UNCONDITIONALLY and gates them on cfg.has_st010, so all three files are
-# required by every core build -- without them synthesis fails on a missing
-# module even for the six titles that have no DSP.
+# Eagle II. The universal core instantiates the wrapper and program fetcher
+# unconditionally and gates runtime activity only through cfg.has_st010, so
+# these files are mandatory in the one shared RBF.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/upd96050/upd96050.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/upd96050/upd96050_st010.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/upd96050/ssv_st010_prg_fetch.sv

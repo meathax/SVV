@@ -181,6 +181,7 @@ reg				restoring_dump = 1'b0;				// Is hiscore data currently being (or waiting 
 reg				checking_scores = 1'b0;				// Is state machine currently checking game RAM for highscore restore readiness
 reg				reading_scores = 1'b0;				// Is state machine currently reading game RAM for highscore dump
 reg				writing_scores = 1'b0;				// Is state machine currently restoring hiscore data to game RAM
+reg	[24:0]							ram_addr;					// Target RAM address for hiscore read/write
 
 assign configured = downloaded_config;
 assign downloading_config = ioctl_download && (ioctl_index==HS_CONFIGINDEX);
@@ -210,7 +211,6 @@ reg	[7:0]								last_data_from_hps2;		// Last cycle +1 HPS IO data out
 reg	[7:0]								last_data_from_hps3;		// Last cycle +2 HPS IO data out
 reg										last_OSD_STATUS;			// Last cycle OSD status
 
-reg	[24:0]							ram_addr;					// Target RAM address for hiscore read/write
 reg	[24:0]							base_io_addr;
 wire	[23:0]							addr_base /* synthesis keep */;
 wire	[(CFG_LENGTHWIDTH*8)-1:0]	length;
@@ -321,30 +321,24 @@ wire               [7:0] hs_data_wrdata = downloading_dump ? data_from_hps
                                                            : hiscore_buffer_out;
 
 // RAM chunk used to store valid hiscore data
-dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
+sdp_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
 hiscore_data (
 	.clk(clk),
-	.addr_a(hs_data_wraddr),
-	.we_a(hs_data_we),
-	.d_a(hs_data_wrdata),
-	.q_a(),
-	.addr_b(data_addr),
-	.we_b(1'b0),
-	.d_b(8'd0),
-	.q_b(hiscore_data_out)
+	.wr_addr(hs_data_wraddr),
+	.we(hs_data_we),
+	.d(hs_data_wrdata),
+	.rd_addr(data_addr),
+	.q(hiscore_data_out)
 );
 // RAM chunk used to store temporary high score data
-dpram_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
+sdp_hs #(.aWidth(HS_SCOREWIDTH),.dWidth(8))
 hiscore_buffer (
 	.clk(clk),
-	.addr_a(buffer_addr),
-	.we_a(buffer_write),
-	.d_a(data_from_ram),
-	.q_a(),
-	.addr_b(buffer_addr),
-	.we_b(1'b0),
-	.d_b(8'd0),
-	.q_b(hiscore_buffer_out)
+	.wr_addr(buffer_addr),
+	.we(buffer_write),
+	.d(data_from_ram),
+	.rd_addr(buffer_addr),
+	.q(hiscore_buffer_out)
 );
 
 assign data_to_ram = hiscore_data_out;
@@ -924,5 +918,35 @@ end else begin : g_ram_block
 
 end
 endgenerate
+
+endmodule
+
+// LOCAL CHANGE (SSV): the two score-data arrays are simple dual-port in this
+// integration: one port only writes and one port only reads. Describing them
+// through the generic true-dual-port dpram_hs above repeatedly made Quartus 17
+// reject RAM inference ("uninferred due to asynchronous read logic") and
+// implement roughly 1,387 ALMs of registers and muxes. This literal one-write,
+// one-unconditional-registered-read shape maps to a Cyclone V M10K.
+// Same-address read-during-write is deliberately unspecified; the hiscore FSM
+// never consumes a location on the cycle it writes that location.
+module sdp_hs #(
+	parameter dWidth=8,
+	parameter aWidth=8
+)(
+	input								clk,
+	input			[aWidth-1:0]	wr_addr,
+	input			[dWidth-1:0]	d,
+	input								we,
+	input			[aWidth-1:0]	rd_addr,
+	output reg	[dWidth-1:0]	q
+);
+
+	(* ramstyle = "M10K, no_rw_check" *) reg [dWidth-1:0] ram [2**aWidth-1:0];
+
+	always @(posedge clk) begin
+		if (we)
+			ram[wr_addr] <= d;
+		q <= ram[rd_addr];
+	end
 
 endmodule

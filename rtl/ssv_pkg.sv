@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// SSV memory / ROM layout. Currently carries the Dyna Gear (SAM-5127) sizes.
+// Universal SSV memory / ROM layout selected by the runtime MRA descriptor.
 `timescale 1ns/1ps
 
 package ssv_pkg;

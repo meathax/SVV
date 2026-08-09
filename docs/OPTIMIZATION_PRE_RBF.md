@@ -1,5 +1,32 @@
 # Pre-RBF optimization notes
 
+## Universal release integration pass (9 Aug 2026, no Verilator/Quartus)
+
+- Removed the `SSV_ST010_ENABLED` compile-time fork. The DSP and p5 program
+  fetcher are now always synthesized and runtime-gated only by
+  `cfg.has_st010`, as required by the one-RBF profile.
+- Removed the stale `DBG_SDRAM_PAINT` release macro. The current `CONF_STR`
+  contains no debug/diagnostic menu entries; Service Mode, CRT adjustment and
+  DB15 selection are user-facing controls and were retained.
+- Made `files.qip` the sole user-source manifest. The QSF previously sourced it
+  and then repeated an incomplete subset, obscuring whether optional devices
+  were really in the RBF.
+- Replaced the two deep hiscore true-dual-port descriptions with the actual
+  simple-dual-port access shape. The 7 Aug map report says both were
+  `uninferred due to asynchronous read logic`, previously measured at roughly
+  1,387 ALMs. The new template uses one write port and one unconditional
+  registered read port; expected cost is two M10Ks and far fewer ALMs.
+- Extended the profile audit and build policy guard to reject diagnostic QSF
+  macros, duplicate user-source declarations and a future compile-time ST010
+  gate.
+
+No resource or timing improvement is claimed yet. The latest available fit is
+not a valid baseline for the next RBF: it omitted ST010, left the hiscore RAMs
+in logic, used 39,418 ALMs and 523 M10Ks, and had -0.050 ns worst slack. The
+next authorized flow must first run the affected visible-SDL Verilator
+regressions, then map/fit to confirm ST010 cost, hiscore M10K inference and
+timing.
+
 ## Where the design stands (28 Jul 2026, 12:28 compile — TIMING CLOSED)
 
 | Resource | Used | Available | % | vs. 09:45 fit |

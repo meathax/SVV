@@ -19,16 +19,13 @@ The pinned MAME contract and current deterministic baseline are recorded in
 The single-profile set list and hardware-feature matrix are recorded in
 [`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md).
 
-**Multi-game, stated plainly (2026-07-30):** the ROM loader is now per-game —
-every stream boundary comes from the MRA's config block rather than Dyna Gear's
-fixed geometry, which was the single reason no other set could load. Dyna Gear
-remains bit-identical after the change (attract, 120 frames vs MAME, only frame 1
-differs — see [`docs/issues/DYNAGEAR_ATTRACT_FRAME_CRC.md`](docs/issues/DYNAGEAR_ATTRACT_FRAME_CRC.md)).
-**No other title has yet executed a single instruction in this core.** The
-remaining gates are the full-core testbenches, which still hardwire Dyna Gear's
-config and ROM sizes, and per-game MAME baselines. `tools/make-sim-stream.py`
-builds per-game sim images for all ten locally held sets and is validated
-byte-exact against the known-good Dyna Gear images.
+**Multi-game, stated plainly (2026-08-09):** all eight qualified sets load
+through one runtime descriptor and one shared source profile. The ST010 used by
+Drift Out '94, Storm Blade and Twin Eagle II is always present in the RBF and
+parks when `cfg.has_st010` is clear; there is no per-game compile switch. Every
+set now has bounded real-ROM execution evidence, but none has completed the
+current 360-frame Verilator screenshot plus matched-gameplay release gate. See
+[`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md) for the per-game boundary.
 
 The synthesizable Dyna Gear bring-up now includes:
 
@@ -43,8 +40,8 @@ The synthesizable Dyna Gear bring-up now includes:
 - A 60-million-clock real-ROM Verilator run that reaches `0x00f10575`, caches
   1,277 descriptors, renders visible pixels, and reports zero background or
   object scanline overruns.
-- Quartus 17 analysis and synthesis with 17,075 registers, 4,392,866 block
-  memory bits, and 39 DSP blocks. All eight line-buffer banks infer as M10Ks.
+- Historical Quartus reports are retained for resource comparison only. They
+  predate the mandatory universal ST010 integration and are not release proof.
 - A synthesizable ES5506 host interface and complete low/high/test register
   pages, validated against the Dyna Gear MAME trace with a self-checking
   Verilator test.

@@ -12,7 +12,7 @@ manifest = "tools/ssv_supported_sets.py"
 [reference]
 emulator = "MAME"
 version = "0.288 pinned contract; current mame0289 checkout SSV drivers byte-identical"
-source_root = "D:\\Arcade\\AI\\MAMESOURCE\\mame"
+source_root = "D:\\Arcade\\AI\\mame289"
 driver_files = ["src/mame/seta/ssv.cpp", "src/mame/seta/ssv_v.cpp"]
 known_imperfect = []
 

@@ -28,7 +28,7 @@ VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
-        +define+SIMULATION +define+SSV_ST010_ENABLED)
+        +define+SIMULATION)
 
 # Keep the production wide fetch path as the default, but allow a focused
 # behavioural A/B run against the legacy ce-gated adapter. This is a diagnostic

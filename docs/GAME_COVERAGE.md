@@ -28,6 +28,9 @@ The descriptor also carries the exact graphics modulo geometry, populated
 graphics quarters, ES5506 bank-valid/map fields, sample-stream size, and
 watchdog mode. The same sprite/background/audio/input/DSP implementation is
 always synthesized, so fixes and enhancements are shared by every set.
+The ST010 is likewise always synthesized and selected only by
+`cfg.has_st010`; the pre-RBF audit rejects any compile-time ST010 gate so an
+RBF cannot silently omit Drift Out '94, Storm Blade, or Twin Eagle II support.
 The shared ES5506 voice path also handles `CR_CMPD`: its OTTO compressed-sample
 decoder is source-backed by MAME and focused-tested both at the table level and
 after the filter/mixer pipeline. This is implementation evidence only; it does

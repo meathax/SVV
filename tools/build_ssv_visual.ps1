@@ -140,7 +140,7 @@ $arguments = @(
     '-Wno-UNSIGNED', '-Wno-WIDTH', '-Wno-CASEOVERLAP', '-Wno-UNUSED',
     '-Wno-PINCONNECTEMPTY', '-Wno-VARHIDDEN', '-Wno-UNUSEDSIGNAL',
     '+define+SIMULATION', '-DSSV_VISUAL',
-    '+define+SSV_VISUAL_BEHAVIORAL_ONLY', '+define+SSV_ST010_ENABLED', '-Iverif',
+    '+define+SSV_VISUAL_BEHAVIORAL_ONLY', '-Iverif',
     '--top-module', 'tb_ssv_frame_crc', '--Mdir', $objDir,
     '--threads', '1', '--verilate-jobs', '4'
 ) + $coreSources + $visualSources + @(

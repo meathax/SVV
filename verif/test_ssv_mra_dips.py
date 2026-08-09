@@ -2,6 +2,7 @@
 """Focused parser checks for MAME DIP declarations used by the SSV MRAs."""
 
 from pathlib import Path
+import os
 import re
 import sys
 from xml.etree import ElementTree as ET
@@ -30,7 +31,8 @@ def mame_rotations(text: str) -> dict[str, str]:
 
 
 def main() -> int:
-    source = Path(r"D:\Arcade\AI\MAMESOURCE\mame\src\mame\seta\ssv.cpp")
+    source_root = Path(os.environ.get("SSV_MAME_SOURCE", r"D:\Arcade\AI\mame289"))
+    source = source_root / "src" / "mame" / "seta" / "ssv.cpp"
     text = source.read_text(encoding="utf-8")
     default, lines, skipped = generator.dips_to_mra(
         generator.parse_dips(text, "cairblad")
@@ -51,7 +53,7 @@ def main() -> int:
         mame_rotation = source_rotations[setname]
         expected = MAME_TO_MRA_ROTATION[mame_rotation]
         matches = []
-        for path in sorted((ROOT / "mra").glob("*.mra")):
+        for path in sorted((ROOT / "releases").glob("*.mra")):
             root = ET.parse(path).getroot()
             if (root.findtext("setname") or "").strip() == setname:
                 matches.append(path)

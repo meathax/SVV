@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -56,6 +57,65 @@ def main() -> int:
     if 'PROJECT_REVISION = "Arcade-SSV"' not in qpf:
         fail("Arcade-SSV.qpf does not select the sole Arcade-SSV revision", errors)
 
+    # Release-project integrity belongs in the same audit as the descriptors:
+    # a structurally valid MRA matrix is not universal if the Quartus project
+    # compiles out an optional board or carries diagnostic hardware.
+    qsf = (repo / "Arcade-SSV.qsf").read_text(encoding="ascii")
+    if len(re.findall(r"(?m)^source\s+files\.qip\s*$", qsf)) != 1:
+        fail("Arcade-SSV.qsf must source files.qip exactly once", errors)
+    if re.search(
+        r"(?m)^set_global_assignment -name "
+        r"(?:SYSTEMVERILOG_FILE|VERILOG_FILE|QIP_FILE|SDC_FILE)\b",
+        qsf,
+    ):
+        fail("Arcade-SSV.qsf duplicates user sources instead of using files.qip", errors)
+    debug_macros = re.findall(
+        r'(?m)^set_global_assignment -name VERILOG_MACRO "((?:DBG|DEBUG|DIAG|TRACE)_[^"]*)"',
+        qsf,
+    )
+    if debug_macros:
+        fail(f"release QSF enables diagnostic macros {debug_macros}", errors)
+    if 'set_global_assignment -name COMPRESSION_MODE ON' not in qsf:
+        fail("Arcade-SSV.qsf must generate compressed MiSTer bitstreams", errors)
+
+    qip = (repo / "files.qip").read_text(encoding="utf-8")
+    manifest_paths = re.findall(
+        r'(?m)^set_global_assignment -name '
+        r'(?:SYSTEMVERILOG_FILE|VERILOG_FILE|QIP_FILE|SDC_FILE)\s+"?([^"\r\n]+?)"?\s*$',
+        qip,
+    )
+    seen_manifest_paths: set[str] = set()
+    for source in manifest_paths:
+        normalized = source.replace("\\", "/")
+        if normalized in seen_manifest_paths:
+            fail(f"files.qip lists {normalized} more than once", errors)
+        seen_manifest_paths.add(normalized)
+        if not (repo / normalized).is_file():
+            fail(f"files.qip references missing source {normalized}", errors)
+
+    mandatory_st010_sources = (
+        "rtl/cpu/upd96050/upd96050.sv",
+        "rtl/cpu/upd96050/upd96050_st010.sv",
+        "rtl/cpu/upd96050/ssv_st010_prg_fetch.sv",
+    )
+    for source in mandatory_st010_sources:
+        if qip.count(source) != 1:
+            fail(f"files.qip must include {source} exactly once", errors)
+
+    core_rtl = (repo / "rtl" / "ssv_core.sv").read_text(encoding="utf-8")
+    if "SSV_ST010_ENABLED" in core_rtl:
+        fail("ST010 is behind a compile-time gate instead of cfg.has_st010", errors)
+    for instance in ("upd96050_st010 st010", "ssv_st010_prg_fetch st010_fetch"):
+        if instance not in core_rtl:
+            fail(f"universal core is missing mandatory instance {instance}", errors)
+
+    top_rtl = (repo / "Arcade-SSV.sv").read_text(encoding="utf-8")
+    conf_match = re.search(r"localparam CONF_STR\s*=\s*\{(.*?)\n\};", top_rtl, re.S)
+    if not conf_match:
+        fail("Arcade-SSV.sv has no parseable CONF_STR", errors)
+    elif re.search(r'"[^"\r\n]*(?:debug|diagnostic|trace)[^"\r\n]*"', conf_match.group(1), re.I):
+        fail("release CONF_STR contains a debug/diagnostic menu entry", errors)
+
     by_set: dict[str, tuple[Path, ET.Element]] = {}
     release_dir = repo / "releases"
     for path in sorted(release_dir.glob("*.mra")):
@@ -64,6 +124,10 @@ def main() -> int:
         if setname in by_set:
             fail(f"{setname}: duplicate MRA ({by_set[setname][0].name}, {path.name})", errors)
         by_set[setname] = (path, root)
+
+    unexpected_release_sets = sorted(set(by_set) - set(SUPPORTED_SETS))
+    if unexpected_release_sets:
+        fail(f"releases contains unqualified MRAs {unexpected_release_sets}", errors)
 
     rows = []
     seen_ids: set[int] = set()

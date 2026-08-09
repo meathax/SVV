@@ -165,15 +165,6 @@ wire        if_ack_i  = FAST_IFETCH ? if_ack  : 1'b0;
 wire [63:0] if_data_i = FAST_IFETCH ? if_data : 64'b0;
 wire        fetch_ack = FAST_IFETCH ? if_ack_i : pf_ack;  // ack from the active port
 
-// A control-flow decode may replace the active fetch window with the retained
-// loop window below.  A fast-fetch response can be visible in this same clock
-// (the response is generated outside the CPU CE domain); accepting it after
-// the restore would overwrite the restored tail with bytes from the old PC.
-// Drop that response and let the new window request its frontier again.
-wire pf_decode_redirect = (st == S_DECODE) &&
-    ((opcode[7:4] == 4'h6) || (opcode[7:4] == 4'h7) ||
-     (opcode == 8'h48) || (opcode == 8'hc6) || (opcode == 8'hc7));
-
 // ---------------------------------------------------------------------------
 // fetch buffer: 16 bytes from PC, filled before each decode
 // ---------------------------------------------------------------------------
@@ -370,6 +361,15 @@ typedef enum logic [6:0] {
 } st_t;
 
 st_t st, st_after_ea, st_after_fill;
+
+// A control-flow decode may replace the active fetch window with the retained
+// loop window below. A fast-fetch response can be visible in this same clock;
+// accepting it after the restore would overwrite the restored tail with bytes
+// from the old PC. Keep this after the state/opcode declarations so strict
+// SystemVerilog tools do not create implicit forward nets.
+wire pf_decode_redirect = (st == S_DECODE) &&
+    ((opcode[7:4] == 4'h6) || (opcode[7:4] == 4'h7) ||
+     (opcode == 8'h48) || (opcode == 8'hc6) || (opcode == 8'hc7));
 
 // One restoring-division bit per enabled CPU clock.  The 33-bit trial value
 // is the only compare/subtract datapath used for all 64 dividend bits.
