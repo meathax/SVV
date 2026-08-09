@@ -23,7 +23,7 @@ Import-Module (Join-Path $PSHOME `
     -Force -ErrorAction Stop
 $project = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python -ErrorAction Stop).Source
-$simSafe = 'C:\Users\meath\bin\verilator-sim-safe.exe'
+$simSafe = 'C:\Users\meath\bin\verilator-safe.exe'
 $build = Join-Path $PSScriptRoot 'build_ssv_visual.ps1'
 if (-not (Test-Path -LiteralPath $simSafe)) {
     throw "Missing safe simulator wrapper: $simSafe"
@@ -295,7 +295,7 @@ if ($null -ne $SaveFrame) {
 if ($null -ne $SaveNativeFrame) {
     $modelArgs += "+SAVE_NATIVE_FRAME=$([long]$SaveNativeFrame)"
 }
-$safeArgs = @('--comparison','--',('"{0}"' -f $exe)) + $modelArgs
+$safeArgs = @('sim','--comparison','--',('"{0}"' -f $exe)) + $modelArgs
 
 $oldStatusEnvironment = [Environment]::GetEnvironmentVariable(
     'SSV_VISUAL_STATUS', 'Process')
@@ -303,9 +303,13 @@ $oldScreenshotEnvironment = [Environment]::GetEnvironmentVariable(
     'SSV_VISUAL_SCREENSHOT', 'Process')
 $oldJournalEnvironment = [Environment]::GetEnvironmentVariable(
     'SSV_RTL_INPUT_JOURNAL_DIR', 'Process')
+$oldPathEnvironment = [Environment]::GetEnvironmentVariable(
+    'PATH', 'Process')
 try {
     # Process-local inheritance works on both Windows PowerShell 5.1 and
     # PowerShell 7; Start-Process -Environment is PowerShell 7-only.
+    [Environment]::SetEnvironmentVariable(
+        'PATH', "C:\msys64\ucrt64\bin;$oldPathEnvironment", 'Process')
     [Environment]::SetEnvironmentVariable(
         'SSV_VISUAL_STATUS', $statusPath, 'Process')
     [Environment]::SetEnvironmentVariable(
@@ -322,6 +326,8 @@ try {
         'SSV_VISUAL_SCREENSHOT', $oldScreenshotEnvironment, 'Process')
     [Environment]::SetEnvironmentVariable(
         'SSV_RTL_INPUT_JOURNAL_DIR', $oldJournalEnvironment, 'Process')
+    [Environment]::SetEnvironmentVariable(
+        'PATH', $oldPathEnvironment, 'Process')
 }
 
 # Refuse to strand an interactive window or consume MAME/runtime resources
@@ -332,9 +338,20 @@ while ((Get-Date) -lt $slotDeadline) {
     if ($process.HasExited) {
         throw "Safe wrapper exited before launching the model: $($process.ExitCode)"
     }
-    $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id)" |
-        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($exe) } |
-        Select-Object -First 1
+    try {
+        $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id)" |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($exe) } |
+            Select-Object -First 1
+    } catch {
+        # Some managed Windows sessions deny the WMI process query even
+        # though the safe wrapper and its visible model are usable.  The
+        # model name and launch time are sufficient as a narrow fallback;
+        # never mistake an older or queued zero-CPU model for this run.
+        $child = Get-Process -Name 'Vtb_ssv_frame_crc' -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.StartTime -ge $process.StartTime -and $_.CPU -gt 0.05
+            } | Select-Object -First 1
+    }
     if ($child) { break }
     Start-Sleep -Milliseconds 100
 }

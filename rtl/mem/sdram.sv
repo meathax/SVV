@@ -2,7 +2,7 @@
 //  SSV (Sammy System) for MiSTer -- SDRAM controller
 //
 //  THIS IS THE MiSTer 128 MB MODULE CONTRACT, taken verbatim from the Sega
-//  System 32 core (D:\Arcade\AI\S32MULTIONLYtl\mem\sdram.sv), which runs on
+//  System 32 core (D:\Arcade\AI\S32MULTIONLY
 //  this same DE10-Nano + module and from which SSV's controller was originally
 //  ported. Commit c429ba4 rewrote it for a single monolithic 64Mx16 part with
 //  free-standing DQM pins and nCS folded into a 4-bit command. That part is not

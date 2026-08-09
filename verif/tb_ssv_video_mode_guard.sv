@@ -98,6 +98,15 @@ initial begin
 	       aspect == 2'd1 && scale_select == 2'd1,
 	       "next-frame mode request was not committed");
 
+	// The fourth OSD Scale value must survive the same frame-safe commit path.
+	scale_request = 2'd3;
+	native_vblank = 1'b0;
+	pixel_tick();
+	native_vblank = 1'b1;
+	line_start();
+	check_ok(scale_select == 2'd3,
+	       "HV-integer mode request was not committed");
+
 	// Reset always returns to a monitor-safe native path immediately.
 	rst = 1'b1;
 	@(posedge clk);

@@ -31,21 +31,6 @@ function automatic [15:0] extra_port(input [31:0] j1, input [31:0] j2);
                            1'b0, j1[9], j1[8], j1[7]}};
 endfunction
 
-// Mirror of Arcade-SSV.sv db15_to_joy (DB15 SNAC pad -> joy numbering).
-// DB15 bits: 11=Select 10=Start 9=F 8=E 7=D 6=C 5=B 4=A 3=U 2=D 1=L 0=R
-// A=Fire, B=Jump, Start=Start, Select=Coin, Select+A=Test, Select+B=Service.
-function automatic [31:0] db15_to_joy(input [15:0] db);
-    logic sel, chord;
-    begin
-        sel   = db[11];
-        chord = sel & (db[4] | db[5]);
-        db15_to_joy = {18'd0, sel & ~chord, db[10], sel & db[5], sel & db[4],
-                       3'd0, 1'b0,
-                       db[5] & ~sel, db[4] & ~sel,
-                       db[3], db[2], db[1], db[0]};
-    end
-endfunction
-
 function automatic [15:0] system_port(
     input coin1, input coin2, input service, input test_btn
 );
@@ -120,39 +105,6 @@ initial begin
              16'hFFFF);
     expect16("EXTRA mode six-button", extra_port_cfg(2'd2, 32'h380, 32'h380),
              16'hFF88);
-
-    // DB15 SNAC pad maps onto the same joy numbering.
-    expect16("DB15 UP", player_port(db15_to_joy(16'h0008)), 16'hFF7F);
-    expect16("DB15 DOWN", player_port(db15_to_joy(16'h0004)), 16'hFFBF);
-    expect16("DB15 LEFT", player_port(db15_to_joy(16'h0002)), 16'hFFDF);
-    expect16("DB15 RIGHT", player_port(db15_to_joy(16'h0001)), 16'hFFEF);
-    expect16("DB15 A=FIRE", player_port(db15_to_joy(16'h0010)), 16'hFFF7);
-    expect16("DB15 B=JUMP", player_port(db15_to_joy(16'h0020)), 16'hFFFB);
-    expect16("DB15 START", player_port(db15_to_joy(16'h0400)), 16'hFFFE);
-    // The DB15 pad has no B3, so it must not reach the new button either.
-    expect16("DB15 NO B3", player_port(db15_to_joy(16'h07FF)) & 16'h0002,
-             16'h0002);
-
-    // Buttons C..F are physically present on a six-button CHAMMA panel but
-    // are not decoded by db15_to_joy, so they must still reach nothing.
-    expect16("DB15 C IDLE", player_port(db15_to_joy(16'h0040)), 16'hFFFF);
-    expect16("DB15 D IDLE", player_port(db15_to_joy(16'h0080)), 16'hFFFF);
-    expect16("DB15 E IDLE", player_port(db15_to_joy(16'h0100)), 16'hFFFF);
-    expect16("DB15 F IDLE", player_port(db15_to_joy(16'h0200)), 16'hFFFF);
-    if (db15_to_joy(16'h03C0) != 32'd0)
-        begin $display("FAIL DB15 C-F must be inert"); fails = fails + 1; end
-
-    // Select alone = Coin (joy[13]); Select+A = Test (joy[10]); Select+B =
-    // Service (joy[11]). A chord must NOT also fire Coin, Fire or Jump.
-    if (db15_to_joy(16'h0800) != 32'h2000)
-        begin $display("FAIL DB15 Select->Coin"); fails = fails + 1; end
-    if (db15_to_joy(16'h0810) != 32'h400)
-        begin $display("FAIL DB15 Select+A->Test only"); fails = fails + 1; end
-    if (db15_to_joy(16'h0820) != 32'h800)
-        begin $display("FAIL DB15 Select+B->Service only"); fails = fails + 1; end
-    // A chord must leave the game's own P1 port completely idle.
-    expect16("DB15 TEST CHORD P1 IDLE",
-             player_port(db15_to_joy(16'h0810)), 16'hFFFF);
 
     // ---------------------------------------------------------------------
     // Independent anchor: these five constants are NOT derived from

@@ -160,10 +160,10 @@ P1/P2 buttons 4-6. That path remains documented in the shared source audit, but
 it is not part of the supported profile or release matrix.
 
 `J1` is now ten entries (`B1..B6, Test, Service, Start, Coin`), which renumbers
-every joystick bit, so `CONF_STR`, `player_port`, `db15_to_joy`, the
-test/service/coin taps, `in_extra`, the input-matrix bench's *mirror* of all of
-that, and the `<buttons>` list in the ten manifest MRAs moved together. B3 is a real
-button now; SSV's port always carried it and Dyna Gear simply never presses it.
+every joystick bit, so `CONF_STR`, `player_port`, the test/service/coin taps,
+`in_extra`, the input-matrix bench's *mirror* of all of that, and the `<buttons>`
+list in the manifest MRAs moved together. B3 is a real button now; SSV's port
+always carried it and Dyna Gear simply never presses it.
 
 `extra_input_mode` distinguishes an absent decode and Dyna Gear's decoded but
 idle port in the supported profile. The retired Survival Arts B4-B6 wiring

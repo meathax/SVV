@@ -45,8 +45,12 @@ created to satisfy it.
   fetcher are now always synthesized and runtime-gated only by
   `cfg.has_st010`, as required by the one-RBF profile.
 - Removed the stale `DBG_SDRAM_PAINT` release macro. The current `CONF_STR`
-  contains no debug/diagnostic menu entries; Service Mode, CRT adjustment and
-  DB15 selection are user-facing controls and were retained.
+  contains no debug/diagnostic menu entries; Service Mode and CRT adjustment
+  are user-facing controls and were retained.
+- Removed an unfinished background-frame snapshot and live sprite-descriptor
+  reread experiment before release. It had no focused functional coverage and
+  would have added about 335 Kbits of tile/context storage plus its control and
+  mux logic; the proven compact descriptor cache and bounded line pool remain.
 - Made `files.qip` the sole user-source manifest. The QSF previously sourced it
   and then repeated an incomplete subset, obscuring whether optional devices
   were really in the RBF.

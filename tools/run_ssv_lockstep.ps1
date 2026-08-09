@@ -315,6 +315,7 @@ function Set-SSVChildEnvironment([hashtable]$values) {
 }
 $safeArgs = @('sim','--comparison','--',('"{0}"' -f $exe)) + $rtlArgs
 Set-SSVChildEnvironment $rtlEnvironment
+$rtlLaunchTime = Get-Date
 $rtl = Start-Process -FilePath $simSafe -ArgumentList $safeArgs `
     -WorkingDirectory $project -RedirectStandardOutput $rtlLog `
     -RedirectStandardError $rtlErr -PassThru
@@ -324,10 +325,28 @@ $rtl = Start-Process -FilePath $simSafe -ArgumentList $safeArgs `
 # this chat from consuming MAME/runtime resources while another model is active.
 function Get-RtlModelProcess {
     $modelName = [System.IO.Path]::GetFileNameWithoutExtension($exe)
-    Get-Process -Name $modelName -ErrorAction SilentlyContinue |
+    $exact = Get-Process -Name $modelName -ErrorAction SilentlyContinue |
         Where-Object {
             try { $_.Path -ieq $exe } catch { $false }
         } |
+        Select-Object -First 1
+    if ($exact) { return $exact }
+
+    # Some managed Windows desktops deny Win32_Process.Path and the
+    # Process.Path property to this account. The safe model name is unique in
+    # this runner, so after the launch only accept the newest same-name child
+    # created in this invocation's narrow time window. This avoids confusing
+    # an older owner's model with the queued child while still allowing the
+    # coordinator to release MAME and drive the visible SDL model.
+    Get-Process -Name $modelName -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $_.StartTime -ge $rtlLaunchTime.AddSeconds(-2) -and
+                $_.CPU -gt 0.05
+            }
+            catch { $false }
+        } |
+        Sort-Object StartTime -Descending |
         Select-Object -First 1
 }
 

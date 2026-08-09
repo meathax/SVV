@@ -45,13 +45,6 @@ The synthesizable Dyna Gear bring-up now includes:
 - A synthesizable ES5506 host interface and complete low/high/test register
   pages, validated against the Dyna Gear MAME trace with a self-checking
   Verilator test.
-- Direct DB15 arcade controls on the User I/O port for both players, for the
-  Antonio Villena SNAC splitter / JAMMA SNAC (`rtl/ssv_joy_db15.sv`, OSD
-  "DB15 Devices"). This is the core-side reader, as used by Arcade-TNKIII: it
-  drives the adapter's shift register from the core, so it controls the GAME
-  only. It is not the MiSTer-DB9 fork's framework mode, so it does not give
-  the pad control of the OSD and does not present the fork's "UserIO Joystick"
-  / "UserIO Players" options. Not yet confirmed against real hardware.
 - A deliberately small video chain: `rtl/ssv_scandoubler.sv` (a plain 2x line
   doubler for 31 kHz monitors) and `video_freak` (integer-scaling modes).
   Scanline FX come from `sys_top`, which applies them itself from `VGA_SL`.

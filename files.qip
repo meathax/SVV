@@ -21,7 +21,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_mlab32_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_joy_db15.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_scandoubler.sv
 # Vendored from rmonic79's CRT Adjust (GPLv3+), see rtl/crt_adjust.LICENSE. One
 # marked local change: a `timescale line, see the comment in the file.

@@ -103,7 +103,7 @@ localparam CONF_STR = {
     "SSV;;",
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-    "O[44:43],Scale,Normal,Integer (Horizontal),V-Integer (Vertical);",
+    "O[44:43],Scale,Normal,Integer (Horizontal),V-Integer (Vertical),HV-Integer;",
     "O[50:49],Rotation,Horizontal,Vertical (CW),Vertical (CCW),Horizontal (Flipped);",
     // Was labelled "Scandoubler Fx" while no scandoubler existed. HQ2x is
     // gone with arcade_video; the line doubler that replaced it does not
@@ -130,10 +130,6 @@ localparam CONF_STR = {
     "H2P1O[35:30],H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
     "H2P1O[40:36],V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
     "-;",
-    // Direct arcade controls through the User I/O port (Antonio Villena DB15
-    // SNAC splitter). Off leaves both players on the HPS/USB joysticks.
-    "O[42:41],DB15 Devices,Off,P1 only,P2 only,P1 & P2;",
-    "-;",
     "R[0],Reset;",
     // Six game buttons: SSV's P1/P2 ports carry B1-B3 and the
     // $500008 window carries B4-B6. Survival Arts uses all six.
@@ -156,6 +152,9 @@ assign AUDIO_S = 1'b1;
 assign LED_POWER = 2'b00;
 // LED_DISK is driven below from the renderer overrun status.
 assign BUTTONS = 2'b00;
+// This core does not use the MiSTer User I/O port. Keep its open-drain
+// outputs released while retaining the framework-required shell ports.
+assign USER_OUT = 7'b1111111;
 
 wire clk_sys, clk_ram, clk_aux, pll_locked;
 wire pll_ready_sys, pll_ready_ram;
@@ -298,28 +297,6 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .video_rotated(video_rotated),
     .joystick_0(joystick_0), .joystick_1(joystick_1)
 );
-
-// ---------------------------------------------------------------------------
-// DB15 SNAC controls on the User I/O port.
-//
-// USER_OUT[0] = LOAD, USER_OUT[1] = CLK, USER_IN[5] = DATA. sys_top drives the
-// USER_IO pins open-drain (`!user_out[n] ? 1'b0 : 1'bZ`), so the unused lines
-// must stay high or they pull the adapter's pins down.
-// ---------------------------------------------------------------------------
-wire db15_clk, db15_load;
-wire [15:0] db15_p1_raw, db15_p2_raw;
-
-ssv_joy_db15 joy_db15 (
-    .clk(clk_sys),
-    .joy_clk(db15_clk), .joy_load(db15_load), .joy_data(USER_IN[5]),
-    .joystick1(db15_p1_raw), .joystick2(db15_p2_raw)
-);
-
-// Only drive the adapter while DB15 is actually selected. sys_top's open-drain
-// wrapper turns a 1 into high-Z, so with the option Off the port is released
-// entirely and whatever else the user has on User I/O is left alone.
-assign USER_OUT = (|status[42:41]) ? {5'b11111, db15_clk, db15_load}
-                                   : 7'b1111111;
 
 // V60 clock enable.
 //
@@ -594,42 +571,8 @@ sdram sdram (
 //                  joy[4]..joy[13]
 // (the MRA's <buttons names=...> list must stay in this same order).
 //
-// Map a DB15 pad onto that same numbering so everything downstream is written
-// once. DB15 bit order is 11 Select, 10 Start, 9 F, 8 E, 7 D, 6 C, 5 B, 4 A,
-// 3 Up, 2 Down, 1 Left, 0 Right.
-//
-//   A = Fire, B = Jump, Start = Start, Select = Coin
-//   Select+A = Test, Select+B = Service
-//
-// Test and Service are chords, not buttons of their own, because a CHAMMA
-// cabinet harness carries six buttons per player: putting Service on a plain
-// button means a stray press during play drops the board into the service
-// menu. The chord convention is the one Arcade-TNKIII uses. Coin is suppressed
-// while a chord is held so entering test mode does not also insert a credit.
-function automatic [31:0] db15_to_joy(input [15:0] db);
-    logic sel, chord;
-    begin
-        sel   = db[11];
-        chord = sel & (db[4] | db[5]);
-        // The DB15 pad has two face buttons, so B3-B6 are unreachable
-        // from it and stay low; only the HPS/USB path can press them.
-        db15_to_joy = {18'd0,
-                       sel & ~chord,  // joy[13] Coin    <- Select alone
-                       db[10],        // joy[12] Start   <- Start
-                       sel & db[5],   // joy[11] Service <- Select+B
-                       sel & db[4],   // joy[10] Test    <- Select+A
-                       3'd0,          // joy[9:7]  B6,B5,B4 - not on a DB15 pad
-                       1'b0,          // joy[6]    B3      - not on a DB15 pad
-                       db[5] & ~sel,  // joy[5]  Jump    <- B
-                       db[4] & ~sel,  // joy[4]  Fire    <- A
-                       db[3], db[2], db[1], db[0]};  // Up, Down, Left, Right
-    end
-endfunction
-
-// status[42:41]: 0 = Off, 1 = P1 only, 2 = P2 only, 3 = both.
-wire [1:0] db15_sel = status[42:41];
-wire [31:0] joy_p1 = db15_sel[0] ? db15_to_joy(db15_p1_raw) : joystick_0;
-wire [31:0] joy_p2 = db15_sel[1] ? db15_to_joy(db15_p2_raw) : joystick_1;
+wire [31:0] joy_p1 = joystick_0;
+wire [31:0] joy_p2 = joystick_1;
 
 // MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START.
 // P1/P2 port bits: U D L R B1 B2 B3 START, active low. B3 is a real
@@ -1083,13 +1026,15 @@ wire [11:0] scale_aspect_y = (aspect == 0)
     ? (rotation_active ? 12'd4 : 12'd3)
     : 12'd0;
 
-// Keep only the useful modes: best-fit HV integer for horizontal games and
-// V-integer for rotated vertical games such as Vasara and Vasara 2.
+// Keep the established modes and expose the upstream best-fit HV-integer mode
+// explicitly for users who want it. Integer (Horizontal) remains the existing
+// best-fit path; HV-Integer is the same upstream mode as a named option.
 logic [2:0] scale_mode;
 always_comb begin
     case (scale_select)
         2'd1: scale_mode = 3'd4;
         2'd2: scale_mode = 3'd1;
+        2'd3: scale_mode = 3'd4;
         default: scale_mode = 3'd0;
     endcase
 end
