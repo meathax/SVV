@@ -9,7 +9,7 @@
   <rbf>SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
-    <part>53010420120004040300020F0000005A</part>
+    <part>53020420120004040300020F08000051</part>
   </rom>
   <rom index="0" zip="vasara2a.zip|vasara2.zip">
     <!-- program -->

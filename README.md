@@ -19,6 +19,17 @@ The pinned MAME contract and current deterministic baseline are recorded in
 The single-profile set list and hardware-feature matrix are recorded in
 [`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md).
 
+**Multi-game, stated plainly (2026-07-30):** the ROM loader is now per-game —
+every stream boundary comes from the MRA's config block rather than Dyna Gear's
+fixed geometry, which was the single reason no other set could load. Dyna Gear
+remains bit-identical after the change (attract, 120 frames vs MAME, only frame 1
+differs — see [`docs/issues/DYNAGEAR_ATTRACT_FRAME_CRC.md`](docs/issues/DYNAGEAR_ATTRACT_FRAME_CRC.md)).
+**No other title has yet executed a single instruction in this core.** The
+remaining gates are the full-core testbenches, which still hardwire Dyna Gear's
+config and ROM sizes, and per-game MAME baselines. `tools/make-sim-stream.py`
+builds per-game sim images for all ten locally held sets and is validated
+byte-exact against the known-good Dyna Gear images.
+
 The synthesizable Dyna Gear bring-up now includes:
 
 - MiSTer shell, PLL, SDRAM controller, and V60 CPU ported from the nearby
@@ -50,8 +61,11 @@ The synthesizable Dyna Gear bring-up now includes:
   `arcade_video` was tried and removed: its scandoubler carries HQ2x line
   stores and it pulls in `gamma_corr`, together about 13 M10K, which this
   design cannot afford. Neither HQ2x nor gamma is missed on an arcade board.
-- High score save/load via the MRA's hiscore.dat entry and a `.nvm` dump,
-  through the second port of the SSV main RAM.
+- High score save/load plumbing via a `.nvm` dump, through the second port of the
+  SSV main RAM. **Not currently reachable:** `tools/gen_ssv_mras.py` emits no
+  hiscore.dat entry, so no MRA carries one, `hs_configured` stays 0 and the
+  "Autosave Hiscores" OSD line stays hidden (`Arcade-SSV.sv:211`). The module is
+  wired; the MRA side is missing.
 - DIP switches driven from the MRA's `<switches>` block instead of hand-mapped
   OSD options, so the bytes the game reads at `$210002`/`$210004` are the ones
   the MRA states.

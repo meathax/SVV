@@ -1,6 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$QuartusRoot = "C:\intelFPGA_lite\17.1",
+    # D:\Q17 is the LITE install, and Lite is what every build of this project
+    # has used -- output_files\Arcade-SSV.fit.summary reads "SJ Lite Edition"
+    # and the .qsf records LAST_QUARTUS_VERSION "17.0.2 Lite Edition". It is also
+    # what the machine's QUARTUS_ROOTDIR already points at.
+    #
+    # The old default, C:\intelFPGA_lite\17.1, does not exist on this machine, so
+    # an unqualified run failed outright -- and reaching for the other install,
+    # D:\Q, is worse than failing: D:\Q is 17.0.2 STANDARD Edition. Because child
+    # tools resolve through QUARTUS_ROOTDIR, a Standard quartus_sh spawns LITE
+    # quartus_map, producing a mixed-edition compile that rewrites the .qsf
+    # edition stamp and poisons db\ for later Lite builds. Keep this pointed at
+    # the Lite install.
+    [string]$QuartusRoot = "D:\Q17",
     [switch]$MapOnly
 )
 
@@ -153,8 +165,14 @@ try {
         if ($usedRamBlocks -gt 544) {
             throw "RAM-block ceiling exceeded: $usedRamBlocks > 544."
         }
-        if ($usedDsps -gt 59) {
-            throw "DSP ceiling exceeded: $usedDsps > 59."
+        # 60, not 59. The ST010 (uPD96050) multiplier is a real DSP block, and
+        # until the daughterboard was wired up at the top level its inputs were
+        # tied off, so synthesis folded the multiplier away and the design
+        # measured 59. Connecting sdr_p5_* and st010_drom_* made it count:
+        # 22,934 -> 23,722 registers, +48 Kbit block memory, and 59 -> 60 DSP.
+        # The device has 112, so this is headroom spent deliberately, not drift.
+        if ($usedDsps -gt 60) {
+            throw "DSP ceiling exceeded: $usedDsps > 60."
         }
 
         $source = Join-Path $repoRoot "output_files\Arcade-SSV.rbf"

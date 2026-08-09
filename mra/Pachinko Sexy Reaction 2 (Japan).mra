@@ -9,7 +9,7 @@
   <manufacturer>Sammy</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010220120003140701000F0000004A</part>
+    <part>53020220120003140701000F08000041</part>
   </rom>
   <rom index="0" zip="sxyreac2.zip">
     <!-- program -->

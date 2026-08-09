@@ -8,7 +8,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010208100004000100000F0000007E</part>
+    <part>53020208100004000100000F04000079</part>
   </rom>
   <rom index="0" zip="keithlcy.zip">
     <!-- program -->

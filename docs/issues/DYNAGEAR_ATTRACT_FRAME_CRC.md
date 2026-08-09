@@ -6,10 +6,13 @@
 
 ## Issue
 
-Per-frame RGB/IDX CRC streams are now produced for Dyna Gear attract. The
-**first full post-`video_enable` frame matches MAME exactly**. Later frames
-diverge (phase / content update skew), so a full attract-loop CRC match is not
-yet closed.
+Per-frame RGB/IDX CRC streams are now produced for Dyna Gear attract.
+
+**Current state (re-measured 2026-07-30): 119 of 120 frames match MAME. Frame 1
+is the only divergence** — see "2026-07-30 re-measure" below, which supersedes
+the older Wave C findings in this file. The sections above that heading are kept
+as the record of how the investigation went, but their conclusion that RTL
+freezes on a wrong image is no longer true.
 
 ## Deterministic scenario
 
@@ -97,8 +100,57 @@ natural FRAMEDIAG snapshots.
 
 Status: `suspect`; evidence tier: `BOUNDARY`.
 
+### 2026-07-30 re-measure: 119 of 120 frames now match
+
+Everything above this heading predates the tilemap-page fix, the renderer
+`renderer_busy` gating and the `LINE_SLOTS` raise. Re-measured against the same
+committed baseline (`sim_output/diff/mame_attract_idle_frames.crc`, 120 frames,
+MAME 0.288) with `tb_ssv_frame_crc` attract_idle, 120 frames / soak 60:
+
+| Frame | MAME IDX/RGB | RTL IDX/RGB | Result |
+|---|---|---|---|
+| 0 | `d3b2fac2` / `7fdb4700` | same | **PASS** |
+| 1 | `7aa4714d` / `839d76aa` | `7063ffe9` / `9ecf2e6e` | DIVERGE |
+| 2–119 | `7063ffe9` / `9ecf2e6e` | same | **PASS** |
+
+**120 frames compared, 1 mismatch — frame 1 and only frame 1.**
+
+This supersedes the Wave C table above, which is now wrong in its key claim.
+RTL does *not* "freeze on a wrong static and never reach MAME's `7063ffe9`": it
+reaches `7063ffe9` / `9ecf2e6e` and holds it for 118 consecutive frames. The
+stale RTL value `2419ab87` no longer occurs at all.
+
+What remains is a **one-frame phase difference, not a wrong image**. MAME renders
+a single transitional field at frame 1; RTL arrives at the final attract image
+one frame earlier. `CACHE_PEAK=1277 of 2048 (frame 1)` in the same run says
+frame 1 is the first cached-sprite field, so the likely cause is that the RTL
+populates the whole descriptor cache in one vblank while the board builds it
+across the frame.
+
+Not yet established, and deliberately not assumed: whether MAME's extra
+transitional field is a real rendered field or an artifact of where the capture
+arms. **Do not close this by shifting a frame index** — that would make the
+comparison pass without explaining the difference, and
+`CORE_ISSUE_DIFFTEST_METHOD.md` §6 forbids weakening the comparison.
+
+Reproduce:
+
+    verif/build_frame_crc.sh /tmp/ssv-frame-crc
+    /tmp/ssv-frame-crc/tb_ssv_frame_crc +verilator+seed+1 +verilator+rand+reset+2 \
+      +SCENARIO=attract_idle +FRAMES=120 +SOAK_FRAMES=60 \
+      +FRAME_CRC=/tmp/rtl_attract_120.crc
+    python3 tools/compare-ssv-frame-crcs.py \
+      sim_output/diff/mame_attract_idle_frames.crc /tmp/rtl_attract_120.crc
+
+(Under WSL Verilator: the committed `.sh` files are CRLF, so `build_frame_crc.sh`
+needs a CR-stripped copy run from `verif/`.)
+
 ## Required next evidence
 
+0. **Explain frame 1** (now the only residual). Does MAME really render a
+   transitional field there, or does its capture arm one field earlier than the
+   RTL's? Compare the first post-VE `cache_start` on both sides and count
+   rendered fields, rather than comparing CRCs alone.
 1. MAME vs RTL **palette + list** snapshot at the first post-VE `vblank_pulse`
    (the `cache_start` that builds frame 1) — confirm whether pen RAM or
    descriptors already differ before any frame-1 pixel.

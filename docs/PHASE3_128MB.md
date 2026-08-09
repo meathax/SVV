@@ -95,6 +95,15 @@ What *is* asserted:
 - Full-core run at 128 MB: `PASS`, **0 background and 0 object overruns**, peak
   line occupancy 57 of 96 unchanged.
 
+**Limit of the loopback evidence, added 2026-07-30.** `verif/ssv_sdram_chip.sv`
+takes the same `BANK_BITS`/`ROW_BITS`/`COL_BITS` and derives its read-return
+alignment from the same `CL` as the controller, so a `tb_ssv_sdram_loopback` PASS
+asserts that controller and model are *mutually consistent* — not that either
+matches the physical part. The negative test above detects a geometry
+disagreement; nothing here can detect a shared wrong assumption about latency or
+capture margin, and `SSV.sdc` places no constraint on the SDRAM pins at all. See
+[`issues/SDRAM_READ_LATENCY_BLACK_SCREEN.md`](issues/SDRAM_READ_LATENCY_BLACK_SCREEN.md).
+
 ## Still open
 
 - ~~tRFC and the refresh period have not been read off the fitted part.~~
@@ -118,9 +127,22 @@ What *is* asserted:
   plausible 1 Gbit part rather than tuned to one; a part number would only let us
   tighten them, and there is no correctness risk in not having it.
 - **No `sdram_sz` gate** (explicit decision). A user with a 32 MB module gets
-  silent 4:1 aliasing that looks like corrupt graphics rather than an error.
+  silent 4:1 aliasing.
+
+  **Corrected 2026-07-30: "looks like corrupt graphics" understated this
+  badly.** On a 32 MB part the byte address wraps at `0x2000000`, and all four
+  region bases are exact multiples of it — `SDR_MAINCPU_BASE 0x0000000`,
+  `SDR_GFX_BASE 0x2000000`, `SDR_ST010_BASE 0x4000000`,
+  `SDR_SAMPLES_BASE 0x6000000` (`rtl/ssv_pkg.sv:66-95`). All four therefore
+  alias onto address 0: the graphics stream lands on top of the V60 program and
+  **destroys it**. The symptom is a core that does not run at all, not a
+  cosmetic one.
+
   The remedy, if it ever matters, is the power-on aliasing self-test — the
-  loopback negative test above shows the detection works.
+  loopback negative test above shows the detection works. The wrapper's existing
+  ROM-signature probe (`Arcade-SSV.sv:290-397`) is already most of it; see
+  [`issues/SDRAM_READ_LATENCY_BLACK_SCREEN.md`](issues/SDRAM_READ_LATENCY_BLACK_SCREEN.md)
+  for what happens when its result is not visible on hardware.
 - The graphics region is 32 MB of address space in one bank, so graphics still
   self-conflicts (202,708). Interleaving graphics across banks would attack
   that, but at ~0.6 % of the bus it is not currently worth it.

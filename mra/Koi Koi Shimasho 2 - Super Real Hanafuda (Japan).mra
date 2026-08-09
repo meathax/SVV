@@ -9,7 +9,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010420120003440F00000F00000011</part>
+    <part>53020420120003440F00000F08000008</part>
   </rom>
   <rom index="0" zip="koikois2.zip">
     <!-- program -->

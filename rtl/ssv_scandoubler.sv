@@ -26,8 +26,11 @@
 // was recorded cannot be out of phase with itself, and it tracks any future
 // change to the raster for free.
 //
-// Per-FRAME signals (vsync, vblank) are the exception and pass straight
-// through -- see the WORDW comment below for why replaying them was a bug.
+// Per-FRAME signals (vsync, vblank) are the exception: they are neither stored
+// nor passed straight through, but sampled once per line on the line reference
+// and held across both replays. See the WORDW comment below for why storing
+// them was a bug, and the comment at vs_hold for why passing them straight
+// through was a worse one.
 //
 // Requires ce_pix_x2 to be exactly twice ce_pix and phase-locked to it.
 // ssv_video_timing produces both from ONE accumulator running at twice the
@@ -36,7 +39,7 @@
 // shipped with, and it delivered 907 ticks per line instead of 908, leaving the
 // second copy of every line one pixel short.
 //
-// Covered by verif/tb_ssv_scandoubler.sv (A1-A6).
+// Covered by verif/tb_ssv_scandoubler.sv (A1-A7).
 
 `timescale 1ns/1ps
 
@@ -65,7 +68,8 @@ module ssv_scandoubler #(
 
 // Only the per-LINE signals are stored and replayed: {hs, hb, rgb[23:0]}.
 //
-// vsync and vblank are per-FRAME and are passed straight through. Doubling
+// vsync and vblank are per-FRAME and are re-timed to the output line boundary
+// by vs_hold/vb_hold below rather than stored here. Doubling
 // changes the pixel rate, not the frame rate -- a frame still occupies the same
 // wall-clock time and the same number of input lines -- so a frame-rate signal
 // is already correct at the output and must NOT be replayed.
@@ -150,8 +154,51 @@ always_ff @(posedge clk) if (ce_pix_x2) q <= mem[{~bank, rd}];
 assign {hs_out, hb_out} = q[WORDW-1 -: 2];
 assign rgb_out = q[23:0];
 
-// Per-frame signals: straight through, never doubled (see WORDW above).
-assign vs_out = vs_in;
-assign vb_out = vb_in;
+// ---------------------------------------------------------------------------
+// Per-FRAME signals: sampled once per line on the line reference and HELD for
+// the whole of that line. Not stored in the line buffer, and not passed
+// straight through either.
+//
+// Straight through was the shipped behaviour and it made Video Fx unusable on
+// hardware: MiSTer measured 52x481 instead of 336x480. vblank changes state
+// when hcnt wraps to 0, which is 54 native pixels -- about 108 ce_pix_x2 ticks
+// -- AFTER the line reference, so it lands a quarter of the way into the FIRST
+// of the two replays. At each vertical blanking edge that cut one output line
+// pair's active region in two: 52 pixels on one line and 620 on another where
+// both should be 336. The frame TOTAL stayed correct, which is why A6 passed.
+//
+// It is not cosmetic, because the framework derives the whole frame geometry
+// from ONE such run: sys/hps_io.sv:927-960 opens a measuring window at the end
+// of vsync, counts DE, and closes it at the first DE falling edge, and
+// sys/video_freak.sv:66-68 takes its hsize the same way. One fragmentary run is
+// therefore latched as the width of the entire frame.
+//
+// Sampling on the reference is what makes it correct rather than merely
+// stable. The line being replayed during this interval was captured during the
+// PREVIOUS one, and its active pixels (hcnt 0..335) belong to the row whose
+// vcnt is current at the reference -- so vs_in/vb_in read here are already that
+// line's own values. They are held for both replays, which is why one input
+// line of vsync becomes two output lines of vsync and no more.
+//
+// Storing them in the line buffer instead would be wrong for a different
+// reason, recorded in the WORDW comment above: the stored line straddles a
+// vcnt boundary, so replaying it twice replayed the transition inside it twice
+// and A4 measured three vs_out pulses per frame.
+// ---------------------------------------------------------------------------
+logic vs_hold, vb_hold;
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        vs_hold <= 1'b1;   // active low, so idle
+        vb_hold <= 1'b1;   // blanked until a line has actually been stored
+    end
+    else if (line_start) begin
+        vs_hold <= vs_in;
+        vb_hold <= vb_in;
+    end
+end
+
+assign vs_out = vs_hold;
+assign vb_out = vb_hold;
 
 endmodule

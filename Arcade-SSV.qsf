@@ -111,6 +111,11 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
+# TEMPORARY INSTRUMENTATION -- DELETE WITH THE PROBE PAINT IN Arcade-SSV.sv.
+# Paints the SDRAM readback result to the screen so the black-screen regression
+# can be measured on hardware instead of inferred. Not a shippable build.
+set_global_assignment -name VERILOG_MACRO "DBG_SDRAM_PAINT=1"
+
 source sys/sys.tcl
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7

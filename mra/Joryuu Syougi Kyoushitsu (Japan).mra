@@ -9,7 +9,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010110110004000F00020F00000066</part>
+    <part>53020110110004000F00020F04000061</part>
   </rom>
   <rom index="0" zip="jsk.zip">
     <!-- program -->

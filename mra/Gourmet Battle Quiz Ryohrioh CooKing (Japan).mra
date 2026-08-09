@@ -8,7 +8,7 @@
   <manufacturer>Visco</manufacturer>
   <rbf>SSV</rbf>
   <rom index="1">
-    <part>53010420120004000100020F00000060</part>
+    <part>53020420120004000100020F0400005B</part>
   </rom>
   <rom index="0" zip="ryorioh.zip">
     <!-- program -->
