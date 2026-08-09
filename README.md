@@ -1,7 +1,7 @@
 # SSV MiSTer FPGA Core
 
 Work-in-progress MiSTer FPGA implementation of the Sammy, Seta, and Visco
-(SSV) arcade platform. One universal `SSV.rbf` contains all shared and optional
+(SSV) arcade platform. One universal `Arcade-SSV.rbf` contains all shared and optional
 hardware paths; each MRA selects its board geometry at runtime.
 
 ## Legal notice
@@ -109,7 +109,7 @@ Quartus 17 is required. To run analysis and synthesis only:
 ./tools/build-ssv.ps1 -MapOnly
 ```
 
-For a complete compile that copies a dated bitstream to `releases/SSV_YYYYMMDD.rbf`:
+For a complete compile that replaces the single bitstream at `releases/Arcade-SSV.rbf`:
 
 ```powershell
 ./tools/build-ssv.ps1

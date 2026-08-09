@@ -1,7 +1,7 @@
 # SSV implementation status
 
 This is the persistent cross-chat evidence ledger. The release target is one
-universal `SSV.rbf`; game differences are descriptor-selected at ROM load.
+universal `Arcade-SSV.rbf`; game differences are descriptor-selected at ROM load.
 
 | Area | Status | Evidence / boundary |
 |---|---|---|

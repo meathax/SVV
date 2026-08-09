@@ -193,7 +193,7 @@ try {
         $source = Join-Path $repoRoot "output_files\Arcade-SSV.rbf"
         $releaseDir = Join-Path $repoRoot "releases"
         New-Item -ItemType Directory -Force $releaseDir | Out-Null
-        $releaseName = "SSV_{0}.rbf" -f (Get-Date -Format "yyyyMMdd")
+        $releaseName = "Arcade-SSV.rbf"
         $destination = Join-Path $releaseDir $releaseName
         $staging = "$destination.upload"
         Copy-Item -LiteralPath $source -Destination $staging -Force

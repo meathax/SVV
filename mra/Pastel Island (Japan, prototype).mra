@@ -6,7 +6,7 @@
   <setname>pastelis</setname>
   <year>1993</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="pastelis.zip">
     <!-- program -->
     <part name="data.u28" crc="e71dcc02"/>

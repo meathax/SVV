@@ -6,7 +6,7 @@
   <setname>vasara2a</setname>
   <year>2001</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
     <part>53020420120004040300020F08000051</part>

@@ -7,7 +7,7 @@
   <setname>eaglshotj</setname>
   <year>1994</year>
   <manufacturer>Sammy</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="eaglshotj.zip|eaglshot.zip">
     <!-- program -->
     <interleave output="16">

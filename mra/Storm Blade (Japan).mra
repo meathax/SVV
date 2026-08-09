@@ -6,7 +6,7 @@
   <setname>stmbladej</setname>
   <year>1996</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <!-- MAME rotation ROT270; the core does not rotate. -->
   <rom index="1">
     <part>53020418100103000108000F0400005F</part>

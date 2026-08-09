@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Authoritative game list for the single universal SSV core profile.
 
-Every entry uses the same ``SSV.rbf``.  Per-game board differences are carried
+Every entry uses the same ``Arcade-SSV.rbf``.  Per-game board differences are carried
 by the MRA index-1 descriptor and selected at ROM-load time; they are not
 separate Quartus revisions or compile-time feature builds.
 

@@ -1,7 +1,7 @@
 # Universal SSV profile
 
 The project has one Quartus revision (`Arcade-SSV`) and produces one runtime
-core, `SSV.rbf`. There are no per-game RBF variants. Every qualified MRA loads
+core, `Arcade-SSV.rbf`. There are no per-game RBF variants. Every qualified MRA loads
 a 16-byte index-1 descriptor before index-0 ROM data; that descriptor selects
 the ROM geometry and optional board paths at runtime.
 

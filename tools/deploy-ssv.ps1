@@ -8,8 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (-not $RbfPath) { $RbfPath = Join-Path $repoRoot "releases\SSV.rbf" }
-if (-not $MraPath) { $MraPath = Join-Path $repoRoot "mra\Dyna Gear.mra" }
+if (-not $RbfPath) { $RbfPath = Join-Path $repoRoot "releases\Arcade-SSV.rbf" }
+if (-not $MraPath) { $MraPath = Join-Path $repoRoot "releases\Dyna Gear.mra" }
 
 if (-not $SkipReadyCheck) {
     & (Join-Path $PSScriptRoot "report-quartus.ps1") -Revision "Arcade-SSV" -RequireReady
@@ -24,7 +24,7 @@ $rbfHash = (Get-FileHash -LiteralPath $rbf -Algorithm SHA256).Hash.ToLowerInvari
 $mraHash = (Get-FileHash -LiteralPath $mra -Algorithm SHA256).Hash.ToLowerInvariant()
 $sshOptions = @("-o", "ConnectTimeout=10")
 
-$remoteCore = "/media/fat/_Arcade/cores/SSV.rbf"
+$remoteCore = "/media/fat/_Arcade/cores/Arcade-SSV.rbf"
 $remoteMra = "/media/fat/_Arcade/Dyna Gear.mra"
 
 & ssh @sshOptions $MisterHost "mkdir -p /media/fat/_Arcade/cores"
@@ -42,6 +42,6 @@ if ($remoteMraHash -ne $mraHash) { throw "MRA hash mismatch after upload." }
 
 & ssh @sshOptions $MisterHost "mv -f '${remoteCore}.upload' '$remoteCore' && mv -f '${remoteMra}.upload' '$remoteMra' && sync"
 if ($LASTEXITCODE -ne 0) { throw "Could not activate uploaded files." }
-Write-Host "Deployed SSV.rbf and Dyna Gear.mra to $MisterHost"
+Write-Host "Deployed Arcade-SSV.rbf and Dyna Gear.mra to $MisterHost"
 Write-Host "RBF SHA-256: $rbfHash"
 Write-Host "MRA SHA-256: $mraHash"

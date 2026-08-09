@@ -6,7 +6,7 @@
   <setname>meosism</setname>
   <year>1996</year>
   <manufacturer>Sammy</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020108100004000400010F04000076</part>
   </rom>

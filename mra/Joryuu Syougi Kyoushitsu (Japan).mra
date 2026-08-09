@@ -7,7 +7,7 @@
   <setname>jsk</setname>
   <year>1997</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020110110004000F00020F04000061</part>
   </rom>

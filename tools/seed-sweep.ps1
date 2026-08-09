@@ -99,7 +99,7 @@ if ($best) {
     Log "best seed $($best.Seed) at $($best.Slack) ns - pinning it in the QSF"
     (Get-Content $qsf -Raw) -replace '(?m)^set_global_assignment -name SEED \d+',
         "set_global_assignment -name SEED $($best.Seed)" | Set-Content $qsf -NoNewline
-    Log "NOTE: the staged releases\SSV.rbf is from the LAST seed compiled, not"
+    Log "NOTE: the staged releases\Arcade-SSV.rbf is from the LAST seed compiled, not"
     Log "      necessarily the best. Recompile with the pinned seed before deploying."
 } else {
     Log "no deployable seed found - restoring SEED $original"

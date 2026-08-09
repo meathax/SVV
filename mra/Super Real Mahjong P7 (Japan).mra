@@ -6,7 +6,7 @@
   <setname>srmp7</setname>
   <year>1997</year>
   <manufacturer>Seta</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="srmp7.zip">
     <!-- program -->
     <part name="sx015-10.dat" crc="fad3ac6a"/>

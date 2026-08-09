@@ -6,7 +6,7 @@
   <setname>janjans1</setname>
   <year>1996</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="janjans1.zip">
     <!-- program -->
     <part name="jj1-data.bin" crc="6734537e"/>

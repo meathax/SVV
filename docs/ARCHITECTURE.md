@@ -1,6 +1,6 @@
 # SSV core architecture
 
-The project produces one universal `SSV.rbf`. It uses the proven System 32 V60
+The project produces one universal `Arcade-SSV.rbf`. It uses the proven System 32 V60
 and MiSTer shell while selecting program/graphics/sample geometry, watchdog,
 inputs, RAM/NVRAM, IRQ1 and ST010 behavior from the MRA index-1 descriptor.
 Optional devices are synthesized once and runtime-gated; there are no

@@ -7,7 +7,7 @@
   <setname>koikois2</setname>
   <year>1997</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020420120003440F00000F08000008</part>
   </rom>

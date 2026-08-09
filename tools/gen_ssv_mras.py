@@ -459,7 +459,7 @@ def main():
                '  <setname>%s</setname>' % setname,
                '  <year>%s</year>' % g['year'],
                '  <manufacturer>%s</manufacturer>' % xml_escape(g['maker']),
-               '  <rbf>SSV</rbf>',
+               '  <rbf>Arcade-SSV</rbf>',
                '  <resolution>15kHz</resolution>',
                '  <homebrew>no</homebrew>',
                '  <bootleg>no</bootleg>']

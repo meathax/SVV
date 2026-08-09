@@ -6,7 +6,7 @@
   <setname>srmp4o</setname>
   <year>1993</year>
   <manufacturer>Seta</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020118100103000100010F04000069</part>
   </rom>

@@ -7,7 +7,7 @@
   <setname>sxyreact</setname>
   <year>1998</year>
   <manufacturer>Sammy</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="sxyreact.zip">
     <!-- program -->
     <interleave output="16">

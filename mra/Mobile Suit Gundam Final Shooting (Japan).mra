@@ -7,7 +7,7 @@
   <setname>gdfs</setname>
   <year>1995</year>
   <manufacturer>Banpresto</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020408100003440F00000F08000022</part>
   </rom>

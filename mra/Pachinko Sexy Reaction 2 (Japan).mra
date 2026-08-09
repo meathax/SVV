@@ -7,7 +7,7 @@
   <setname>sxyreac2</setname>
   <year>1999</year>
   <manufacturer>Sammy</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020220120003140701000F08000041</part>
   </rom>

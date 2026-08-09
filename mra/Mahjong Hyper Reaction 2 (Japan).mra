@@ -6,7 +6,7 @@
   <setname>hypreac2</setname>
   <year>1997</year>
   <manufacturer>Sammy</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="0" zip="hypreac2.zip">
     <!-- program -->
     <interleave output="16">

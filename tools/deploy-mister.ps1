@@ -1,4 +1,4 @@
-# Deploy releases\SSV.rbf to a MiSTer and optionally load the core.
+# Deploy releases\Arcade-SSV.rbf to a MiSTer and optionally load the core.
 #
 # Requires SSH key auth to the MiSTer (no password handling here by design).
 # The previous core is always preserved before it is replaced, and the upload
@@ -7,8 +7,8 @@
 [CmdletBinding()]
 param(
     [string]$MisterHost = "192.168.0.69",
-    [string]$Rbf        = "releases\SSV.rbf",
-    [string]$CoreName   = "SSV",
+    [string]$Rbf        = "releases\Arcade-SSV.rbf",
+    [string]$CoreName   = "Arcade-SSV",
     [string]$Mra        = "/media/fat/_Arcade/Dyna Gear.mra",
     [switch]$Boot
 )

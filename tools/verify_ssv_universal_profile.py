@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that every qualified local set selects the one universal SSV RBF."""
+"""Verify that every qualified local set selects the universal Arcade-SSV RBF."""
 
 from __future__ import annotations
 
@@ -140,8 +140,8 @@ def main() -> int:
             fail(f"{setname}: no MRA", errors)
             continue
         path, root = by_set[setname]
-        if (root.findtext("rbf") or "").strip() != "SSV":
-            fail(f"{setname}: MRA does not select SSV.rbf", errors)
+        if (root.findtext("rbf") or "").strip() != "Arcade-SSV":
+            fail(f"{setname}: MRA does not select Arcade-SSV.rbf", errors)
 
         if (root.findtext("resolution") or "").strip() != "15kHz":
             fail(f"{setname}: MRA resolution must be 15kHz", errors)
@@ -278,9 +278,13 @@ def main() -> int:
                 errors,
             )
 
-    release_rbfs = sorted(release_dir.glob("SSV_????????.rbf"))
-    if not release_rbfs:
-        fail("releases: no dated SSV_YYYYMMDD.rbf release bitstream", errors)
+    release_rbfs = sorted(release_dir.glob("*.rbf"))
+    expected_rbf = release_dir / "Arcade-SSV.rbf"
+    if release_rbfs != [expected_rbf]:
+        fail(
+            "releases must contain exactly one bitstream named Arcade-SSV.rbf",
+            errors,
+        )
 
     if errors:
         for message in errors:
@@ -294,7 +298,7 @@ def main() -> int:
             f"{row[4]:4} {row[5]:5} {row[6]:4} {row[7]:5} {row[8]:5} "
             f"{row[9]:5} {row[10]:4}  {row[11]}"
         )
-    print(f"PASS: {len(rows)} sets select the single SSV.rbf profile")
+    print(f"PASS: {len(rows)} sets select the single Arcade-SSV.rbf profile")
     return 0
 
 

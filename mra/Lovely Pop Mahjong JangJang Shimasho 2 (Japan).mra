@@ -6,7 +6,7 @@
   <setname>janjans2</setname>
   <year>2000</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020420120004040300000F08000053</part>
   </rom>

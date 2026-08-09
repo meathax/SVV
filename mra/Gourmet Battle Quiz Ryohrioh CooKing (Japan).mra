@@ -6,7 +6,7 @@
   <setname>ryorioh</setname>
   <year>1998</year>
   <manufacturer>Visco</manufacturer>
-  <rbf>SSV</rbf>
+  <rbf>Arcade-SSV</rbf>
   <rom index="1">
     <part>53020420120004000100020F0400005B</part>
   </rom>
