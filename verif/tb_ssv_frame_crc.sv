@@ -909,6 +909,115 @@ always_ff @(posedge clk_sys) begin
     end
 end
 
+// ---------------------------------------------------------------------------
+// Row-fetch anatomy (obj fetcher, post-video-enable).
+//
+// Question this answers: `ssv_gfx_row_fetch` issues quarter 0, waits for ack,
+// then sits in WAIT_ACK_LOW until ack falls before issuing quarter 1. Is that
+// WAIT_ACK_LOW dwell actually costing cycles, or is it already the minimum
+// one clk_sys cycle needed to present a req falling edge to the controller's
+// rising-edge latch?
+//
+// Buckets per completed row fetch (IDLE->WAIT_ACK ... done):
+//   rf_q0   cycles in WAIT_ACK for quarter 0 (round trip 0)
+//   rf_low  cycles in WAIT_ACK_LOW (the re-issue turnaround under test)
+//   rf_q1   cycles in WAIT_ACK for quarter 1 (round trip 1)
+//   rf_gap  cycles in IDLE between one `done` and the next `start`
+// ---------------------------------------------------------------------------
+longint rf_n, rf_q0, rf_low, rf_q1, rf_gap;
+longint rf_low_hist [0:15];
+integer rf_cur_q0, rf_cur_low, rf_cur_q1, rf_cur_gap;
+logic [1:0] rf_state_d;
+logic rf_seen_done;
+
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        rf_n <= 0; rf_q0 <= 0; rf_low <= 0; rf_q1 <= 0; rf_gap <= 0;
+        rf_cur_q0 <= 0; rf_cur_low <= 0; rf_cur_q1 <= 0; rf_cur_gap <= 0;
+        rf_state_d <= 2'd0;
+        rf_seen_done <= 1'b0;
+        for (int rj = 0; rj < 16; rj++) rf_low_hist[rj] <= 0;
+    end
+    else begin
+        rf_state_d <= dut.sprite_renderer.fetch.state;
+        if (ve_seen) begin
+            // Accumulate dwell in the state we are currently sitting in.
+            case (dut.sprite_renderer.fetch.state)
+                2'd0: if (rf_seen_done) rf_cur_gap <= rf_cur_gap + 1;
+                2'd1: if (dut.sprite_renderer.fetch.quarter == 2'd0)
+                          rf_cur_q0 <= rf_cur_q0 + 1;
+                      else
+                          rf_cur_q1 <= rf_cur_q1 + 1;
+                2'd2: rf_cur_low <= rf_cur_low + 1;
+                default: ;
+            endcase
+            // Row fetch completes when the fetcher leaves WAIT_ACK on q1.
+            if (rf_state_d == 2'd1 &&
+                dut.sprite_renderer.fetch.state == 2'd0) begin
+                int unsigned rf_bin;
+                rf_bin = (rf_cur_low < 0)  ? 0  :
+                         (rf_cur_low > 15) ? 15 : rf_cur_low;
+                rf_n   <= rf_n + 1;
+                rf_q0  <= rf_q0  + rf_cur_q0;
+                rf_low <= rf_low + rf_cur_low;
+                rf_q1  <= rf_q1  + rf_cur_q1;
+                rf_gap <= rf_gap + rf_cur_gap;
+                rf_low_hist[rf_bin] <= rf_low_hist[rf_bin] + 1;
+                rf_cur_q0 <= 0; rf_cur_low <= 0; rf_cur_q1 <= 0;
+                rf_cur_gap <= 0;
+                rf_seen_done <= 1'b1;
+            end
+        end
+    end
+end
+
+// H2: is the held-high req load-bearing for the shared-p1 mux?
+//
+// `ssv_core` muxes sdr_p1_req = obj_busy ? obj_rom_req : bg_rom_req. If the
+// background fetcher ever asserts bg_rom_req while obj_busy is high, that
+// request is invisible to the controller until ownership returns. A fetcher
+// that pulsed req briefly instead of holding it until ack would lose the
+// request entirely and hang. Count the cycles where that masking is active,
+// and the distinct masked request episodes.
+longint bgreq_masked_cycles, bgreq_masked_episodes, bgreq_total_cycles;
+logic bgreq_masked_d;
+
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        bgreq_masked_cycles <= 0;
+        bgreq_masked_episodes <= 0;
+        bgreq_total_cycles <= 0;
+        bgreq_masked_d <= 1'b0;
+    end
+    else if (ve_seen) begin
+        if (dut.bg_rom_req) bgreq_total_cycles <= bgreq_total_cycles + 1;
+        bgreq_masked_d <= dut.bg_rom_req && dut.obj_busy;
+        if (dut.bg_rom_req && dut.obj_busy) begin
+            bgreq_masked_cycles <= bgreq_masked_cycles + 1;
+            if (!bgreq_masked_d)
+                bgreq_masked_episodes <= bgreq_masked_episodes + 1;
+        end
+    end
+end
+
+task automatic report_row_fetch();
+    real n;
+    integer k;
+    n = (rf_n == 0) ? 1.0 : real'(rf_n);
+    $display("ROW_FETCH n=%0d q0=%0.2f low=%0.2f q1=%0.2f gap=%0.2f fetch_total=%0.2f period=%0.2f",
+             rf_n, real'(rf_q0) / n, real'(rf_low) / n, real'(rf_q1) / n,
+             real'(rf_gap) / n,
+             real'(rf_q0 + rf_low + rf_q1) / n,
+             real'(rf_q0 + rf_low + rf_q1 + rf_gap) / n);
+    for (k = 0; k < 16; k = k + 1)
+        if (rf_low_hist[k] != 0)
+            $display("ROW_FETCH_LOW_HIST %0d cycles: %0d", k, rf_low_hist[k]);
+    $display("BGREQ_MASKED cycles=%0d episodes=%0d of bg_rom_req total=%0d (%0.2f%% masked by obj_busy)",
+             bgreq_masked_cycles, bgreq_masked_episodes, bgreq_total_cycles,
+             (bgreq_total_cycles == 0) ? 0.0 :
+                100.0 * real'(bgreq_masked_cycles) / real'(bgreq_total_cycles));
+endtask
+
 task automatic report_line_periods();
     integer k;
     real n_on, n_lt;
@@ -1899,6 +2008,7 @@ initial begin
     report_sdram_stats();
     report_bus_occupancy();
     report_line_periods();
+    report_row_fetch();
     if (chk_data) begin
         $display("SDRAM_DATA_CHECK p1 %0d/%0d bad, p0 %0d/%0d bad, p4 %0d/%0d bad",
                  chk_p1_bad, chk_p1_n, chk_p0_bad, chk_p0_n,
