@@ -140,7 +140,8 @@ reg        ref_pend;
 
 typedef enum logic [3:0] {
     ST_IDLE, ST_DISPATCH, ST_ACT, ST_RCD1, ST_RCD2, ST_RD, ST_RDW,
-    ST_WR, ST_WRRC, ST_PRE_XFER, ST_PRE_REF_B, ST_PRE_REF, ST_REF_B, ST_REFW
+    ST_WR, ST_WRRC, ST_PRE_CMD, ST_PRE_XFER, ST_PRE_REF_B, ST_PRE_REF,
+    ST_REF_B, ST_REFW
 } state_t;
 state_t state = ST_IDLE;
 
@@ -479,25 +480,41 @@ always @(posedge clk) begin
             // device that owns the row.  Deselecting a device does not close
             // its rows, which is what makes per-device tracking valid.
             chip_sel <= xfer_addr[26];
+            // This is a NOP cycle, so its address is not sampled by SDRAM.
+            // Drive a fixed value on every path instead of conditionally
+            // retaining the previous command address.  The conditional hold
+            // made the bank-indexed row compare part of SDRAM_A's D-input
+            // cone; TimeQuest measured five logic levels followed by a
+            // 5.24 ns route to the fixed address DDIO cells.
+            SDRAM_A  <= 13'd0;
             if (row_open[xfer_idx] && open_row[xfer_idx] == xfer_addr[22:10]) begin
                 // Row hit: skip ACT and both tRCD cycles. Reads and writes
                 // alike, now that reads leave the row open.
-                state <= is_write ? ST_WR : ST_RD;
+                if (is_write) state <= ST_WR;
+                else          state <= ST_RD;
             end
             else if (row_open[xfer_idx]) begin
-                // Same-bank row miss: close only THAT bank on THAT device.
-                // A10=0 selects a single bank; A[12:11] are the shorted DQM
-                // pins and are don't-care for PRE.
-                cmd      <= CMD_PRE;
-                SDRAM_BA <= xfer_addr[24:23];
-                SDRAM_A  <= 13'd0;
-                row_open[xfer_idx] <= 1'b0;
-                pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
-                state <= ST_PRE_XFER;
+                // Register the row-conflict decision before driving the PRE
+                // command pins.  This removes the row table compare from the
+                // command-output cone.  Only genuine conflicts gain this one
+                // NOP cycle; row hits and closed-row ACTs retain their cadence.
+                state <= ST_PRE_CMD;
             end
             else begin
                 state <= ST_ACT;
             end
+        end
+
+        ST_PRE_CMD: begin
+            // Same-bank row miss: close only THAT bank on THAT device.
+            // A10=0 selects a single bank; A[12:11] are the shorted DQM
+            // pins and are don't-care for PRE.
+            cmd      <= CMD_PRE;
+            SDRAM_BA <= xfer_addr[24:23];
+            SDRAM_A  <= 13'd0;
+            row_open[xfer_idx] <= 1'b0;
+            pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
+            state <= ST_PRE_XFER;
         end
 
         ST_PRE_XFER: begin
@@ -517,7 +534,10 @@ always @(posedge clk) begin
 
         // tRCD >= 21ns = 3 cycles ACT->READ/WRITE
         ST_RCD1: state <= ST_RCD2;
-        ST_RCD2: state <= is_write ? ST_WR : ST_RD;
+        ST_RCD2: begin
+            if (is_write) state <= ST_WR;
+            else          state <= ST_RD;
+        end
 
         ST_WR: begin
             cmd      <= CMD_WRITE;

@@ -202,10 +202,20 @@ logic cache_stop_after_bucket;
 (* ramstyle = "M10K, no_rw_check" *)
 logic [DESC_WIDTH-1:0] descriptor_cache [0:CACHE_ENTRIES-1];
 
-(* ramstyle = "MLAB, no_rw_check" *)
-logic [LINE_COUNT_WIDTH-1:0] line_counts [0:239];
+// Per-line count and pooled-base metadata always share one address and are
+// consumed together. Pack them into one 240x27 memory: this fits one Cyclone V
+// 256x40 M10K instead of the prior line-count MLAB plus two physical copies of
+// line_bases (336 MLAB cells total). Keep one write and one registered read,
+// with no reset pin on the array itself.
+localparam integer LINE_META_WIDTH = LINE_POOL_ADDR_WIDTH + LINE_COUNT_WIDTH;
+(* ramstyle = "M10K, no_rw_check" *)
+logic [LINE_META_WIDTH-1:0] line_meta [0:239];
 logic [7:0] line_count_addr;
-logic [LINE_COUNT_WIDTH-1:0] line_count_q;
+logic [LINE_META_WIDTH-1:0] line_meta_q;
+wire [LINE_COUNT_WIDTH-1:0] line_count_q =
+    line_meta_q[LINE_COUNT_WIDTH-1:0];
+wire [LINE_POOL_ADDR_WIDTH-1:0] line_base_q =
+    line_meta_q[LINE_META_WIDTH-1:LINE_COUNT_WIDTH];
 // M10K, the placement docs/M10K_REDUCTION.md actually measured for this
 // table (21 blocks at 23,040 entries). A later, unmeasured change steered
 // this to MLAB at 3x the depth; that placement cannot work at any size in
@@ -237,9 +247,6 @@ ssv_mlab240_sdp #(.WIDTH(LINE_PAGE_META_WIDTH)) line_page_starts_ram (
 // pin to the memory primitive.
 logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 assign line_page_q = rst ? '0 : line_page_mem_q;
-(* ramstyle = "MLAB, no_rw_check" *)
-logic [LINE_POOL_ADDR_WIDTH-1:0] line_bases [0:239];
-logic [LINE_POOL_ADDR_WIDTH-1:0] line_base_q;
 logic [LINE_POOL_COUNT_WIDTH-1:0] line_pool_alloc;
 logic [CACHE_ADDR_WIDTH:0] cache_scan_index;
 // Wire alias, not a register: see the merged read at the cache_q assignment
@@ -789,15 +796,20 @@ always_comb begin
     end
 end
 
+// BUILD_REINDEX_BUCKET_READ primes line_base_q for the first bucket, then
+// line_count_addr and bucket_y advance together on every write.  The
+// registered base is therefore aligned with line_count_q here.  Reading
+// line_bases[bucket_y] directly made Quartus clone the whole 240x15 table to
+// provide a second read port (another 120 MLAB cells) for no functional gain.
 wire [LINE_POOL_SUM_WIDTH-1:0] reindex_pool_addr =
     {{(LINE_POOL_SUM_WIDTH-LINE_POOL_ADDR_WIDTH){1'b0}},
-     line_bases[bucket_y]} +
+     line_base_q} +
     {{(LINE_POOL_SUM_WIDTH-LINE_COUNT_WIDTH){1'b0}}, line_count_q};
 wire [LINE_POOL_SUM_WIDTH-1:0] line_pool_end =
     {1'b0, line_pool_alloc} +
     {{(LINE_POOL_SUM_WIDTH-LINE_COUNT_WIDTH){1'b0}}, line_count_q};
 
-// NOTE on `no_rw_check` for these tables: the unconditional reads below use
+// NOTE on `no_rw_check` for line_meta: the unconditional read below uses
 // the same address as the BUILD_CLEAR_LINES / BUILD_BUCKET_WRITE writes, so a
 // same-address read-during-write happens on every one of those cycles. That is
 // exactly the case `no_rw_check` promises cannot occur, and on hardware the
@@ -823,35 +835,34 @@ wire [CACHE_ADDR_WIDTH-1:0] cache_read_addr =
 
 always_ff @(posedge clk) begin
     if (rst) begin
-        line_count_q <= '0;
-        line_base_q <= '0;
+        line_meta_q <= '0;
         line_pool_alloc <= '0;
         line_entry_q <= '0;
         line_entry_page_q <= '0;
         cache_read_addr_r <= '0;
     end
     else begin
-        line_count_q <= line_counts[line_count_addr];
-        line_base_q <= line_bases[line_count_addr];
+        line_meta_q <= line_meta[line_count_addr];
         if ((state == IDLE) && (cache_start || cache_pending))
             line_pool_alloc <= '0;
         if (state == BUILD_CLEAR_LINES) begin
-            line_counts[line_count_addr] <= '0;
+            line_meta[line_count_addr] <= '0;
         end
         else if (state == BUILD_BUCKET_WRITE) begin
             if (line_count_q < LINE_SLOTS_VALUE)
-                line_counts[bucket_y] <= line_count_q + 1'd1;
+                line_meta[bucket_y] <= {line_base_q, line_count_q + 1'd1};
         end
         else if (state == BUILD_PREFIX_WRITE) begin
-            line_bases[line_count_addr] <= line_pool_alloc[
-                LINE_POOL_ADDR_WIDTH-1:0];
-            line_counts[line_count_addr] <= '0;
+            line_meta[line_count_addr] <= {
+                line_pool_alloc[LINE_POOL_ADDR_WIDTH-1:0],
+                {LINE_COUNT_WIDTH{1'b0}}
+            };
             line_pool_alloc <= line_pool_alloc + line_count_q;
         end
         else if ((state == BUILD_REINDEX_BUCKET_WRITE) &&
                  (line_count_q < LINE_SLOTS_VALUE) &&
                  (reindex_pool_addr < LINE_POOL_ENTRIES)) begin
-            line_counts[bucket_y] <= line_count_q + 1'd1;
+            line_meta[bucket_y] <= {line_base_q, line_count_q + 1'd1};
             line_entries[reindex_pool_addr[LINE_POOL_ADDR_WIDTH-1:0]] <=
                 cache_scan_index[LINE_ENTRY_LOW_WIDTH-1:0];
         end
@@ -1406,7 +1417,7 @@ always_ff @(posedge clk) begin
 `ifdef SIMULATION
                     $display("CACHE_OVR reindex line=%0d count=%0d base=%0d addr=%0d scan=%0d",
                              bucket_y, line_count_q,
-                             line_bases[bucket_y], reindex_pool_addr,
+                             line_base_q, reindex_pool_addr,
                              cache_scan_index);
 `endif
                     cache_overflow <= 1'b1;

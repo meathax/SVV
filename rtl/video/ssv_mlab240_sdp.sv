@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 240-word single-write, registered-read MLAB used by frame-local metadata.
+// 240-word single-write, registered-read memory used by frame-local metadata.
 //
-// Quartus 17 accepts ramstyle="MLAB" on some inferred memories, but the
-// renderer's 240x180 line-page table was still fitted as five M10Ks.  Keep
-// this primitive-shaped wrapper deliberately small: one write port, one
-// registered read port, one clock, and no reset inside the memory array.
+// The current universal fit has enough M10K headroom but is ALM-limited.  A
+// forced MLAB implementation consumed about 1,168 ALMs/720 MLAB cells for this
+// 240x180 table.  Keep this primitive-shaped wrapper deliberately small and
+// select M10K explicitly: one write port, one registered read port, one clock,
+// and no reset inside the memory array.  The legacy module name is retained so
+// this storage-only placement correction does not churn simulation manifests.
 // The renderer masks the read output during reset and rebuilds every entry
 // before consuming it, matching the old inferred-array contract.
 
@@ -68,7 +70,7 @@ module ssv_mlab240_sdp #(
         ram.outdata_aclr_b = "NONE",
         ram.outdata_reg_b = "UNREGISTERED",
         ram.power_up_uninitialized = "TRUE",
-        ram.ram_block_type = "MLAB",
+        ram.ram_block_type = "M10K",
         ram.read_during_write_mode_mixed_ports = "DONT_CARE",
         ram.width_byteena_a = 1;
 `else

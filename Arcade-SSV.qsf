@@ -70,8 +70,11 @@ set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL NORMAL
 set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
+# HIGH packing recovered only 132 ALMs in the measured universal fit while
+# worsening worst setup slack from -0.044 ns to -0.268 ns.  MEDIUM retains the
+# larger M10K placement saving without spending timing margin for dense packing.
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 2
+set_global_assignment -name SEED 3
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

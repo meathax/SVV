@@ -1616,8 +1616,34 @@ else if (ce) begin
     // iterative multiply/divide
     S_MULDIV: begin
         if (mdcnt == 0) begin
-            md_finish();
-            st <= S_NEXT;
+            if (cur_op == 8'h86 || cur_op == 8'h96) begin
+                // MULX/MULUX reuse the same exact 32-step magnitude
+                // multiplier as MUL/MULU.  The former combinational
+                // expression sign/zero-extended both operands to 64 bits,
+                // causing Quartus to decompose one 32x32 operation into ten
+                // DSP blocks.  mdacc already contains the complete 64-bit
+                // magnitude product here; apply the saved sign once and
+                // publish the qword through the existing destination path.
+                logic [63:0] product;
+                product = md_sign ? (~mdacc + 1'b1) : mdacc;
+                f_z <= (product == 0);
+                f_s <= product[63];
+                // MAME opMULX/opMULUX leave OV unchanged.
+                if (flag2) begin
+                    queue_reg_write(op2[4:0], product[31:0], 32'hffff_ffff);
+                    queue_reg_write(op2[4:0] + 5'd1, product[63:32], 32'hffff_ffff);
+                    st <= S_NEXT;
+                end
+                else begin
+                    movd_lo <= product[31:0];
+                    movd_hi <= product[63:32];
+                    st <= S_MOVD_WL;
+                end
+            end
+            else begin
+                md_finish();
+                st <= S_NEXT;
+            end
         end
         else begin
             md_step();
@@ -3670,27 +3696,19 @@ task automatic exec_op;
             st <= S_MULDIV;
         end
     end
-    8'h86, 8'h96: begin // MULX/MULUX: 32x32 -> 64 into reg pair (op2 = reg)
-        logic [63:0] p;
+    8'h86, 8'h96: begin // MULX/MULUX: 32x32 -> 64 into a qword destination
+        logic [31:0] ma, mb;
         logic mul_signed;
         // Do not name this temporary "sgn": Quartus 17 treats block-local
         // declarations as task-wide and shadows the sgn() helper above.
         mul_signed = (cur_op == 8'h86);
-        p = mul_signed ? $signed({{32{op1[31]}}, op1}) * $signed({{32{b[31]}}, b})
-                       : {32'b0, op1} * {32'b0, b};
-        f_z <= (p == 0); f_s <= p[63];   // MAME opMULX/opMULUX leave OV unchanged
-        if (flag2) begin
-            queue_reg_write(op2[4:0], p[31:0], 32'hffff_ffff);
-            queue_reg_write(op2[4:0] + 5'd1, p[63:32], 32'hffff_ffff);
-            st <= S_NEXT;
-        end
-        else begin
-            // memory destination: store the 64-bit product as a qword.  The old
-            // code computed flags but never wrote the result (audit R20 V60-9).
-            movd_lo <= p[31:0];
-            movd_hi <= p[63:32];
-            st <= S_MOVD_WL;
-        end
+        ma = (mul_signed && op1[31]) ? (~op1 + 1'b1) : op1;
+        mb = (mul_signed && b[31])   ? (~b + 1'b1)   : b;
+        mdop <= ma;
+        mdacc <= {32'b0, mb};
+        md_sign <= mul_signed & (op1[31] ^ b[31]);
+        mdcnt <= 6'd32;
+        st <= S_MULDIV;
     end
     8'ha6, 8'hb6: begin // DIVX/DIVUX: (reg-pair 64) / op1 -> q in reg, r in reg+1
         if (op1 == 0) begin
@@ -4095,12 +4113,17 @@ endfunction
 // multiply/divide iterative engine
 // ---------------------------------------------------------------------------
 task automatic md_step;
-    if (cur_op[5] == 1'b0 && (cur_op == 8'h81 || cur_op == 8'h83 || cur_op == 8'h85 ||
-        cur_op == 8'h91 || cur_op == 8'h93 || cur_op == 8'h95)) begin
-        // multiply: shift-add.  One full nonblocking assignment folds the
-        // conditional partial-product add into the right shift; a separate
-        // mdacc[63:32] write would be overwritten by this and was removed.
-        mdacc <= {1'b0, (mdacc[0] ? mdacc[63:32] + mdop : mdacc[63:32]), mdacc[31:1]};
+    if (cur_op == 8'h81 || cur_op == 8'h83 || cur_op == 8'h85 ||
+        cur_op == 8'h91 || cur_op == 8'h93 || cur_op == 8'h95 ||
+        cur_op == 8'h86 || cur_op == 8'h96) begin
+        // Multiply: shift-add.  Preserve the carry from the 32-bit upper-half
+        // addition as the new bit 63 when the combined accumulator shifts
+        // right.  Prepending zero to an already-truncated 32-bit sum silently
+        // produced wrong unsigned/high-magnitude products.
+        logic [32:0] partial;
+        partial = {1'b0, mdacc[63:32]} + {1'b0, mdop};
+        mdacc <= mdacc[0] ? {partial, mdacc[31:1]}
+                          : {1'b0, mdacc[63:32], mdacc[31:1]};
     end
     else begin
         // divide: non-restoring-ish simple restoring step

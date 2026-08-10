@@ -43,6 +43,73 @@ $slotInfo = [ordered]@{
     started_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
 
+function Get-BuildInputSnapshot {
+    $extensions = @(
+        '.qpf', '.qsf', '.qip', '.qsys', '.ip', '.tcl', '.sdc',
+        '.sv', '.svh', '.v', '.vh', '.vhd', '.vhdl',
+        '.mif', '.hex', '.mem'
+    )
+    $files = @(
+        Get-ChildItem -LiteralPath $repoRoot -File -ErrorAction Stop
+        foreach ($tree in @('rtl', 'sys')) {
+            $treePath = Join-Path $repoRoot $tree
+            if (Test-Path -LiteralPath $treePath -PathType Container) {
+                Get-ChildItem -LiteralPath $treePath -Recurse -File -ErrorAction Stop
+            }
+        }
+    ) | Where-Object {
+        $extensions -contains $_.Extension.ToLowerInvariant()
+    } | Sort-Object FullName -Unique
+
+    $inputs = @($files | ForEach-Object {
+        [ordered]@{
+            path = $_.FullName.Substring($repoRoot.Length).TrimStart([char[]]'\/').Replace('\', '/')
+            bytes = $_.Length
+            modified_utc = $_.LastWriteTimeUtc.ToString('o')
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        }
+    })
+    $gitHead = (& git -C $repoRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not record Git HEAD for build provenance.' }
+    $gitStatus = @(& git -C $repoRoot status --short)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not record Git status for build provenance.' }
+    return [ordered]@{
+        project_root = $repoRoot
+        project = $project
+        quartus_root = $QuartusRoot
+        captured_utc = (Get-Date).ToUniversalTime().ToString('o')
+        git_head = $gitHead
+        git_status = $gitStatus
+        inputs = $inputs
+    }
+}
+
+function Write-BuildInputSnapshot([object]$Snapshot, [string]$Name) {
+    $snapshotDir = Join-Path $repoRoot '.codex-mister-build'
+    New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
+    $path = Join-Path $snapshotDir $Name
+    $Snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host "Recorded build-input snapshot $path ($($Snapshot.inputs.Count) files)."
+    return $path
+}
+
+function Assert-BuildInputsUnchanged([object]$Before, [object]$After) {
+    $beforeComparable = [ordered]@{
+        git_head = $Before.git_head
+        git_status = $Before.git_status
+        inputs = $Before.inputs
+    } | ConvertTo-Json -Depth 6 -Compress
+    $afterComparable = [ordered]@{
+        git_head = $After.git_head
+        git_status = $After.git_status
+        inputs = $After.inputs
+    } | ConvertTo-Json -Depth 6 -Compress
+    if ($beforeComparable -cne $afterComparable) {
+        throw 'Build inputs changed during Quartus; the generated artifact is obsolete.'
+    }
+    Write-Host 'Build-input fingerprint is unchanged after assembler.'
+}
+
 function Get-QuartusProcesses {
     @(Get-CimInstance Win32_Process -Filter "Name LIKE 'quartus%'" -ErrorAction SilentlyContinue)
 }
@@ -147,6 +214,7 @@ function Assert-BuildPolicy {
         'set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL NORMAL',
         'set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC OFF',
         'set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF',
+        'set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM',
         'set_global_assignment -name SMART_RECOMPILE ON',
         'set_global_assignment -name SAVE_DISK_SPACE OFF',
         # Compressed bitstreams are a hard MiSTer/DE10-nano requirement, not
@@ -169,7 +237,7 @@ function Assert-BuildPolicy {
         throw 'Arcade-SSV.qsf must source files.qip exactly once.'
     }
     if (-not $qip.Contains('rtl/video/ssv_mlab240_sdp.sv')) {
-        throw 'files.qip must include the explicit MLAB wrapper for line_page_starts.'
+        throw 'files.qip must include the explicit memory wrapper for line_page_starts.'
     }
     if ($qsf -match '(?m)^set_global_assignment -name (SYSTEMVERILOG_FILE|VERILOG_FILE|QIP_FILE|SDC_FILE)\b') {
         throw 'User source declarations belong in files.qip, not Arcade-SSV.qsf.'
@@ -228,6 +296,9 @@ try {
         return
     }
 
+    $inputSnapshotBefore = Get-BuildInputSnapshot
+    $inputSnapshotBeforePath = Write-BuildInputSnapshot $inputSnapshotBefore 'Arcade-SSV-inputs-before.json'
+
     $map = Join-Path $quartusBin "quartus_map.exe"
     $flow = Join-Path $quartusBin "quartus_sh.exe"
     if (-not (Test-Path -LiteralPath $flow)) {
@@ -245,6 +316,10 @@ try {
     }
 
     if (-not $MapOnly) {
+        $inputSnapshotAfter = Get-BuildInputSnapshot
+        $inputSnapshotAfterPath = Write-BuildInputSnapshot $inputSnapshotAfter 'Arcade-SSV-inputs-after.json'
+        Assert-BuildInputsUnchanged $inputSnapshotBefore $inputSnapshotAfter
+
         $readiness = Join-Path $PSScriptRoot "report-quartus.ps1"
         & $readiness -ProjectRoot $repoRoot -Revision $project -RequireReady
         if ($LASTEXITCODE -ne 0) {
@@ -263,8 +338,13 @@ try {
         $usedAlms = Get-UsedResource $report.LogicALMs
         $usedRamBlocks = Get-UsedResource $report.RAMBlocks
         $usedDsps = Get-UsedResource $report.DSPBlocks
-        if ($usedAlms -gt 38500) {
-            throw "ALM ceiling exceeded: $usedAlms > 38500."
+        # The universal profile intentionally retains both CPUs and every
+        # descriptor-selected optional device.  After moving line metadata
+        # from MLABs to available M10Ks, measured fits use about 39.4k ALMs
+        # with moderate routing and no congestion.  Keep a fail-closed guard
+        # below 96% of the 41,910-ALM device instead of an obsolete 38.5k cap.
+        if ($usedAlms -gt 40000) {
+            throw "ALM ceiling exceeded: $usedAlms > 40000."
         }
         if ($usedRamBlocks -gt 544) {
             throw "RAM-block ceiling exceeded: $usedRamBlocks > 544."
@@ -293,6 +373,33 @@ try {
         }
         Move-Item -LiteralPath $staging -Destination $destination -Force
         Write-Host "Built releases\$releaseName (SHA256 $sourceHash)"
+
+        # The repository's undated releases/ copy is the MRA-facing artifact.
+        # Also retain the skill-required append-only, provenance-stamped copy.
+        $archiveDir = Join-Path $repoRoot 'RELEASES'
+        New-Item -ItemType Directory -Force $archiveDir | Out-Null
+        $date = Get-Date -Format 'yyyyMMdd'
+        $archiveBase = "Arcade-SSV_$date"
+        $archivePath = Join-Path $archiveDir "$archiveBase.rbf"
+        $collision = 0
+        while (Test-Path -LiteralPath $archivePath) {
+            $collision++
+            $archivePath = Join-Path $archiveDir "${archiveBase}_$collision.rbf"
+        }
+        $archiveStaging = "$archivePath.upload"
+        Copy-Item -LiteralPath $source -Destination $archiveStaging
+        $archiveHash = (Get-FileHash -LiteralPath $archiveStaging -Algorithm SHA256).Hash
+        if ($sourceHash -ne $archiveHash) {
+            throw 'Append-only staged RBF hash does not match the Quartus output.'
+        }
+        Move-Item -LiteralPath $archiveStaging -Destination $archivePath
+        $archiveItem = Get-Item -LiteralPath $archivePath
+        Write-Host "RELEASE_RBF=$($archiveItem.FullName)"
+        Write-Host "RELEASE_BYTES=$($archiveItem.Length)"
+        Write-Host "RELEASE_LAST_WRITE=$($archiveItem.LastWriteTime.ToString('o'))"
+        Write-Host "RELEASE_SHA256=$archiveHash"
+        Write-Host "INPUT_SNAPSHOT_BEFORE=$inputSnapshotBeforePath"
+        Write-Host "INPUT_SNAPSHOT_AFTER=$inputSnapshotAfterPath"
     }
 }
 finally {

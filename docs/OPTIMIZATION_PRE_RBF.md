@@ -1,5 +1,47 @@
 # Pre-RBF optimization notes
 
+## Shared multiplier and renderer placement pass (10 Aug 2026, no Quartus/RBF)
+
+The newest retained fit completed placement at 39,397/41,910 ALMs (94%),
+516/553 M10Ks and 53/112 DSP blocks, but failed `clk_ram` setup at -1.039 ns.
+Its first failing paths were the SDRAM row-conflict/address cone into the fixed
+SDRAM output cells.  The already-present registered `ST_PRE_CMD` correction
+removes that cone and its focused command-sequence test passes; the timing gain
+still requires a fresh authorized fit.
+
+The fit's DSP detail table exposed one avoidable V60 structure: the single
+`MULX/MULUX` 32x32 operation sign/zero-extended both operands to 64 bits before
+using `*`.  Quartus decomposed that expression into nine logical multiplier
+fragments consuming all ten V60 DSP blocks.  Extended multiply now reuses the
+CPU's existing 32-step magnitude shift-add engine and applies sign correction
+once to its complete 64-bit result.  No opcode or optional device was removed.
+While proving the reuse, an existing carry-loss in the serial upper-half add
+was found and corrected by retaining its 33rd carry bit.  Exact arithmetic
+comparison passed 4,050 signed/unsigned edge and randomized 32-bit operand
+pairs.  The directed memory-destination bench now also covers negative signed
+and high-bit unsigned qword products.  Expected synthesis effect: remove the
+ten V60 DSP blocks and their duplicated operand-routing fabric; no ALM/DSP
+saving is claimed until a current map report confirms it.
+
+The renderer's `line_bases` table appeared twice in the fit as two 120-MLAB
+copies.  The second copy existed only because `reindex_pool_addr` read the
+array asynchronously even though the FSM had already read the same bucket into
+`line_base_q`.  The read-ahead schedule advances `line_count_addr` and
+`bucket_y` together, so the registered base is cycle-aligned with
+`line_count_q`; reindex now reuses it.  Base and count always share an address
+and are consumed together, so the remaining 240x15 base and 240x12 count fields
+are packed into one 240x27 M10K.  This trades one of 37 spare M10Ks for at least
+240 memory ALMs, eliminates the duplicate read port/table, and avoids wasting a
+second block on separately addressed metadata.  `report-quartus.ps1` now fails
+closed unless a fresh fit shows exactly one M10K `line_meta` instance.
+
+Static verification: Slang reports zero errors and warnings for the affected
+V60 directed benches, cached-renderer bench, and SDRAM command-timing bench.
+The SDRAM test also executes under Icarus and reports PASS.  The installed
+Icarus cannot elaborate the full V60/renderer benches because of pre-existing
+enum-cast and package-syntax limitations; the required visible-model
+regressions remain pending.  No Quartus stage or RBF build was run.
+
 ## RTL placement and build-process audit (10 Aug 2026, no Quartus/RBF)
 
 - The latest fit report is stale against the current source, but its resource

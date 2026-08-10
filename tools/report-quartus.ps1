@@ -135,16 +135,28 @@ $routeRegion = if ($routeRegionMatch.Success) {
     "$($routeRegionMatch.Groups[1].Value) to $($routeRegionMatch.Groups[2].Value)"
 }
 $congestionFailure = $fitReport -match 'routing phase terminated due to routing congestion'
-# The cached renderer's 240x180 line-page metadata must stay in MLABs.  The
-# previous inferred array carried an MLAB ramstyle request but Quartus placed
-# it in five M10Ks; with only fourteen M10Ks free that is a release blocker.
-# Read the fitter's typed RAM table rather than trusting RTL attributes.
+# The cached renderer's 240x180 line-page metadata must use M10Ks on the
+# current universal design.  The forced MLAB version consumed about 1,168
+# ALMs/720 MLAB cells while the measured fit had 42 spare M10Ks and exceeded
+# the guarded ALM ceiling.  Read the fitter's typed RAM table rather than
+# trusting RTL attributes.
 $linePageStartsPlacement = Match-Value $fitReport '(?m)^;.*line_page_starts.*;\s*(MLAB|M10K block)\s*;'
-$linePageStartsPlacementMet = $fitIsCurrent -and $linePageStartsPlacement -eq 'MLAB'
+$linePageStartsPlacementMet = $fitIsCurrent -and $linePageStartsPlacement -eq 'M10K block'
+# The line-base table previously appeared twice as 120-MLAB copies because an
+# async reindex read bypassed its existing registered port, while line_counts
+# consumed another 96 MLAB cells.  The optimized design packs both fields into
+# exactly one 240x27 M10K.
+$lineMetaPlacements = @([regex]::Matches(
+    $fitReport,
+    '(?m)^;.*line_meta_rtl_0.*;\s*(MLAB|M10K block)\s*;'
+) | ForEach-Object { $_.Groups[1].Value })
+$lineMetaPlacementMet = $fitIsCurrent -and
+    $lineMetaPlacements.Count -eq 1 -and
+    $lineMetaPlacements[0] -eq 'M10K block'
 
 $ready = $mapIsCurrent -and $fitIsCurrent -and $staIsCurrent -and
     $timingMet -and $constraintsMet -and $rbfIsCurrent -and
-    $linePageStartsPlacementMet
+    $linePageStartsPlacementMet -and $lineMetaPlacementMet
 $result = [ordered]@{
     ProjectRoot = $ProjectRoot
     Revision = $Revision
@@ -168,6 +180,8 @@ $result = [ordered]@{
     CongestionFailure = $congestionFailure
     LinePageStartsPlacement = $linePageStartsPlacement
     LinePageStartsPlacementMet = $linePageStartsPlacementMet
+    LineMetaPlacements = $lineMetaPlacements
+    LineMetaPlacementMet = $lineMetaPlacementMet
     WorstTimingType = if ($worstTiming) { $worstTiming.Type } else { $null }
     WorstSlackNs = if ($worstTiming) { $worstTiming.Slack } else { $null }
     WorstPathTNSNs = if ($worstTiming) { $worstTiming.TNS } else { $null }

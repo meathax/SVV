@@ -1,8 +1,10 @@
 //============================================================================
 //  V60 MULX/DIVX with a MEMORY operand (audit R20 V60-9).  The old exec stored
 //  no result for MULX/MULUX and skipped DIVX/DIVUX entirely when op2 was in
-//  memory; register-pair forms were correct.  This checks the qword store and
-//  the memory-dividend divide with quotient/remainder writeback.
+//  memory; register-pair forms were correct.  This checks signed and unsigned
+//  qword products plus the memory-dividend divide with quotient/remainder
+//  writeback.  The multiply vectors deliberately cover cases that distinguish
+//  exact 64-bit sign correction from low-word-only multiplication.
 //============================================================================
 `timescale 1ns/1ps
 
@@ -79,6 +81,16 @@ initial begin
     movw_imm(5'd2, 32'h0001_0000);
     ab(8'h86); ab(8'hC0); ab(8'h60 | 5'd2); ab(8'hF3); aw32(32'h0000_9000); // MULX R2,[0x9000]
 
+    // Signed negative: -3 * 7 = -21 = ffff_ffff_ffff_ffeb.
+    movw_imm(5'd5, 32'd7); st_abs(5'd5, 32'h0000_9010);
+    movw_imm(5'd2, 32'hffff_fffd);
+    ab(8'h86); ab(8'hC0); ab(8'h60 | 5'd2); ab(8'hF3); aw32(32'h0000_9010);
+
+    // Unsigned high-bit operands: ffffffff^2 = fffffffe_00000001.
+    movw_imm(5'd5, 32'hffff_ffff); st_abs(5'd5, 32'h0000_9020);
+    movw_imm(5'd2, 32'hffff_ffff);
+    ab(8'h96); ab(8'hC0); ab(8'h60 | 5'd2); ab(8'hF3); aw32(32'h0000_9020);
+
     // DIVX [0x9008](=100) / R3(=7) -> q=14 @ [0x9008], r=2 @ [0x900C]
     movw_imm(5'd5, 32'd100); st_abs(5'd5, 32'h0000_9008);
     movw_imm(5'd5, 32'd0);   st_abs(5'd5, 32'h0000_900C);
@@ -96,6 +108,10 @@ initial begin
     chk(cpu.dbg_halted, "HALT reached");
     chk(rd32(32'h9000) == 32'h0000_0000, "MULX mem low 32 = 0");
     chk(rd32(32'h9004) == 32'h0000_0001, "MULX mem high 32 = 1");
+    chk(rd32(32'h9010) == 32'hffff_ffeb, "MULX signed low 32 = -21");
+    chk(rd32(32'h9014) == 32'hffff_ffff, "MULX signed high 32 sign extends");
+    chk(rd32(32'h9020) == 32'h0000_0001, "MULUX unsigned low 32");
+    chk(rd32(32'h9024) == 32'hffff_fffe, "MULUX unsigned high 32");
     chk(rd32(32'h9008) == 32'd14, "DIVX mem quotient = 14");
     chk(rd32(32'h900C) == 32'd2,  "DIVX mem remainder = 2");
 

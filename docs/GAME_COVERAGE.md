@@ -71,6 +71,12 @@ A pinned MAME reference sweep now has 20-frame CRC/state streams for all eight
 current authoritative sets. Reference streams for retired local archives are
 historical only; none count as Verilator attract or screenshot evidence.
 
+The 10 Aug pre-RBF resource pass is shared across all eight descriptors and
+does not change this qualification matrix: V60 `MULX/MULUX` reuse the existing
+serial multiplier, and the renderer removes a duplicate line-base read/table.
+Arithmetic and static checks pass, but no set receives new attract/gameplay
+credit until the affected visible universal-model regressions are rerun.
+
 The native SDL Verilator harness has independently proved the live-window path
 on Dyna Gear: the pre-audio harness model opened a responsive native window, reached
 its first changing/nonblack framebuffer at frame 214 (checksum `d512913d`,
