@@ -347,7 +347,9 @@ wire wdog_rst;
 ssv_host_guard u_host_guard (
     .clk_sys(clk_sys), .clk_ram(clk_ram),
     .pll_locked_async(pll_locked),
-    .reset_request(RESET | status[0] | buttons[1]),
+    // RESET is an asynchronous shell input; status/buttons already originate
+    // in clk_sys through hps_io and must retain their existing phase.
+    .reset_async(RESET), .reset_request(status[0] | buttons[1]),
     .sdram_ready_async(sdram_ready),
     .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload),
     .ioctl_index(ioctl_index),
@@ -1061,7 +1063,9 @@ screen_rotate u_screen_rotate (
     .DDRAM_WE(rotate_ddram_we), .DDRAM_RD(rotate_ddram_rd)
 );
 
-assign DDRAM_CLK      = clk_ram;
+// Keep the entire screen_rotate write bundle in its producer domain. Driving
+// clk_ram here advertised unrelated sampling edges for clk_sys-owned payload.
+assign DDRAM_CLK      = rotate_ddram_clk;
 assign DDRAM_BURSTCNT = rotate_ddram_burstcnt;
 assign DDRAM_ADDR     = rotate_ddram_addr;
 assign DDRAM_DIN      = rotate_ddram_din;

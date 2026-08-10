@@ -8,7 +8,7 @@ working in this repository.
 This project has exactly one MiSTer core profile:
 
 - Quartus revision: `Arcade-SSV`
-- runtime bitstream: `SSV.rbf`
+- runtime bitstream: `Arcade-SSV.rbf`
 - per-game selection: MRA index-1 descriptor loaded before index-0 ROM data
 - authoritative qualified-set list: `tools/ssv_supported_sets.py`
 
@@ -74,7 +74,7 @@ behavioral-reference evidence only and never satisfy this milestone.
 Do not launch Quartus merely to explore RTL. Hardware compilation is a final,
 explicit step and requires user authorization. When authorized, use
 `tools/build-ssv.ps1 -QuartusRoot D:\Q17`; keep the required Fast Fit,
-NORMAL router, Smart Recompile, compression-off, and machine-wide processor
+NORMAL router, Smart Recompile, compression-on, and machine-wide processor
 limits intact. Inspect timing and resource reports before treating an RBF as
 deployable. Preserve `db/` and `incremental_db/` for Smart Recompile.
 

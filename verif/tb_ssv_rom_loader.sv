@@ -53,8 +53,7 @@ task tick;
     @(posedge clk); #1;
 endtask
 
-// Serialize one runtime profile exactly as the MRA index-1 block does.
-task send_cfg(input ssv_cfg_t c);
+function automatic logic [127:0] encode_cfg(input ssv_cfg_t c);
     logic [7:0] b [0:15];
     logic [7:0] sum;
     int i;
@@ -74,16 +73,65 @@ task send_cfg(input ssv_cfg_t c);
         sum = 8'd0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = -sum;
+        encode_cfg = '0;
+        for (i = 0; i < 16; i = i + 1)
+            encode_cfg[i * 8 +: 8] = b[i];
+    end
+endfunction
+
+task send_cfg_image(input logic [127:0] image);
+    int i;
+    begin
         ioctl_index = 8'd1;
         for (i = 0; i < 16; i = i + 1) begin
             ioctl_addr = 27'(i);
-            ioctl_dout = b[i];
+            ioctl_dout = image[i * 8 +: 8];
             ioctl_wr   = 1'b1;
             tick();
             ioctl_wr   = 1'b0;
             tick();
         end
         ioctl_index = 8'd0;
+        tick();
+    end
+endtask
+
+// Serialize one runtime profile exactly as the MRA index-1 block does.
+task send_cfg(input ssv_cfg_t c);
+    begin
+        send_cfg_image(encode_cfg(c));
+    end
+endtask
+
+// Exercise the actual index transition: byte zero is already being held when
+// descriptor commit raises ioctl_wait. It must be accepted exactly once after
+// cfg/cfg_valid commit, never dropped and never interpreted with stale cfg.
+task send_cfg_then_byte0_no_gap(input ssv_cfg_t c, input logic [7:0] byte0);
+    logic [127:0] image;
+    int i;
+    begin
+        image = encode_cfg(c);
+        ioctl_index = 8'd1;
+        for (i = 0; i < 15; i = i + 1) begin
+            ioctl_addr = 27'(i);
+            ioctl_dout = image[i * 8 +: 8];
+            ioctl_wr = 1'b1; tick();
+            ioctl_wr = 1'b0; tick();
+        end
+        ioctl_addr = 27'd15;
+        ioctl_dout = image[127:120];
+        ioctl_wr = 1'b1;
+        tick();
+        if (!ioctl_wait)
+            $fatal(1, "descriptor commit did not hold back-to-back index 0");
+        ioctl_index = 8'd0;
+        ioctl_addr = 27'd0;
+        ioctl_dout = byte0;
+        tick();
+        if (!cfg_valid || ioctl_wait)
+            $fatal(1, "descriptor did not commit atomically under held byte 0");
+        tick();
+        ioctl_wr = 1'b0;
         tick();
     end
 endtask
@@ -105,6 +153,8 @@ initial begin
     ssv_cfg_t stmblade_cfg;
     ssv_cfg_t ultrax_cfg;
     logic [26:0] st010_start;
+    logic [127:0] malformed_cfg;
+    logic [7:0] malformed_sum;
 
     rst = 1; mem_ready = 0; ioctl_download = 0; ioctl_index = 0;
     ioctl_wr = 0; ioctl_addr = 0; ioctl_dout = 0; sdr_wr_ack = 0;
@@ -115,11 +165,10 @@ initial begin
     // discards index-0 bytes until it validates, so send the Dyna Gear record
     // first. The expectations below are unchanged by it.
     dynagear_cfg = cfg_dynagear();
-    send_cfg(dynagear_cfg);
+    send_cfg_then_byte0_no_gap(dynagear_cfg, 8'h34);
     if (!cfg_valid || cfg.extra_ram_mode !== 2'd1 || cfg.nvram_mode !== 2'd0)
         $fatal(1, "Dyna Gear configuration/RAM-map block was rejected");
 
-    send_byte(0, 8'h34);
     send_byte(1, 8'h12);
     if (!sdr_wr_req || sdr_wr_addr !== (SDR_MAINCPU_BASE >> 1) ||
         sdr_wr_din !== 16'h1234 || sdr_wr_be !== 2'b11)
@@ -200,6 +249,18 @@ initial begin
     if (!cfg_valid || !cfg.has_nvram || cfg.extra_ram_mode !== 2'd0 ||
         cfg.nvram_mode !== 2'd2)
         $fatal(1, "Cairblad NVRAM configuration flag was rejected");
+
+    // A repaired checksum does not make a reserved descriptor bit legal.
+    malformed_cfg = encode_cfg(cairblad_cfg);
+    malformed_cfg[5 * 8 + 7] = 1'b1;
+    malformed_sum = 8'd0;
+    for (int malformed_i = 0; malformed_i < 15; malformed_i++)
+        malformed_sum = malformed_sum +
+                        malformed_cfg[malformed_i * 8 +: 8];
+    malformed_cfg[15 * 8 +: 8] = -malformed_sum;
+    send_cfg_image(malformed_cfg);
+    if (cfg_valid)
+        $fatal(1, "checksum-valid reserved descriptor bit was accepted");
 
     // Non-power-of-two quarter sizes are a universal-profile boundary. A
     // 24 MiB MAME region has 6 MiB quarters; the old shift-based mapper

@@ -78,6 +78,10 @@ def main() -> int:
     if 'set_global_assignment -name COMPRESSION_MODE ON' not in qsf:
         fail("Arcade-SSV.qsf must generate compressed MiSTer bitstreams", errors)
 
+    top_rtl = (repo / "Arcade-SSV.sv").read_text(encoding="utf-8")
+    if not re.search(r"(?m)^assign DDRAM_CLK\s*=\s*rotate_ddram_clk\s*;", top_rtl):
+        fail("screen_rotate DDRAM bundle must export its producer clock", errors)
+
     qip = (repo / "files.qip").read_text(encoding="utf-8")
     manifest_paths = re.findall(
         r'(?m)^set_global_assignment -name '
@@ -109,7 +113,6 @@ def main() -> int:
         if instance not in core_rtl:
             fail(f"universal core is missing mandatory instance {instance}", errors)
 
-    top_rtl = (repo / "Arcade-SSV.sv").read_text(encoding="utf-8")
     conf_match = re.search(r"localparam CONF_STR\s*=\s*\{(.*?)\n\};", top_rtl, re.S)
     if not conf_match:
         fail("Arcade-SSV.sv has no parseable CONF_STR", errors)
@@ -184,8 +187,17 @@ def main() -> int:
         extra_input_mode = (flags >> 6) & 0x03
         extra_ram_mode = (cfg[10] >> 3) & 0x03
         nvram_mode = (cfg[10] >> 6) & 0x03
+        reserved_high = (
+            (cfg[2] & 0xF8) or (cfg[3] & 0xC0) or (cfg[4] & 0xE0) or
+            (cfg[5] & 0xFE) or (cfg[6] & 0xF8) or (cfg[8] & 0xF0) or
+            (cfg[11] & 0xF0) or (cfg[12] & 0xC0)
+        )
+        if reserved_high:
+            fail(f"{setname}: descriptor has non-zero reserved/high bits", errors)
         if flags & 0x04:
             fail(f"{setname}: reserved descriptor flag byte-9 bit 2 is set", errors)
+        if (cfg[8] & 0x0F) == 0:
+            fail(f"{setname}: descriptor enables no ES5506 sample bank", errors)
         if prog_mb not in (1, 2, 4):
             fail(f"{setname}: unsupported program size {prog_mb} MiB", errors)
         if gfx_mb not in (12, 16, 24, 32) or gfx_quarters not in (3, 4):
@@ -206,6 +218,16 @@ def main() -> int:
             fail(f"{setname}: unsupported visible area {cfg[13] * 2}x{cfg[14]}", errors)
         if sample_mb not in (4, 8):
             fail(f"{setname}: unsupported sample size {sample_mb} MiB", errors)
+        else:
+            for bank in range(4):
+                if (cfg[8] >> bank) & 1:
+                    slot = (cfg[7] >> (bank * 2)) & 3
+                    if slot >= sample_mb // 4:
+                        fail(
+                            f"{setname}: enabled ES5506 bank {bank} maps to "
+                            f"absent sample slot {slot}",
+                            errors,
+                        )
         if extra_ram_mode == 3:
             fail(f"{setname}: reserved extra CPU RAM mode 3", errors)
         if nvram_mode == 3:

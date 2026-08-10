@@ -8,6 +8,7 @@ module ssv_host_guard #(
 	input  logic        clk_sys,
 	input  logic        clk_ram,
 	input  logic        pll_locked_async,
+	input  logic        reset_async,
 	input  logic        reset_request,
 	input  logic        sdram_ready_async,
 	input  logic        ioctl_download,
@@ -37,8 +38,12 @@ localparam logic [RESET_HOLD_WIDTH-1:0] RESET_HOLD_VALUE = RESET_HOLD_CYCLES;
 // PLL lock is asynchronous to both generated clocks. Assertion must be
 // immediate, while release is qualified independently in each destination
 // domain so no state machine observes a runt first clock or metastable release.
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 logic [1:0] pll_sys_sync;
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 logic [1:0] pll_ram_sync;
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+logic [1:0] reset_async_sync = 2'b00;
 
 always_ff @(posedge clk_sys or negedge pll_locked_async) begin
 	if (!pll_locked_async)
@@ -54,6 +59,19 @@ always_ff @(posedge clk_ram or negedge pll_locked_async) begin
 		pll_ram_sync <= {pll_ram_sync[0], 1'b1};
 end
 
+// The MiSTer shell RESET pin is asynchronous to clk_sys. Assert immediately,
+// then release through two destination edges. Keep the hps_io status/button
+// reset term outside this synchronizer so its established release phase does
+// not move.
+always_ff @(posedge clk_sys or posedge reset_async) begin
+	if (reset_async)
+		reset_async_sync <= 2'b11;
+	else
+		reset_async_sync <= {reset_async_sync[0], 1'b0};
+end
+
+wire host_reset_request = reset_request | reset_async_sync[1];
+
 always_comb begin
 	pll_ready_sys = pll_sys_sync[1];
 	pll_ready_ram = pll_ram_sync[1];
@@ -62,7 +80,9 @@ end
 // SDRAM ready crosses from clk_ram. Once initialization has completed it is
 // sticky until PLL loss: a one-cycle synchronizer upset must not cold-reset a
 // running machine. The controller itself only drops ready during re-init.
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 logic sdram_ready_meta;
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
 logic sdram_ready_sync;
 
 always_ff @(posedge clk_sys or negedge pll_locked_async) begin
@@ -92,14 +112,14 @@ logic                        host_reset;
 always_ff @(posedge clk_sys or negedge pll_locked_async) begin
 	if (!pll_locked_async)
 		reset_hold_count <= RESET_HOLD_VALUE;
-	else if (!pll_ready_sys || reset_request)
+	else if (!pll_ready_sys || host_reset_request)
 		reset_hold_count <= RESET_HOLD_VALUE;
 	else if (reset_hold_count != 0)
 		reset_hold_count <= reset_hold_count - 1'b1;
 end
 
 always_comb begin
-	host_reset = reset_request | (reset_hold_count != 0);
+	host_reset = host_reset_request | (reset_hold_count != 0);
 
 	// Only descriptor and ROM downloads replace the running machine. Hiscore
 	// config/data and battery-NVRAM transfers are live persistence operations.

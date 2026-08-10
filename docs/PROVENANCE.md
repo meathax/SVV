@@ -31,3 +31,25 @@ New SSV-specific RTL is also distributed under GPL-3.0-or-later.
 
 MAME source is used as behavioral documentation. No MAME source is copied into
 the synthesizable core.
+
+## MiSTer framework deviation ledger
+
+`sys/` began as the adjacent S32 framework import. It is not currently
+byte-identical to that source. The following committed deviations must be
+treated as an isolated patch stack—not as permission for further framework
+edits:
+
+- `5eb1f5b`: `sys/ascal.vhd` pipeline/counter/resource changes and
+  `sys/sys_top.sdc` constraint corrections made for the 148.5 MHz scaler path;
+- `c75139e`: `sys/ascal.vhd` input FIFO MLAB steering and `sys/sys_top.v`
+  SSV-specific scaler/palette parameters;
+- imported/generated metadata differences in `pll_audio*.qip`,
+  `pll_hdmi*.qip`, and the `HDMI_TX_CLK` fast-output assignment in `sys.tcl`.
+
+The ascal changes were previously accompanied by focused video regressions and
+timing reports recorded in the named commits and `docs/OPTIMIZATION_PRE_RBF.md`.
+They are retained because blindly restoring the adjacent copy would undo known
+resource/timing work and change the video pipeline. Any future upstream refresh
+must first reproduce those behavioral checks, then obtain fresh Quartus and
+real-MiSTer evidence. Generated PLL submodules and their reconfiguration wiring
+remain read-only.

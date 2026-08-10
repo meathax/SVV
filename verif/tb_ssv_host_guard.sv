@@ -8,6 +8,7 @@ always #5 clk_sys = ~clk_sys;
 always #3 clk_ram = ~clk_ram;
 
 logic pll_locked_async = 1'b0;
+logic reset_async = 1'b0;
 logic reset_request = 1'b0;
 logic sdram_ready_async = 1'b0;
 logic ioctl_download = 1'b0;
@@ -123,6 +124,17 @@ initial begin
 	check_ok(video_reset && core_reset, "host reset hold released too early");
 	tick_sys(2);
 	check_ok(!video_reset && !core_reset, "host reset hold did not release");
+
+	// The external shell pin may change next to a clk_sys edge. Assertion is
+	// asynchronous; release is synchronized and then receives the same hold.
+	#2 reset_async = 1'b1;
+	#1;
+	check_ok(video_reset && core_reset, "async shell reset did not assert");
+	reset_async = 1'b0;
+	tick_sys(5);
+	check_ok(video_reset && core_reset, "async reset hold released too early");
+	tick_sys(2);
+	check_ok(!video_reset && !core_reset, "async reset did not release cleanly");
 
 	// PLL loss asserts reset without waiting for a destination clock edge.
 	#2 pll_locked_async = 1'b0;

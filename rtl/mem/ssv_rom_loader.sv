@@ -77,7 +77,9 @@ logic       index0_seen;
 localparam int CFG_BYTES = 16;
 logic [7:0] cfg_raw [0:CFG_BYTES-1];
 logic [7:0] cfg_sum;
-logic       cfg_seen_last;
+logic       cfg_accept;
+logic [CFG_BYTES-1:0] cfg_received;
+logic                 cfg_commit_pending;
 
 function automatic ssv_pkg::ssv_cfg_t cfg_decode();
     cfg_decode = '{
@@ -108,6 +110,94 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
         visible_height:     cfg_raw[14]
     };
 endfunction
+
+// Keep malformed descriptors away from variable shifts, bank selectors and
+// stream-boundary arithmetic.  This is deliberately a small constant-domain
+// predicate rather than a general divider/modulo path: the version-2 ABI has
+// only four graphics geometries and two sample sizes.
+function automatic logic cfg_domain_valid();
+    logic gfx_valid;
+    logic bank_map_valid;
+    logic geometry_valid;
+    begin
+        unique case (cfg_raw[3][5:0])
+            6'd12: gfx_valid = (cfg_raw[4][4:0] == 5'd15) &&
+                                   cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd3);
+            6'd16: gfx_valid = (cfg_raw[4][4:0] == 5'd17) &&
+                                  !cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd3);
+            6'd24: gfx_valid = (cfg_raw[4][4:0] == 5'd16) &&
+                                   cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd3);
+            6'd32: gfx_valid = (cfg_raw[4][4:0] == 5'd18) &&
+                                  !cfg_raw[5][0] &&
+                                  ((cfg_raw[6][2:0] == 3'd3) ||
+                                   (cfg_raw[6][2:0] == 3'd4));
+            default: gfx_valid = 1'b0;
+        endcase
+
+        // Four MiB carries one physical stream slot; eight MiB carries two.
+        // Only mappings for enabled CR banks matter.
+        bank_map_valid = cfg_raw[8][0] ?
+            ((cfg_raw[12][5:0] == 6'd8) || (cfg_raw[7][1:0] == 2'd0)) : 1'b1;
+        if (cfg_raw[8][1])
+            bank_map_valid &= (cfg_raw[12][5:0] == 6'd8) ||
+                              (cfg_raw[7][3:2] == 2'd0);
+        if (cfg_raw[8][2])
+            bank_map_valid &= (cfg_raw[12][5:0] == 6'd8) ||
+                              (cfg_raw[7][5:4] == 2'd0);
+        if (cfg_raw[8][3])
+            bank_map_valid &= (cfg_raw[12][5:0] == 6'd8) ||
+                              (cfg_raw[7][7:6] == 2'd0);
+        if (cfg_raw[12][5:0] == 6'd8) begin
+            if (cfg_raw[8][0]) bank_map_valid &= !cfg_raw[7][1];
+            if (cfg_raw[8][1]) bank_map_valid &= !cfg_raw[7][3];
+            if (cfg_raw[8][2]) bank_map_valid &= !cfg_raw[7][5];
+            if (cfg_raw[8][3]) bank_map_valid &= !cfg_raw[7][7];
+        end
+
+        geometry_valid =
+            ((cfg_raw[13] == 8'd168) &&
+             ((cfg_raw[14] == 8'd238) || (cfg_raw[14] == 8'd240))) ||
+            ((cfg_raw[13] == 8'd169) && (cfg_raw[14] == 8'd240)) ||
+            ((cfg_raw[13] == 8'd176) && (cfg_raw[14] == 8'd240));
+
+        cfg_domain_valid =
+            (cfg_raw[2][7:3] == 5'd0) &&
+            ((cfg_raw[2][2:0] == 3'd1) ||
+             (cfg_raw[2][2:0] == 3'd2) ||
+             (cfg_raw[2][2:0] == 3'd4)) &&
+            (cfg_raw[3][7:6] == 2'd0) &&
+            (cfg_raw[4][7:5] == 3'd0) &&
+            (cfg_raw[5][7:1] == 7'd0) &&
+            (cfg_raw[6][7:3] == 5'd0) &&
+            (cfg_raw[8][7:4] == 4'd0) && (cfg_raw[8][3:0] != 4'd0) &&
+            !cfg_raw[9][2] && (cfg_raw[9][7:6] != 2'd3) &&
+            (cfg_raw[10][1:0] != 2'd3) &&
+            (cfg_raw[10][4:3] != 2'd3) &&
+            (cfg_raw[10][7:6] != 2'd3) &&
+            (cfg_raw[10][2] == (cfg_raw[10][7:6] != 2'd0)) &&
+            (cfg_raw[11][7:4] == 4'd0) && (cfg_raw[11][3:0] <= 4'd7) &&
+            (cfg_raw[12][7:6] == 2'd0) &&
+            ((cfg_raw[12][5:0] == 6'd4) ||
+             (cfg_raw[12][5:0] == 6'd8)) &&
+            gfx_valid && bank_map_valid && geometry_valid;
+    end
+endfunction
+
+// One shared validation cone, sampled only on cfg_commit_pending. Keeping it
+// outside the sequential block avoids both duplicated compares and a needless
+// validity register in the placement-critical loader neighborhood.
+always_comb begin
+    cfg_sum = 8'd0;
+    for (int cfg_i = 0; cfg_i < CFG_BYTES - 1; cfg_i++)
+        cfg_sum = cfg_sum + cfg_raw[cfg_i];
+    cfg_accept = (cfg_raw[0] == 8'h53) &&
+                 (cfg_raw[1] == 8'd2) &&
+                 (cfg_raw[CFG_BYTES-1] == (-cfg_sum)) &&
+                 cfg_domain_valid();
+end
 
 function automatic logic [SDR_AW:0] stream_byte_address(
     input logic [26:0] stream_addr
@@ -203,7 +293,9 @@ wire sample_data_byte =
     (ioctl_addr <  stream_samples_start_cfg(cfg) +
                    stream_samples_size_cfg(cfg));
 
-assign ioctl_wait = busy | ~mem_ready;
+// Byte 15 completes cfg_raw on one edge; hold the first index-0 byte while the
+// following edge validates and atomically commits the descriptor.
+assign ioctl_wait = busy | ~mem_ready | cfg_commit_pending;
 
 always_ff @(posedge clk) begin
     if (rst) begin
@@ -211,7 +303,8 @@ always_ff @(posedge clk) begin
         busy        <= 1'b0;
         index0_seen <= 1'b0;
         cfg_valid   <= 1'b0;
-        cfg_seen_last <= 1'b0;
+        cfg_received <= '0;
+        cfg_commit_pending <= 1'b0;
         cfg         <= '0;
         sdr_wr_req  <= 1'b0;
         sdr_wr_addr <= '0;
@@ -233,18 +326,31 @@ always_ff @(posedge clk) begin
         if (ioctl_download && ioctl_wr && ioctl_index == 8'd1 &&
             ioctl_addr < CFG_BYTES) begin
             cfg_raw[ioctl_addr[3:0]] <= ioctl_dout;
-            cfg_seen_last <= (ioctl_addr == CFG_BYTES - 1);
+            // Any descriptor byte invalidates the prior profile immediately.
+            // Address zero begins a new transaction even if a prior malformed
+            // block left a partial receive mask behind.
+            cfg_valid <= 1'b0;
+            if (ioctl_addr == 0)
+                cfg_received <= {{(CFG_BYTES-1){1'b0}}, 1'b1};
+            else
+                cfg_received[ioctl_addr[3:0]] <= 1'b1;
+
+            if (((ioctl_addr == 0)
+                    ? {{(CFG_BYTES-1){1'b0}}, 1'b1}
+                    : (cfg_received | (16'b1 << ioctl_addr[3:0])))
+                == {CFG_BYTES{1'b1}})
+                cfg_commit_pending <= 1'b1;
         end
 
-        // Validate one cycle after the last byte lands, so cfg_raw is settled.
-        if (cfg_seen_last) begin
-            cfg_seen_last <= 1'b0;
-            cfg_sum = 8'd0;
-            for (int i = 0; i < CFG_BYTES - 1; i++)
-                cfg_sum = cfg_sum + cfg_raw[i];
-            cfg_valid <= (cfg_raw[0] == 8'h53) && (cfg_raw[1] == 8'd2) &&
-                         (cfg_raw[CFG_BYTES-1] == (-cfg_sum));
-            cfg <= cfg_decode();
+        // Validate one cycle after the final missing byte lands, so cfg_raw is
+        // settled. The wait term above holds a back-to-back index-0 byte until
+        // cfg and cfg_valid commit together on this edge.
+        if (cfg_commit_pending) begin
+            cfg_commit_pending <= 1'b0;
+            cfg_received <= '0;
+            cfg_valid <= cfg_accept;
+            if (cfg_accept)
+                cfg <= cfg_decode();
         end
 
         if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&

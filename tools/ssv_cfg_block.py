@@ -360,6 +360,8 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     quarters = graphics_quarters(gfx_region, gfx_load_end)
     prog_mb = prog_size >> 20
     gfx_mb = gfx_region >> 20
+    if not 0 <= game_id <= 7:
+        raise ValueError("game id %d is outside the version-2 profile" % game_id)
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
     if gfx_mb not in SUPPORTED_GFX_MB:
@@ -369,6 +371,21 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
         raise ValueError("visible width %d is not an encodable even width" % visible_width)
     if not 1 <= visible_height <= 255:
         raise ValueError("visible height %d does not fit" % visible_height)
+    if sample_mb not in (4, 8):
+        raise ValueError("sample size %d MB is outside the supported profile" %
+                         sample_mb)
+    if ens_valid & ~0x0F:
+        raise ValueError("ES5506 valid mask does not fit four banks")
+    if not ens_valid:
+        raise ValueError("at least one ES5506 bank must be populated")
+    for bank in range(4):
+        if ens_valid & (1 << bank):
+            slot = (ens_map >> (bank * 2)) & 3
+            if slot >= sample_mb // 4:
+                raise ValueError("ES5506 bank %d maps to absent slot %d" %
+                                 (bank, slot))
+    if wdog not in (0, 1, 2):
+        raise ValueError("unsupported watchdog mode %r" % (wdog,))
 
     b = [0] * 16
     b[0] = 0x53                 # magic 'S'
