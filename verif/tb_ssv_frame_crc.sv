@@ -731,9 +731,8 @@ end
 // `state` is a single register, writes to descriptor_cache happen only in
 // BUILD_STORE and to line_entries only in BUILD_REINDEX_BUCKET_WRITE, while
 // the reads happen only in RENDER_* states -- so build and render can never
-// collide. line_page_starts is different: its read at
-// ssv_cached_sprite_renderer.sv:702
-// is unconditional and DOES collide on every build cycle, by design; it is safe
+// collide. The explicit line-page MLAB is different: its registered q read is
+// unconditional and DOES collide on every build cycle, by design; it is safe
 // only because its single consumer (RENDER_COUNT_WAIT) is reachable only from
 // RENDER_COUNT_READ, which never writes.
 //
@@ -764,9 +763,8 @@ localparam logic [5:0] ST_FETCH_START        = 6'd39;
 localparam logic [5:0] ST_FETCH_WAIT         = 6'd40;
 localparam logic [5:0] ST_PLOT               = 6'd41;
 
-// Reconstruct the exact enable conditions from the RAM process at
-// ssv_cached_sprite_renderer.sv:697-710, so these track the design rather than
-// a paraphrase of it.
+// Reconstruct the exact enable conditions from the renderer's RAM process, so
+// these track the design rather than a paraphrase of it.
 wire c6_entry_rd = (dut.sprite_renderer.state == ST_RENDER_LINE_READ) ||
                    (dut.sprite_renderer.state == ST_RENDER_DECODE)    ||
                    (dut.sprite_renderer.state == ST_RENDER_PREP);
@@ -2200,8 +2198,9 @@ always_ff @(posedge clk_sys) begin
                  overflow_i = overflow_i + 1) begin
                 overflow_entry = {
                     dut.sprite_renderer.line_page_for_slot(
-                        dut.sprite_renderer.line_page_starts[
-                            dut.sprite_renderer.bucket_y],
+                        // BUILD_REINDEX_BUCKET_READ prefetches the current
+                        // bucket's metadata into the registered-read q.
+                        dut.sprite_renderer.line_page_q,
                         overflow_i),
                     dut.sprite_renderer.line_entries[
                         dut.sprite_renderer.line_bases[

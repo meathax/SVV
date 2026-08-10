@@ -13,7 +13,12 @@ param(
     # edition stamp and poisons db\ for later Lite builds. Keep this pointed at
     # the Lite install.
     [string]$QuartusRoot = "D:\Q17",
-    [switch]$MapOnly
+    [switch]$MapOnly,
+    [Nullable[int]]$Seed,
+    [switch]$SetSeedOnly,
+    # Queue behind any Quartus build on this machine. Use this only for a
+    # deliberate fail-fast CI probe; the default is the safe queued behavior.
+    [switch]$NoWait
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,9 +26,116 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $quartusBin = Join-Path $QuartusRoot "quartus\bin64"
 $project = "Arcade-SSV"
 $qsfPath = Join-Path $repoRoot "$project.qsf"
+$slotName = "Global\MiSTer-Quartus-Build-Slot"
+$slotPath = Join-Path ([IO.Path]::GetTempPath()) "mister-quartus-build-slot.json"
+$slotMutex = $null
+$slotOwned = $false
+$slotInfo = [ordered]@{
+    owner = [Environment]::UserName
+    host = [Environment]::MachineName
+    wrapper_pid = $PID
+    process_ids = @($PID)
+    project_root = $repoRoot
+    revision = $project
+    quartus_root = $QuartusRoot
+    map_only = [bool]$MapOnly
+    state = "starting"
+    started_utc = (Get-Date).ToUniversalTime().ToString("o")
+}
+
+function Get-QuartusProcesses {
+    @(Get-CimInstance Win32_Process -Filter "Name LIKE 'quartus%'" -ErrorAction SilentlyContinue)
+}
+
+function Write-SlotRecord([string]$State, [object[]]$ProcessIds = @($PID)) {
+    $slotInfo.state = $State
+    $slotInfo.process_ids = @($ProcessIds | Where-Object { $null -ne $_ })
+    $json = $slotInfo | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        $slotPath,
+        $json,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Read-SlotSummary {
+    if (-not (Test-Path -LiteralPath $slotPath -PathType Leaf)) {
+        return "owner record unavailable"
+    }
+    try {
+        $record = Get-Content -LiteralPath $slotPath -Raw | ConvertFrom-Json
+        return "PID $($record.wrapper_pid), $($record.revision), $($record.project_root), state $($record.state)"
+    }
+    catch {
+        return "owner record unreadable"
+    }
+}
+
+function Wait-QuartusSlot {
+    try {
+        $script:slotMutex = [Threading.Mutex]::new($false, $slotName)
+    }
+    catch {
+        throw "Could not create the machine-wide Quartus mutex '$slotName': $($_.Exception.Message)"
+    }
+
+    $noticeAt = [DateTime]::MinValue
+    while (-not $script:slotOwned) {
+        try {
+            $script:slotOwned = $script:slotMutex.WaitOne(1000)
+        }
+        catch [Threading.AbandonedMutexException] {
+            # The previous wrapper died; the kernel released the mutex, and
+            # this process now owns it. Replace the stale diagnostic record.
+            $script:slotOwned = $true
+            Write-Host "Recovered an abandoned global Quartus slot."
+        }
+        if (-not $script:slotOwned -and
+            ((Get-Date) - $noticeAt).TotalSeconds -ge 30) {
+            $noticeAt = Get-Date
+            Write-Host "Waiting for the machine-wide Quartus slot ($((Read-SlotSummary)))."
+        }
+    }
+
+    # A manually launched Quartus process is outside the named mutex. Do not
+    # race it: release, wait, and recheck immediately before launching ours.
+    while ($true) {
+        $running = @(Get-QuartusProcesses)
+        if ($running.Count -eq 0) {
+            Write-SlotRecord "claimed"
+            Write-Host "Claimed global Quartus slot for $project at $repoRoot (wrapper PID $PID)."
+            return
+        }
+
+        $pids = @($running | ForEach-Object { $_.ProcessId })
+        $description = ($running | ForEach-Object {
+            "$($_.Name)#$($_.ProcessId)"
+        }) -join ', '
+        if ($NoWait) {
+            $script:slotMutex.ReleaseMutex()
+            $script:slotOwned = $false
+            throw "Quartus processes are already active ($description); -NoWait refuses to queue."
+        }
+        Write-SlotRecord "waiting-for-external-quartus" (@($PID) + $pids)
+        Write-Host "Quartus is active outside the wrapper ($description); waiting 30 seconds."
+        $script:slotMutex.ReleaseMutex()
+        $script:slotOwned = $false
+        Start-Sleep -Seconds 30
+        while (-not $script:slotOwned) {
+            try {
+                $script:slotOwned = $script:slotMutex.WaitOne(1000)
+            }
+            catch [Threading.AbandonedMutexException] {
+                $script:slotOwned = $true
+            }
+        }
+    }
+}
 
 function Assert-BuildPolicy {
     $qsf = Get-Content -LiteralPath $qsfPath -Raw
+    $qipPath = Join-Path $repoRoot 'files.qip'
+    $qip = Get-Content -LiteralPath $qipPath -Raw
     # Fast Fit is pinned because Standard Fit CRASHES quartus_fit on this
     # install (Error 293007, peak virtual memory 4649 MB, with 35 GB of host
     # RAM free) - see the note in Arcade-SSV.qsf. It is a toolchain ceiling,
@@ -56,6 +168,9 @@ function Assert-BuildPolicy {
     if (([regex]::Matches($qsf, '(?m)^source\s+files\.qip\s*$')).Count -ne 1) {
         throw 'Arcade-SSV.qsf must source files.qip exactly once.'
     }
+    if (-not $qip.Contains('rtl/video/ssv_mlab240_sdp.sv')) {
+        throw 'files.qip must include the explicit MLAB wrapper for line_page_starts.'
+    }
     if ($qsf -match '(?m)^set_global_assignment -name (SYSTEMVERILOG_FILE|VERILOG_FILE|QIP_FILE|SDC_FILE)\b') {
         throw 'User source declarations belong in files.qip, not Arcade-SSV.qsf.'
     }
@@ -78,65 +193,39 @@ function Assert-BuildPolicy {
     }
 }
 
+function Set-QsfSeed([int]$Value) {
+    if ($Value -lt 0) {
+        throw "SEED must be non-negative, got $Value."
+    }
+    $qsf = Get-Content -LiteralPath $qsfPath -Raw
+    $seedMatches = [regex]::Matches(
+        $qsf,
+        '(?m)^set_global_assignment -name SEED \d+[ \t]*(?<eol>\r?\n|$)'
+    )
+    if ($seedMatches.Count -ne 1) {
+        throw 'Arcade-SSV.qsf does not contain exactly one replaceable SEED assignment.'
+    }
+    $seedMatch = $seedMatches[0]
+    $replacement = "set_global_assignment -name SEED $Value$($seedMatch.Groups['eol'].Value)"
+    $updated = $qsf.Substring(0, $seedMatch.Index) + $replacement +
+        $qsf.Substring($seedMatch.Index + $seedMatch.Length)
+    [IO.File]::WriteAllText($qsfPath, $updated, [Text.UTF8Encoding]::new($false))
+    Write-Host "Set Arcade-SSV.qsf SEED to $Value while holding the global Quartus slot."
+}
+
 Push-Location $repoRoot
 try {
     Assert-BuildPolicy
+    Wait-QuartusSlot
 
-    # Concurrency guard, counted by PROJECT rather than by process.
-    #
-    # One build spawns several quartus executables (quartus_sh plus quartus_map
-    # or quartus_fit), so counting processes counts builds several times over.
-    # The old check refused whenever any quartus process existed anywhere on the
-    # machine, which meant an unrelated project compiling blocked this one -- on
-    # 29 Jul 2026 that cost four separate SSV builds their slot.
-    #
-    # Two concurrent builds are fine on this hardware: a single-processor fit
-    # uses about 2-3.5 GB and one core of 24. What is NOT fine is two builds on
-    # the SAME project, which corrupts the shared compilation database, so that
-    # case is always refused regardless of the limit.
-    $maxConcurrentBuilds = 2
-
-    $running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'quartus%'" -ErrorAction SilentlyContinue)
-    $projects = @($running | ForEach-Object {
-        # Project name is the -c argument, else the first NON-FLAG argument
-        # after the executable.
-        #
-        # It is NOT "the last bare token". quartus_map is invoked as
-        #   quartus_map.exe "Arcade-SegaModel1" --read_settings_files=on --write_settings_files=off
-        # with the project FIRST, so a trailing-token match returns "off" --
-        # observed 31 Jul 2026, where a real second build reported as project
-        # "off". The count happened to be right that time, but two different
-        # projects both ending in "=off" collapse to ONE entry and let a THIRD
-        # build start. That is precisely the case this cap exists to prevent, so
-        # the parser must name the project correctly, not merely often.
-        if ($_.CommandLine -match '-c\s+"?([A-Za-z0-9_.\-]+)"?') { $Matches[1] }
-        else {
-            # Drop the executable, then keep arguments that are neither flags
-            # (-x / --x) nor key=value settings. The project is the last such
-            # token, which is correct for all three observed invocations:
-            #   quartus_sh.exe --flow compile Apache3          -> Apache3
-            #   quartus_map.exe "Proj" --read_settings_files=on -> Proj
-            #   quartus_fit.exe ...=off "Proj" -c Proj         -> (-c wins)
-            # @() is required: with a single match the pipeline yields a STRING,
-            # and $toks[-1] then indexes its last CHARACTER -- "Arcade-SegaModel1"
-            # parses as the project "1", which collapses distinct projects and
-            # under-counts. Observed 31 Jul 2026 while fixing the trailing-token
-            # bug above.
-            $toks = @(($_.CommandLine -split '\s+') | Select-Object -Skip 1 |
-                      ForEach-Object { $_.Trim('"') } |
-                      Where-Object { $_ -and $_ -notmatch '^-' -and $_ -notmatch '=' })
-            if ($toks.Count) { $toks[-1] }
+    if ($null -ne $Seed) {
+        Set-QsfSeed ([int]$Seed)
+    }
+    if ($SetSeedOnly) {
+        if ($null -eq $Seed) {
+            throw '-SetSeedOnly requires -Seed.'
         }
-    } | Where-Object { $_ } | Sort-Object -Unique)
-
-    if ($projects -contains $project) {
-        throw "This project ($project) is already being compiled. Two builds sharing one compilation database will corrupt it."
-    }
-    if ($projects.Count -ge $maxConcurrentBuilds) {
-        throw "$($projects.Count) builds already running ($($projects -join ', ')); limit is $maxConcurrentBuilds. Wait for one to finish."
-    }
-    if ($projects.Count -gt 0) {
-        Write-Host "note: building alongside $($projects -join ', ')"
+        return
     }
 
     $map = Join-Path $quartusBin "quartus_map.exe"
@@ -207,5 +296,20 @@ try {
     }
 }
 finally {
+    if ($slotOwned -and $slotMutex) {
+        try {
+            Write-SlotRecord "releasing"
+            if (Test-Path -LiteralPath $slotPath -PathType Leaf) {
+                Remove-Item -LiteralPath $slotPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            $slotMutex.ReleaseMutex()
+            $slotOwned = $false
+        }
+    }
+    if ($slotMutex) {
+        $slotMutex.Dispose()
+    }
     Pop-Location
 }

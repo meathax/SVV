@@ -135,9 +135,16 @@ $routeRegion = if ($routeRegionMatch.Success) {
     "$($routeRegionMatch.Groups[1].Value) to $($routeRegionMatch.Groups[2].Value)"
 }
 $congestionFailure = $fitReport -match 'routing phase terminated due to routing congestion'
+# The cached renderer's 240x180 line-page metadata must stay in MLABs.  The
+# previous inferred array carried an MLAB ramstyle request but Quartus placed
+# it in five M10Ks; with only fourteen M10Ks free that is a release blocker.
+# Read the fitter's typed RAM table rather than trusting RTL attributes.
+$linePageStartsPlacement = Match-Value $fitReport '(?m)^;.*line_page_starts.*;\s*(MLAB|M10K block)\s*;'
+$linePageStartsPlacementMet = $fitIsCurrent -and $linePageStartsPlacement -eq 'MLAB'
 
 $ready = $mapIsCurrent -and $fitIsCurrent -and $staIsCurrent -and
-    $timingMet -and $constraintsMet -and $rbfIsCurrent
+    $timingMet -and $constraintsMet -and $rbfIsCurrent -and
+    $linePageStartsPlacementMet
 $result = [ordered]@{
     ProjectRoot = $ProjectRoot
     Revision = $Revision
@@ -159,6 +166,8 @@ $result = [ordered]@{
     RoutePeak = $routePeak
     RoutePeakRegion = $routeRegion
     CongestionFailure = $congestionFailure
+    LinePageStartsPlacement = $linePageStartsPlacement
+    LinePageStartsPlacementMet = $linePageStartsPlacementMet
     WorstTimingType = if ($worstTiming) { $worstTiming.Type } else { $null }
     WorstSlackNs = if ($worstTiming) { $worstTiming.Slack } else { $null }
     WorstPathTNSNs = if ($worstTiming) { $worstTiming.TNS } else { $null }
@@ -188,6 +197,7 @@ else {
     if ($routeAverage -or $routePeak) {
         Write-Host "  Routing:    average $routeAverage; peak $routePeak; $routeRegion"
     }
+    Write-Host "  Placement:  line_page_starts=$linePageStartsPlacement; met=$linePageStartsPlacementMet"
     if ($staIsCurrent) {
         Write-Host "  Timing:     worst $($result.WorstSlackNs) ns; TNS $($result.WorstPathTNSNs) ns; met=$timingMet; current=True"
         Write-Host "  Constraints: unconstrained clocks $unconstrainedClocks; met=$constraintsMet"

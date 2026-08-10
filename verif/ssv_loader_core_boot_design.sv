@@ -8,6 +8,7 @@
 `include "../rtl/video/ssv_gfx_row_fetch.sv"
 `include "../rtl/video/ssv_gfx_row_decode.sv"
 `include "../rtl/video/ssv_bg_renderer.sv"
+`include "../rtl/video/ssv_mlab240_sdp.sv"
 `include "../rtl/video/ssv_cached_sprite_renderer.sv"
 `include "../rtl/audio/ssv_mlab32_sdp.sv"
 `include "../rtl/audio/ssv_es5506_regs.sv"

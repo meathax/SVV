@@ -213,15 +213,32 @@ logic [LINE_COUNT_WIDTH-1:0] line_count_q;
 // comment above LINE_POOL_ENTRIES) -- reverted 2026-08-05.
 (* ramstyle = "M10K, no_rw_check" *)
 logic [LINE_ENTRY_LOW_WIDTH-1:0] line_entries [0:LINE_POOL_ENTRIES-1];
-// Page-boundary metadata is read and written with the same single-address
-// schedule as line_counts. Keep it in MLAB: it is frame-local bookkeeping,
-// not a throughput memory, and spending M10Ks here competes directly with the
-// descriptor and pooled-entry tables.
-(* ramstyle = "MLAB, no_rw_check" *)
-logic [LINE_PAGE_META_WIDTH-1:0] line_page_starts [0:239];
+// Page-boundary metadata is frame-local bookkeeping, not a throughput memory.
+// The inferred 240x180 array ignored ramstyle="MLAB" in Quartus 17 and cost
+// five M10Ks in the last fit. Use the explicit MLAB-shaped wrapper so the
+// placement request is represented in the netlist rather than left to the
+// fragile inference heuristic. Its read/write schedule is still one address
+// per cycle, exactly like the old array.
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_mem_q;
+logic [7:0] line_page_ram_wr_addr;
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_ram_wr_data;
+logic line_page_ram_we;
+ssv_mlab240_sdp #(.WIDTH(LINE_PAGE_META_WIDTH)) line_page_starts_ram (
+    .clk(clk),
+    .wr_addr(line_page_ram_wr_addr),
+    .we(line_page_ram_we),
+    .wdata(line_page_ram_wr_data),
+    .rd_addr(line_count_addr),
+    .q(line_page_mem_q)
+);
+// The old line_page_q register was cleared by reset. The MLAB array itself is
+// intentionally uninitialized and is rebuilt before use, so mask its output
+// during reset to preserve that observable reset value without adding a reset
+// pin to the memory primitive.
+logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
+assign line_page_q = rst ? '0 : line_page_mem_q;
 (* ramstyle = "MLAB, no_rw_check" *)
 logic [LINE_POOL_ADDR_WIDTH-1:0] line_bases [0:239];
-logic [LINE_PAGE_META_WIDTH-1:0] line_page_q;
 logic [LINE_POOL_ADDR_WIDTH-1:0] line_base_q;
 logic [LINE_POOL_COUNT_WIDTH-1:0] line_pool_alloc;
 logic [CACHE_ADDR_WIDTH:0] cache_scan_index;
@@ -751,6 +768,27 @@ always_comb begin
     end
 end
 
+// Single write port for the explicit MLAB. These are the same three writes
+// that previously targeted line_page_starts[] in the renderer's state block.
+always_comb begin
+    line_page_ram_we = 1'b0;
+    line_page_ram_wr_addr = line_count_addr;
+    line_page_ram_wr_data = '0;
+    if (state == BUILD_CLEAR_LINES) begin
+        line_page_ram_we = 1'b1;
+        line_page_ram_wr_data = {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+    end
+    else if (state == BUILD_PREFIX_WRITE) begin
+        line_page_ram_we = 1'b1;
+        line_page_ram_wr_data = {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+    end
+    else if ((state == BUILD_REINDEX_BUCKET_WRITE) && line_page_write) begin
+        line_page_ram_we = 1'b1;
+        line_page_ram_wr_addr = bucket_y;
+        line_page_ram_wr_data = line_page_write_data;
+    end
+end
+
 wire [LINE_POOL_SUM_WIDTH-1:0] reindex_pool_addr =
     {{(LINE_POOL_SUM_WIDTH-LINE_POOL_ADDR_WIDTH){1'b0}},
      line_bases[bucket_y]} +
@@ -790,19 +828,15 @@ always_ff @(posedge clk) begin
         line_pool_alloc <= '0;
         line_entry_q <= '0;
         line_entry_page_q <= '0;
-        line_page_q <= '0;
         cache_read_addr_r <= '0;
     end
     else begin
         line_count_q <= line_counts[line_count_addr];
         line_base_q <= line_bases[line_count_addr];
-        line_page_q <= line_page_starts[line_count_addr];
         if ((state == IDLE) && (cache_start || cache_pending))
             line_pool_alloc <= '0;
         if (state == BUILD_CLEAR_LINES) begin
             line_counts[line_count_addr] <= '0;
-            line_page_starts[line_count_addr] <=
-                {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
         end
         else if (state == BUILD_BUCKET_WRITE) begin
             if (line_count_q < LINE_SLOTS_VALUE)
@@ -812,8 +846,6 @@ always_ff @(posedge clk) begin
             line_bases[line_count_addr] <= line_pool_alloc[
                 LINE_POOL_ADDR_WIDTH-1:0];
             line_counts[line_count_addr] <= '0;
-            line_page_starts[line_count_addr] <=
-                {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
             line_pool_alloc <= line_pool_alloc + line_count_q;
         end
         else if ((state == BUILD_REINDEX_BUCKET_WRITE) &&
@@ -822,8 +854,6 @@ always_ff @(posedge clk) begin
             line_counts[bucket_y] <= line_count_q + 1'd1;
             line_entries[reindex_pool_addr[LINE_POOL_ADDR_WIDTH-1:0]] <=
                 cache_scan_index[LINE_ENTRY_LOW_WIDTH-1:0];
-            if (line_page_write)
-                line_page_starts[bucket_y] <= line_page_write_data;
         end
 
         if ((state == RENDER_LINE_READ) ||

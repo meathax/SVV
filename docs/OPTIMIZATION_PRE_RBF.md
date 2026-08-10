@@ -1,5 +1,30 @@
 # Pre-RBF optimization notes
 
+## RTL placement and build-process audit (10 Aug 2026, no Quartus/RBF)
+
+- The latest fit report is stale against the current source, but its resource
+  table exposed the placement miss: `line_page_starts` was requested as MLAB
+  and nevertheless consumed five M10Ks (`240 x 180` bits). With only 14 M10Ks
+  free in that fit, the attribute was not evidence of the intended placement.
+- Replaced the inferred `line_page_starts` array with the explicit
+  `ssv_mlab240_sdp` one-write/one-read MLAB wrapper, while preserving the
+  renderer's registered-read timing and reset masking. The Quartus source
+  manifest and all direct simulation manifests now include the wrapper.
+- `tools/report-quartus.ps1` now reads the fitter RAM-type table and requires
+  `line_page_starts=MLAB` before reporting `ReadyToDeploy`. A fresh map/fit is
+  required to measure the actual M10K reduction; no saving is claimed yet.
+- `tools/build-ssv.ps1` now owns a machine-wide named Quartus mutex and writes
+  a temporary owner record with the project, revision and process IDs. It
+  queues behind any existing Quartus process (or fails fast with `-NoWait`),
+  preventing concurrent projects from corrupting the shared toolchain state.
+- `tools/seed-sweep.ps1` routes both per-seed QSF edits and the final seed pin
+  through that same owner path, so a queued sweep cannot rewrite the project
+  while another wrapper is between slot acquisition and Quartus launch.
+
+Focused verification: the standalone MLAB wrapper test passed and Slang parsed
+the cached-renderer top with zero errors or warnings. A full visible-SDL
+Verilator run and Quartus map/fit remain pending; no final RBF was built.
+
 ## Exact RTL resource pass (10 Aug 2026, no Quartus/RBF)
 
 - V60 MUL/MULU now uses the existing 32-cycle magnitude shift-add result for
@@ -226,11 +251,10 @@ scarce.
 
 ## Remaining levers, ranked
 
-0. **Check the two M10K predictions from the 28 Jul evening pass** in the next
-   Fitter RAM Summary: `line_page_starts` should leave the M10K column for
-   MLAB (−2), and `descriptor_cache_lo` + `descriptor_cache_hi` should total
-   under 22 blocks (−4 if they land on 512×20). Expected total: 532 − 6 = **526**.
-   Both are behaviourally verified already; only the packing is unproven.
+0. **Confirm the explicit MLAB placement** in the next Fitter RAM Summary:
+   `line_page_starts` must leave the M10K column for MLAB. The old inferred
+   array was measured at five M10Ks; the replacement's actual savings remain
+   unmeasured until a current fit.
 1. **Re-fit and re-STA.** Everything above is uncompiled. Nothing here counts
    until `report-quartus.ps1 -RequireReady` is true. Two specific things to
    check in that report rather than assume:
@@ -263,7 +287,8 @@ scarce.
    coordinate maths. Needs full frame-CRC re-validation and freezes
    `flip_control` / `local_control` at vblank.
 6. **Seed sweep.** For a sub-nanosecond miss, sweeping `SEED` is cheaper than
-   any RTL change. Currently 1.
+   any RTL change. The current QSF seed is 2; `tools/seed-sweep.ps1` routes
+   each edit through the global Quartus slot.
 7. **Fitter effort escalation, held in reserve.** If the STA after the `ascal`
    fix still misses, `FITTER_EFFORT "STANDARD FIT"` +
    `ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM` are the next lever — the design
@@ -274,16 +299,16 @@ scarce.
 
 ### Running the build on this host
 
-`tools/build-ssv.ps1` defaults `-QuartusRoot` to `C:\intelFPGA_lite\17.1`,
-which does not exist here. Quartus 17 is installed at **`D:\Q17`**:
+`tools/build-ssv.ps1` defaults `-QuartusRoot` to **`D:\Q17`**:
 
 ```
 pwsh tools/build-ssv.ps1 -QuartusRoot D:\Q17
 ```
 
-The script also refuses to start while any `quartus*` process is running. That
-guard is correct — this host shares the toolchain with other cores, and the QSF
-pins `NUM_PARALLEL_PROCESSORS 1` because of an Access Violation at 4-way.
+The script owns a machine-wide named slot, queues behind any `quartus*` process
+started outside the wrapper, and records the owner in the system temp folder.
+Use `-NoWait` only for a deliberate fail-fast probe. The QSF pins
+`NUM_PARALLEL_PROCESSORS 1` because of an Access Violation at 4-way.
 
 ### Measured dead ends (do not retry)
 

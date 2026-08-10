@@ -56,6 +56,7 @@ $coreSources = @(
     'rtl/video/ssv_gfx_row_fetch.sv',
     'rtl/video/ssv_gfx_row_decode.sv',
     'rtl/video/ssv_bg_renderer.sv',
+    'rtl/video/ssv_mlab240_sdp.sv',
     'rtl/video/ssv_cached_sprite_renderer.sv',
     'rtl/audio/ssv_mlab32_sdp.sv',
     'rtl/audio/ssv_es5506_regs.sv',

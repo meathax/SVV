@@ -1,114 +1,159 @@
 # SSV MiSTer FPGA Core
 
-Work-in-progress MiSTer FPGA implementation of the Sammy, Seta, and Visco
-(SSV) arcade platform. One universal `Arcade-SSV.rbf` contains all shared and optional
-hardware paths; each MRA selects its board geometry at runtime.
+The SSV core emulates the Sammy, Seta, and Visco (SSV) arcade PCB family on
+MiSTer. The FPGA target is the MiSTer DE10-Nano/Cyclone V
+`5CSEBA6U23I7`; the board being emulated is the SSV arcade hardware used by
+the supported games below.
 
-## Legal notice
+This project produces one universal `Arcade-SSV.rbf`. Each MRA loads a
+descriptor before the game ROM data so the shared core can select the correct
+ROM geometry, memory windows, video geometry, watchdog, audio banks, and
+optional ST010 hardware at runtime. There are no per-game Quartus builds.
 
-No copyrighted game ROMs are included. Place locally owned ROM archives under
-`rom/`; that directory is deliberately ignored by Git.
+The core is still a work in progress. The RTL has focused simulation and MAME
+differential evidence, but the complete eight-game qualification matrix and
+current physical MiSTer validation are not yet finished.
 
-## Current status
+## OSD features
 
-Full audit and sim-first path to attract/gameplay:
-[`docs/DYNAGEAR_CORE_AUDIT.md`](docs/DYNAGEAR_CORE_AUDIT.md),
-[`docs/DYNAGEAR_GAMEPLAY_PLAN.md`](docs/DYNAGEAR_GAMEPLAY_PLAN.md).
-The pinned MAME contract and current deterministic baseline are recorded in
-[`docs/DYNAGEAR_REFERENCE_CONTRACT.md`](docs/DYNAGEAR_REFERENCE_CONTRACT.md).
-The single-profile set list and hardware-feature matrix are recorded in
-[`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md).
+The core exposes the following MiSTer OSD features:
 
-**Multi-game, stated plainly (2026-08-09):** all eight qualified sets load
-through one runtime descriptor and one shared source profile. The ST010 used by
-Drift Out '94, Storm Blade and Twin Eagle II is always present in the RBF and
-parks when `cfg.has_st010` is clear; there is no per-game compile switch. Every
-set now has bounded real-ROM execution evidence, but none has completed the
-current 360-frame Verilator screenshot plus matched-gameplay release gate. See
-[`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md) for the per-game boundary.
+- Aspect ratio: Original, Full Screen
+- Scaling: Normal, Integer (Horizontal), V-Integer (Vertical), HV-Integer
+- Rotation: Horizontal, Vertical (CW), Vertical (CCW), Horizontal (Flipped)
+- Video FX: None, Scanlines 25%, Scanlines 50%, Scanlines 75%
+- Stereo Mix: None, 25%, 50%, 100%
+- Service Mode
+- Reset
+- CRT Adjust: CRT Adjust, H-Size, H-Position, and V-Shift
+- Six game buttons, Test, Service, Start, and Coin inputs
+- Autosave Hiscores plumbing where the selected MRA provides a hiscore
+  configuration
 
-The synthesizable Dyna Gear bring-up now includes:
+Game-specific DIP switches are supplied by each MRA. Depending on the game,
+these include coinage, flip screen, demo sounds, difficulty, lives, free play,
+service mode, rapid fire, subtitles, and other original board settings.
 
-- MiSTer shell, PLL, SDRAM controller, and V60 CPU ported from the nearby
-  System 32 core.
-- Dyna Gear ROM stream layout and MRA.
-- SSV CPU map, board RAM, input ports, interrupt controller, and raster timing.
-- MAME-derived palette, automatic background, normal sprites, tilemap sprites,
-  depth modes, flips, shadows, and descriptor draw order.
-- Vblank descriptor caching with per-scanline M10K buckets.
-- A four-bank scanline compositor and packed two-beat graphics-row fetch.
-- A 60-million-clock real-ROM Verilator run that reaches `0x00f10575`, caches
-  1,277 descriptors, renders visible pixels, and reports zero background or
-  object scanline overruns.
-- Historical Quartus reports are retained for resource comparison only. They
-  predate the mandatory universal ST010 integration and are not release proof.
-- A synthesizable ES5506 host interface and complete low/high/test register
-  pages, validated against the Dyna Gear MAME trace with a self-checking
-  Verilator test.
-- A deliberately small video chain: `rtl/ssv_scandoubler.sv` (a plain 2x line
-  doubler for 31 kHz monitors) and `video_freak` (integer-scaling modes).
-  Scanline FX come from `sys_top`, which applies them itself from `VGA_SL`.
-  `arcade_video` was tried and removed: its scandoubler carries HQ2x line
-  stores and it pulls in `gamma_corr`, together about 13 M10K, which this
-  design cannot afford. Neither HQ2x nor gamma is missed on an arcade board.
-- High score save/load plumbing via a `.nvm` dump, through the second port of the
-  SSV main RAM. **Not currently reachable:** `tools/gen_ssv_mras.py` emits no
-  hiscore.dat entry, so no MRA carries one, `hs_configured` stays 0 and the
-  "Autosave Hiscores" OSD line stays hidden (`Arcade-SSV.sv:211`). The module is
-  wired; the MRA side is missing.
-- DIP switches driven from the MRA's `<switches>` block instead of hand-mapped
-  OSD options, so the bytes the game reads at `$210002`/`$210004` are the ones
-  the MRA states.
+## PCB Accuracy
 
-Sim gameplay gates (attract frame-0 CRC, soak, coin/start schedule, input
-matrix, ES5506 PCM peak) are wired through `verif/run_gameplay_sims.sh`.
-Full attract-loop CRC match and physical MiSTer play testing remain open, so
-this is not yet a playable release.
+This section is intentionally limited to core behavior supported by primary
+hardware evidence: legible PCB or cartridge photographs and manufacturer
+documentation. Simulation results, MAME-derived behavior, and unmeasured
+claims are documented elsewhere and are not presented as PCB accuracy here.
 
-## Visual Verilator checkpoints
+| Area | Core behavior supported by the evidence | Evidence |
+| --- | --- | --- |
+| Main CPU and program ROM interface | V60 clocked at 16 MHz from the board clock scheme; 16-bit program data split into low/high byte ROMs | 48.000 MHz crystal and `PRL`/`PRH` positions in the real STA-0001B/SAM-5127 photographs; NEC V60 documentation; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
+| Clock sources | 42.9545 MHz video crystal divided by six for the approximately 7.159 MHz pixel clock; 48.000 MHz crystal divided by three for the 16 MHz CPU domain | Real STA-0001B motherboard photograph and the documented clock derivation in [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
+| Dyna Gear cartridge memory complement | Four-bank graphics layout, `16M-MASK` device capacity, and the 12 MiB graphics plus 4 MiB sample complement used by the core | Real SAM-5127 cartridge photographs, including bank labels, socket population, and device markings; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
+| DIP banks | Two 8-position DIP banks represented by the core's descriptor and input model | Real STA-0001B motherboard photograph; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
+| ES5506 / OTTO audio device | ES5506 host interface and 32-voice model with separate sample memory, envelopes, looping, reverse playback, and compressed samples | ES5506/OTTO specification plus the real-board photograph identifying the Ensoniq device; [`docs/hardware/SSV_SILICON.md`](docs/hardware/SSV_SILICON.md) |
 
-The persistent checkpointable visual launcher is:
+## Supported games
 
-```powershell
-# Interactive: F5 or Ctrl+S saves on the next completed native frame.
-.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear -Detached
+These are the eight qualified parent sets in
+[`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other SSV entries
+present in MAME are not currently claimed as supported by this core.
 
-# Gameplay-proof chunks include an immutable RTL-owned input journal.
-.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear `
-    -Checkpoint .\sim_output\checkpoints\dynagear-gameplay.vltsv `
-    -InputJournal .\sim_output\checkpoints\dynagear-gameplay.inputs `
-    -ProofMode gameplay -SaveFrame 50
-.\tools\run_ssv_checkpoint_visual.ps1 -Set dynagear `
-    -Checkpoint .\sim_output\checkpoints\dynagear-gameplay.vltsv `
-    -Restore .\sim_output\checkpoints\dynagear-gameplay.vltsv `
-    -InputJournal .\sim_output\checkpoints\dynagear-gameplay.inputs `
-    -ProofMode gameplay -SaveFrame 100
+| Game | Set name | Runtime hardware notes |
+| --- | --- | --- |
+| Dyna Gear | `dynagear` | 1 MiB program ROM, 16 MiB graphics, extra RAM, read-kick watchdog |
+| Change Air Blade (Japan) | `cairblad` | 2 MiB program ROM, 32 MiB graphics, identity tile mapping, 64 KiB NVRAM |
+| Vasara | `vasara` | 4 MiB program ROM, 32 MiB graphics, two ES5506 banks, write-kick watchdog |
+| Vasara 2 (set 1) | `vasara2` | 4 MiB program ROM, 32 MiB graphics, two ES5506 banks, write-kick watchdog |
+| Drift Out '94 - The Hard Order (Japan) | `drifto94` | ST010, 4 MiB program ROM, 32 MiB graphics, 2 KiB NVRAM |
+| Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
+| Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
+| Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
+
+## **Hardware emulated**
+
+| Hardware | Function |
+| --- | --- |
+| NEC V60/uPD70616 | Main SSV arcade CPU and 16-bit external bus |
+| SSV video hardware | Background/tilemap rendering, sprite/object lists, row scroll, priority, shadows, palette, and native raster timing |
+| SSV memory and control logic | Work/sprite/palette RAM, XRAM/NVRAM windows, interrupts, watchdog, coin/service/test inputs, and DIP switches |
+| Ensoniq ES5506 (OTTO) | Host registers, 32-voice sample playback, interpolation, filters, envelopes, stereo mixing, and IRQ status |
+| NEC uPD96050 / ST010 | Optional protection/DSP daughterboard used by Drift Out '94, Storm Blade, and Twin Eagle II |
+| MiSTer platform interface | MiSTer HPS/OSD, SDRAM, HDMI/VGA video, audio output, rotation, scaling, scanlines, and CRT adjustment |
+
+## Credits
+
+- **meathax** — original SSV RTL, universal descriptor/profile integration,
+  MRA generation, verification, and MiSTer integration.
+- **Sega System 32 MiSTer core contributors** — source base for the V60,
+  SDRAM controller, PLL, dual-port RAM helpers, and related verification
+  infrastructure. See [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
+- **MiSTer-devel and MiSTer framework contributors** — MiSTer shell, HPS/OSD,
+  video, audio, and platform integration from
+  [Template_MiSTer](https://github.com/MiSTer-devel/Template_MiSTer).
+- **MAMEdev and MAME contributors** — SSV driver/video behavior, V60 behavior,
+  uPD96050/ST010 behavior, ES5506 behavior, ROM definitions, controls, DIP
+  switches, and board-level reference contracts in
+  [MAME](https://github.com/mamedev/mame). MAME source is used as a behavioral
+  reference; it is not copied into the synthesizable core.
+- **Farfetch'd and R. Belmont** — MAME V60 behavioral reference credited by the
+  imported V60 source.
+- **byuu and MAME contributors** — portable uPD7725/uPD96050 behavioral
+  reference used for the ST010 implementation.
+- **Ensoniq** — *OTTO Specification Rev. 2.3 (ES5506)*, used as the primary
+  ES5506 hardware reference: [manual](https://gjcp.net/pdf/es5506.pdf).
+- **tildearrow and Furnace contributors** — `vgsound_emu` ES550x behavioral
+  cross-check: [Furnace source](https://github.com/tildearrow/furnace/tree/master/extern/vgsound_emu-modified/vgsound_emu/src/es550x).
+- **visions85 / JTSFTM contributors** — partial ES5506 RTL inspected as an
+  FPGA implementation reference: [sftm5506.v](https://github.com/visions85/sftm/blob/main/cores/sftm/hdl/sftm5506.v).
+- **Umberto Parisi (rmonic79), with help from Andrea Bogazzi (@asturur)** —
+  CRT Adjust module used by the OSD integration.
+- **Alan Steremberg and Jim Gregory** — Hiscores_MiSTer module used for the
+  hiscore plumbing: [Hiscores_MiSTer](https://github.com/JimmyStones/Hiscores_MiSTer).
+
+## License
+
+The original SSV RTL and integration are released under the
+[GNU General Public License version 3 or later](LICENSE). Third-party files
+retain their own license notices; see the source headers and
+[`docs/PROVENANCE.md`](docs/PROVENANCE.md). MAME and other references are
+credited above and are not a license to redistribute copyrighted game data.
+
+No copyrighted game ROMs are included. Use only ROMs that you legally own or
+are otherwise authorized to use.
+
+## How to install
+
+### Manual installation
+
+1. Download the core RBF and the MRA file or files you want to use.
+2. Copy the RBF to MiSTer at `/media/fat/_Arcade/cores/`.
+3. Copy the matching `.mra` files to `/media/fat/_Arcade/`.
+4. Put your legally obtained game ROM ZIP in the appropriate MiSTer arcade/MAME
+   ROM folder, then launch the game from the MiSTer Arcade menu.
+
+The MRA selects the universal `Arcade-SSV` core and supplies the per-game
+descriptor before the ROM stream.
+
+### Automatic installation with Downloader
+
+Add this entry to your `downloader.ini`, then run **Update All** to download
+all of the Meatcores automatically:
+
+```ini
+[meathax/meatcores]
+db_url = https://raw.githubusercontent.com/meathax/meatcores/db/downloader_meathax_meatcores.zip
 ```
 
-This is a separate external-clock `--no-timing --savable` build. It writes a
-binary `.vltsv` only after a completed native framebuffer boundary and closes
-the visible process after an automated chunk. The legacy timing visual build
-still reports F5 as unavailable. A checkpoint is simulator state, not gameplay
-proof; final qualification still requires the current Verilator gameplay gate
-and matched reference evidence. Gameplay checkpoints carry a versioned sidecar
-binding the archive, build, media, scenario, proof target, and canonical input
-journal; a pre-journal checkpoint cannot be promoted into a matched proof.
+## Development and verification
 
-## Build
+- [`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md) — supported-set matrix and
+  current qualification evidence.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — shared hardware and memory
+  architecture.
+- [`docs/implementation-status.md`](docs/implementation-status.md) — detailed
+  implementation and verification status.
+- [`docs/ES5506_RESEARCH.md`](docs/ES5506_RESEARCH.md) — ES5506 sources,
+  measurements, and implementation notes.
 
-Quartus 17 is required. To run analysis and synthesis only:
-
-```powershell
-./tools/build-ssv.ps1 -MapOnly
-```
-
-For a complete compile that replaces the single bitstream at `releases/Arcade-SSV.rbf`:
+For the local profile/media audit:
 
 ```powershell
-./tools/build-ssv.ps1
+python tools/verify_ssv_universal_profile.py --require-roms
 ```
-
-MAME is the behavioral reference. Verilator tests live under `verif/`; GTKWave
-is used for waveform inspection. See `docs/MAME_REFERENCE.md` and
-`docs/ARCHITECTURE.md` for the current board model, and
-`docs/ES5506_RESEARCH.md` for the audio sources, measurements, and roadmap.

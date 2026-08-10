@@ -26,6 +26,7 @@ CORE_FILES=(
   rtl/video/ssv_gfx_row_fetch.sv
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
+  rtl/video/ssv_mlab240_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
  
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
@@ -50,6 +51,7 @@ SSV_CORE_FILES=(
   rtl/video/ssv_gfx_row_fetch.sv
   rtl/video/ssv_gfx_row_decode.sv
   rtl/video/ssv_bg_renderer.sv
+  rtl/video/ssv_mlab240_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
  
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
@@ -126,6 +128,7 @@ run_one tb_ssv_tilemap_page \
 run_one tb_ssv_cached_sprite_renderer \
   rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
   rtl/video/ssv_gfx_row_decode.sv \
+  rtl/video/ssv_mlab240_sdp.sv \
   rtl/video/ssv_cached_sprite_renderer.sv \
   verif/tb_ssv_cached_sprite_renderer.sv
 

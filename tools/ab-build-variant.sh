@@ -42,7 +42,7 @@ CORE=(
   rtl/common/s32_big_dpram.sv
   rtl/video/ssv_palette_ram.sv rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv rtl/video/ssv_gfx_row_decode.sv
-  "$BG" "$OBJ"
+  "$BG" rtl/video/ssv_mlab240_sdp.sv "$OBJ"
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv

@@ -29,15 +29,6 @@ function Log([string]$m) {
     $line | Tee-Object -FilePath $log -Append
 }
 
-function Wait-Toolchain {
-    $clear = 0
-    while ($clear -lt 4) {
-        if (Get-Process quartus* -ErrorAction SilentlyContinue) { $clear = 0 }
-        else { $clear++ }
-        Start-Sleep -Seconds 30
-    }
-}
-
 # Worst setup slack across every corner, for the clock we care about.
 function Get-HdmiSlack {
     $sta = Join-Path $repo "output_files\Arcade-SSV.sta.summary"
@@ -55,31 +46,31 @@ function Get-HdmiSlack {
     return $worst
 }
 
+function Set-SeedUnderSlot([int]$Value) {
+    Push-Location $repo
+    try {
+        $out = & pwsh -NoProfile -File "$repo\tools\build-ssv.ps1" `
+            -QuartusRoot $QuartusRoot -SetSeedOnly -Seed $Value 2>&1
+        $code = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    $out | ForEach-Object { Log $_ }
+    if ($code -ne 0) {
+        throw "Could not set SEED $Value through the global Quartus slot."
+    }
+}
+
 $original = (Select-String -Path $qsf -Pattern '^set_global_assignment -name SEED (\d+)').Matches.Groups[1].Value
 Log "sweeping seeds: $($SeedList -join ', ')  (current SEED $original)"
 $results = @()
 
 foreach ($s in $SeedList) {
-    (Get-Content $qsf -Raw) -replace '(?m)^set_global_assignment -name SEED \d+',
-        "set_global_assignment -name SEED $s" | Set-Content $qsf -NoNewline
-    Log "SEED $s : waiting for toolchain"
-    Wait-Toolchain
-    Log "SEED $s : compiling"
+    Log "SEED $s : queued through the global Quartus slot"
     Push-Location $repo
     try {
-        $out = & pwsh -NoProfile -File "$repo\tools\build-ssv.ps1" -QuartusRoot $QuartusRoot 2>&1
+        $out = & pwsh -NoProfile -File "$repo\tools\build-ssv.ps1" -QuartusRoot $QuartusRoot -Seed $s 2>&1
         $code = $LASTEXITCODE
     } finally { Pop-Location }
-
-    if ($out -match 'Another Quartus process is active') {
-        Log "SEED $s : lost the toolchain race, retrying once"
-        Wait-Toolchain
-        Push-Location $repo
-        try {
-            $out = & pwsh -NoProfile -File "$repo\tools\build-ssv.ps1" -QuartusRoot $QuartusRoot 2>&1
-            $code = $LASTEXITCODE
-        } finally { Pop-Location }
-    }
 
     $slack = Get-HdmiSlack
     $crashed = ($out -match 'ended unexpectedly')
@@ -97,12 +88,10 @@ $best = $results | Where-Object { $_.Status -eq 'deployable' -and $null -ne $_.S
         Sort-Object -Property @{E={$_.Slack}; Descending=$true} | Select-Object -First 1
 if ($best) {
     Log "best seed $($best.Seed) at $($best.Slack) ns - pinning it in the QSF"
-    (Get-Content $qsf -Raw) -replace '(?m)^set_global_assignment -name SEED \d+',
-        "set_global_assignment -name SEED $($best.Seed)" | Set-Content $qsf -NoNewline
+    Set-SeedUnderSlot $best.Seed
     Log "NOTE: the staged releases\Arcade-SSV.rbf is from the LAST seed compiled, not"
     Log "      necessarily the best. Recompile with the pinned seed before deploying."
 } else {
     Log "no deployable seed found - restoring SEED $original"
-    (Get-Content $qsf -Raw) -replace '(?m)^set_global_assignment -name SEED \d+',
-        "set_global_assignment -name SEED $original" | Set-Content $qsf -NoNewline
+    Set-SeedUnderSlot ([int]$original)
 }
