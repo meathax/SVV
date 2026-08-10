@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from gen_ssv_mras import BUTTONS, BUTTONS_DEFAULT
 from ssv_supported_sets import (
     RETIRED_LOCAL_SETS,
     SUPPORTED_SETS,
@@ -159,6 +160,31 @@ def main() -> int:
                 f"{setname}: missing or unsupported MRA rotation {rotation!r}",
                 errors,
             )
+
+        button_nodes = root.findall("buttons")
+        expected_names, expected_default, expected_count = BUTTONS.get(
+            setname, BUTTONS_DEFAULT
+        )
+        if len(button_nodes) != 1:
+            fail(f"{setname}: expected exactly one <buttons> tag", errors)
+        else:
+            buttons = button_nodes[0]
+            actual = (
+                buttons.get("names"),
+                buttons.get("default"),
+                buttons.get("count"),
+            )
+            expected = (expected_names, expected_default, str(expected_count))
+            if actual != expected:
+                fail(
+                    f"{setname}: button metadata {actual!r}, expected {expected!r}",
+                    errors,
+                )
+            if len((buttons.get("names") or "").split(",")) != 10:
+                fail(
+                    f"{setname}: button names must preserve the ten J1 positions",
+                    errors,
+                )
 
         rom_nodes = root.findall("rom")
         order = [node.get("index") for node in rom_nodes]

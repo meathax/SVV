@@ -53,5 +53,5 @@
     <dip bits="14" name="Free Play" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Health" ids="3 Hearts,4 Hearts" values="0,1"/>
   </switches>
-  <buttons names="Fire,Jump,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin" default="A,B,X,Y,L,R,R,L,Start,Select" count="10"/>
+  <buttons names="Jump,Attack,-,-,-,-,Test,Service,Start,Coin" default="A,B,Start,Select,R,L" count="2"/>
 </misterromdescription>
