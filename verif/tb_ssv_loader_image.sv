@@ -68,8 +68,8 @@ wire  [1:0]      ld_wr_be;
 wire             ld_wr_ack;
 ssv_cfg_t        cfg;
 wire             cfg_valid;
+wire             cfg_commit;
 wire             rom_loaded;
-wire [26:0]      download_max_addr;
 
 ssv_rom_loader loader (
     .clk(clk_sys), .rst(rst), .mem_ready(sdram_ready),
@@ -78,9 +78,9 @@ ssv_rom_loader loader (
     .ioctl_wait(ioctl_wait),
     .sdr_wr_req(ld_wr_req), .sdr_wr_addr(ld_wr_addr), .sdr_wr_din(ld_wr_din),
     .sdr_wr_be(ld_wr_be), .sdr_wr_ack(ld_wr_ack),
-    .cfg(cfg), .cfg_valid(cfg_valid),
+    .cfg(cfg), .cfg_valid(cfg_valid), .cfg_commit(cfg_commit),
     .st010_drom_we(), .st010_drom_wa(), .st010_drom_wd(),
-    .rom_loaded(rom_loaded), .download_max_addr(download_max_addr)
+    .rom_loaded(rom_loaded)
 );
 
 // Read port, driven by this bench after the load.
@@ -129,7 +129,7 @@ task automatic send_cfg;
     begin
         b[0]=8'h53; b[1]=8'd2; b[2]=8'd1;  b[3]=8'd16; b[4]=8'd17; b[5]=8'd0;
         b[6]=8'd3;  b[7]=8'd0; b[8]=8'd4;  b[9]=8'h40; b[10]=8'h09; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd168; b[14]=8'd240;
+        b[12]=8'd4; b[13]=8'd168; b[14]=8'd240;
         sum = 0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = (-sum) & 8'hFF;
@@ -187,7 +187,7 @@ initial begin
     // rom_loaded needs the final write to drain.
     repeat (200) sys_tick();
     if (!rom_loaded) $fatal(1, "rom_loaded never asserted");
-    $display("rom_loaded, download_max_addr=%h", download_max_addr);
+    $display("rom_loaded after complete loader-to-SDRAM transfer");
 
     // The two words the hardware probe reads.
     read_word((27'h00000) >> 1, got);
@@ -224,15 +224,15 @@ initial begin
     end
 
     $display("checked=%0d errors=%0d", checked, errors);
-    if (errors) $display("FAIL tb_ssv_loader_image");
-    else        $display("PASS tb_ssv_loader_image");
+    if (errors)
+        $fatal(1, "FAIL tb_ssv_loader_image (%0d/%0d mismatches)", errors, checked);
+    $display("PASS tb_ssv_loader_image");
     $finish;
 end
 
 initial begin
     #200_000_000;
-    $display("FAIL tb_ssv_loader_image timeout");
-    $finish;
+    $fatal(1, "FAIL tb_ssv_loader_image timeout");
 end
 
 endmodule

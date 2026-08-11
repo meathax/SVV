@@ -24,7 +24,9 @@ logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
 logic rom_loaded;
-logic [26:0] download_max_addr;
+ssv_cfg_t game_cfg;
+logic cfg_valid;
+logic cfg_commit;
 
 logic core_rst, ce_cpu;
 logic [1:0] ce_div;
@@ -62,12 +64,12 @@ ssv_rom_loader loader (
     .sdr_wr_req(sdr_wr_req), .sdr_wr_addr(sdr_wr_addr),
     .sdr_wr_din(sdr_wr_din), .sdr_wr_be(sdr_wr_be),
     .sdr_wr_ack(sdr_wr_ack),
-    .rom_loaded(rom_loaded),
-    .download_max_addr(download_max_addr)
+    .cfg(game_cfg), .cfg_valid(cfg_valid), .cfg_commit(cfg_commit),
+    .rom_loaded(rom_loaded)
 );
 
 ssv_core core (
-    .cfg(ssv_pkg::cfg_dynagear()),
+    .cfg(game_cfg),
     .clk_sys(clk), .rst(core_rst), .cold_rst(core_rst), .ce_cpu(ce_cpu),
     .watchdog_hold(1'b0),
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
@@ -188,9 +190,9 @@ task automatic send_cfg;
     int i;
     begin
         b[0]=8'h53; b[1]=8'd2;  b[2]=8'd1;  b[3]=8'd16;
-        b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'b11_10_01_00;
+        b[4]=8'd17; b[5]=8'd0;  b[6]=8'd3;  b[7]=8'h00;
         b[8]=8'b0000_0100;      b[9]=8'h40; b[10]=8'h09; b[11]=8'd0;
-        b[12]=8'd0; b[13]=8'd168; b[14]=8'd240;
+        b[12]=8'd4; b[13]=8'd168; b[14]=8'd240;
         sum = 8'd0;
         for (i = 0; i < 15; i = i + 1) sum = sum + b[i];
         b[15] = -sum;
@@ -235,8 +237,8 @@ initial begin
 
     if (!rom_loaded)
         $fatal(1, "rom_loaded did not assert after ioctl drain");
-    if (download_max_addr < 27'h3)
-        $fatal(1, "download_max_addr too small: %0h", download_max_addr);
+    if (!cfg_valid)
+        $fatal(1, "loader descriptor did not remain valid at reset release");
 
     // Ensure reset-vector alias (CPU PC 0xFFFFFFF0 -> offset 0xFFFF0) has NOPs.
     // The download already wrote SDR words 0/1; also plant the high alias.
@@ -261,8 +263,8 @@ initial begin
     if (!rom_loaded)
         $fatal(1, "rom_loaded cleared unexpectedly");
 
-    $display("PASS tb_ssv_loader_core_boot rom_loaded=1 max_addr=%0h first_pc=%08x cycles=%0d",
-             download_max_addr, first_pc, cycles);
+    $display("PASS tb_ssv_loader_core_boot rom_loaded=1 first_pc=%08x cycles=%0d",
+             first_pc, cycles);
     $finish;
 end
 

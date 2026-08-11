@@ -540,27 +540,9 @@ always_ff @(posedge clk) begin
         page_r           <= 7'd0;
         reg_r            <= 4'd0;
         irqv_r           <= 8'h80;
-        eng_cr_h         <= 16'd0;
-        eng_cr_valid_h   <= 1'b0;
-        eng_fc_h         <= 17'd0;
-        eng_lvol_h       <= 16'd0;
-        eng_lvramp_h     <= 8'd0;
-        eng_rvol_h       <= 16'd0;
-        eng_rvramp_h     <= 8'd0;
-        eng_ecount_h     <= 9'd0;
-        eng_k1_h         <= 16'd0;
-        eng_k1ramp_h     <= 9'd0;
-        eng_k2_h         <= 16'd0;
-        eng_k2ramp_h     <= 9'd0;
-        eng_start_h      <= 32'd0;
-        eng_end_h        <= 32'd0;
-        eng_accum_h      <= 32'd0;
-        eng_o4n1_h       <= 18'd0;
-        eng_o3n1_h       <= 18'd0;
-        eng_o3n2_h       <= 18'd0;
-        eng_o2n1_h       <= 18'd0;
-        eng_o2n2_h       <= 18'd0;
-        eng_o1n1_h       <= 18'd0;
+        // Snapshot data is observable only with eng_hold=1. eng_hold resets low,
+        // and host_rd_steal loads every field on the edge that asserts it; omit
+        // snapshot resets so Quartus sees a load-enable, not a reset/load/hold mux.
     end
     else begin
         if (rst) begin

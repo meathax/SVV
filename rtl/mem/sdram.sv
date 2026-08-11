@@ -215,6 +215,7 @@ end
 // wr_ack) regardless of ack overlap.
 reg p0_req_d, p1_req_d, p2_req_d, p3_req_d, p4_req_d, p5_req_d, wr_req_d;
 reg p0_ack_d2, p1_ack_d2, p2_ack_d2, p3_ack_d2, p4_ack_d2, p5_ack_d2, wr_ack_d2;
+reg [5:0] cl_pipe;
 always @(posedge clk) begin
     // Completion clears pend on the ack RISING EDGE only, and FIRST, so a
     // same-edge new request edge below overrides it (the later nonblocking
@@ -320,7 +321,6 @@ end
 // the input IOE. The fourth pipe tap transfers the already-registered word
 // into the response buffer one cycle later without a pin-to-core critical path.
 reg [15:0] dq_in;
-reg [5:0]  cl_pipe;
 reg [15:0] cap_buf [0:7];
 
 always @(posedge clk) dq_in <= SDRAM_DQ;
@@ -419,9 +419,9 @@ always @(posedge clk) begin
         ref_cnt <= ref_cnt + 1'd1;
         if (ref_cnt == 10'd700) begin ref_cnt <= 0; ref_pend <= 1'b1; end
 
-        // Read capture after CL2 and the centred IOE register above.
+        // Fourth pipe tap captures after registered command + CL2 + dq_in.
         cl_pipe <= {cl_pipe[4:0], 1'b0};
-        if (cl_pipe[2]) begin
+        if (cl_pipe[3]) begin
             cap_buf[rd_captured[2:0]] <= dq_in;
             rd_captured <= rd_captured + 1'd1;
             if (rd_captured + 1'd1 == rd_total) begin

@@ -15,9 +15,8 @@ module ssv_nvram_bridge #(
     // Descriptor mode: 0=disabled, 1=2 KiB, 2=64 KiB.  Mode 3 is invalid
     // and is isolated in the same way as mode 0.
     input  logic [1:0]              nvram_size_mode,
-    // Pulsed after the index-1 descriptor has been committed and its decoded
-    // mode is stable.  The first byte of index 1 arms init immediately, so a
-    // following index-0/index-8 transfer can be held off while this settles.
+    // Pulsed after an accepted index-1 descriptor has been committed and its
+    // decoded mode is stable.
     input  logic                    cfg_commit,
     output logic                    init_busy,
     output logic                    init_done,
@@ -71,8 +70,6 @@ wire        download_selected = ioctl_download && index_8 && enabled;
 wire        upload_selected   = ioctl_upload   && index_8 && enabled;
 wire        download_byte = download_selected && ioctl_wr && addr_in_range;
 wire        upload_byte   = upload_selected && addr_in_range;
-wire        cfg_reload = ioctl_download && ioctl_wr &&
-                         (ioctl_index == 16'd1) && (ioctl_addr == 27'd0);
 
 wire [SDR_AW:1] selected_word_addr =
     NVRAM_BASE[SDR_AW:1] + ioctl_addr[SDR_AW:1];
@@ -98,7 +95,7 @@ always_ff @(posedge clk) begin
         zero_active <= 1'b0;
         wr_is_zero  <= 1'b0;
         init_busy   <= 1'b0;
-        init_done   <= 1'b0;
+        init_done   <= 1'b1;
     end
     else begin
         if (sdr_wr_req && sdr_wr_ack) begin
@@ -116,18 +113,7 @@ always_ff @(posedge clk) begin
             end
         end
 
-        // Arm at descriptor byte zero. cfg_commit is intentionally delayed by
-        // the integration until ssv_rom_loader has decoded byte 15.
-        if (cfg_reload) begin
-            sdr_wr_req     <= 1'b0;
-            zero_word_index <= 15'd0;
-            zero_word_count <= 16'd0;
-            zero_active    <= 1'b0;
-            wr_is_zero     <= 1'b0;
-            init_busy      <= 1'b1;
-            init_done      <= 1'b0;
-        end
-        else if (cfg_commit) begin
+        if (cfg_commit) begin
             sdr_wr_req      <= 1'b0;
             zero_word_index <= 15'd0;
             wr_is_zero      <= 1'b0;
@@ -246,7 +232,7 @@ logic upload_selected_q;
 logic modified_during_upload;
 
 always_ff @(posedge clk) begin
-    if (rst || cfg_reload || !enabled) begin
+    if (rst || cfg_commit || !enabled) begin
         dirty                  <= 1'b0;
         ioctl_upload_req       <= 1'b0;
         upload_selected_q      <= 1'b0;

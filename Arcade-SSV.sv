@@ -363,24 +363,6 @@ ssv_host_guard u_host_guard (
     .core_cold_reset(core_cold_reset), .core_reset(core_reset)
 );
 
-// The loader commits the decoded descriptor one cycle after accepting byte
-// 15. Delay that event by a second cycle so the NVRAM bridge samples the new
-// game_cfg, while byte zero independently arms init immediately.
-wire nv_cfg_last_byte = ioctl_download && ioctl_wr &&
-                        (ioctl_index == 16'd1) &&
-                        (ioctl_addr == 27'd15);
-logic nv_cfg_last_q, nv_cfg_commit;
-always_ff @(posedge clk_sys) begin
-    if (loader_reset) begin
-        nv_cfg_last_q <= 1'b0;
-        nv_cfg_commit <= 1'b0;
-    end
-    else begin
-        nv_cfg_last_q <= nv_cfg_last_byte;
-        nv_cfg_commit <= nv_cfg_last_q;
-    end
-end
-
 assign LED_USER = ~rom_loaded;
 
 `ifdef SIMULATION
@@ -435,9 +417,11 @@ wire [15:0] st010_drom_wd;
 // staying lit rather than as a broken picture.
 ssv_pkg::ssv_cfg_t game_cfg;
 wire               game_cfg_valid;
+wire               game_cfg_commit;
 
 ssv_rom_loader loader (
     .cfg(game_cfg), .cfg_valid(game_cfg_valid),
+    .cfg_commit(game_cfg_commit),
     .clk(clk_sys), .rst(loader_reset), .mem_ready(sdram_ready_sys),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
@@ -451,7 +435,8 @@ ssv_rom_loader loader (
 
 // While cold-zeroing, descriptor bytes (index 1) must continue to flow, but
 // index 0 and persisted index 8 are held until the exact-sized fill completes.
-wire nv_init_ioctl_wait = nv_init_busy && ioctl_download &&
+wire nv_init_ioctl_wait = (game_cfg_commit || nv_init_busy) &&
+                          ioctl_download &&
                           ((ioctl_index == 16'd0) ||
                            (ioctl_index == 16'd8));
 assign ioctl_wait = ld_ioctl_wait | nv_ioctl_wait | nv_init_ioctl_wait;
@@ -502,7 +487,7 @@ ssv_nvram_bridge #(
 ) nvram_bridge (
     .clk(clk_sys), .rst(loader_reset),
     .nvram_size_mode(nvram_size_mode),
-    .cfg_commit(nv_cfg_commit),
+    .cfg_commit(game_cfg_commit),
     .init_busy(nv_init_busy), .init_done(nv_init_done),
     .modified(nv_modified), .dirty(),
     .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload),

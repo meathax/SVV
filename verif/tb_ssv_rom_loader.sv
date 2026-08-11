@@ -19,6 +19,7 @@ logic [26:0] ioctl_addr;
 logic ioctl_wait, sdr_wr_req, rom_loaded;
 ssv_cfg_t cfg;
 logic cfg_valid;
+logic cfg_commit;
 logic [SDR_AW:1] sdr_wr_addr;
 logic [15:0] sdr_wr_din;
 logic [1:0] sdr_wr_be;
@@ -27,6 +28,17 @@ logic [SDR_AW:1] q0_addr, q1_addr, q2_addr;
 logic st010_drom_we;
 logic [10:0] st010_drom_wa;
 logic [15:0] st010_drom_wd;
+
+logic cfg_commit_d;
+always @(posedge clk) begin
+    if (rst)
+        cfg_commit_d <= 1'b0;
+    else begin
+        if (cfg_commit && cfg_commit_d)
+            $fatal(1, "cfg_commit was not a one-cycle pulse");
+        cfg_commit_d <= cfg_commit;
+    end
+end
 
 ssv_rom_loader dut (.*);
 
@@ -124,11 +136,17 @@ task send_cfg_then_byte0_no_gap(input ssv_cfg_t c, input logic [7:0] byte0);
         tick();
         if (!ioctl_wait)
             $fatal(1, "descriptor commit did not hold back-to-back index 0");
+        // Keep the accepted final-byte level asserted for the wait cycle.
+        // The loader's commit pulse must come from its validated transaction,
+        // not from this repeated raw level.
+        tick();
+        if (!cfg_commit)
+            $fatal(1, "accepted descriptor did not emit cfg_commit");
         ioctl_index = 8'd0;
         ioctl_addr = 27'd0;
         ioctl_dout = byte0;
         tick();
-        if (!cfg_valid || ioctl_wait)
+        if (!cfg_valid || cfg_commit || ioctl_wait)
             $fatal(1, "descriptor did not commit atomically under held byte 0");
         tick();
         ioctl_wr = 1'b0;
@@ -379,6 +397,13 @@ initial begin
     ioctl_download = 0;
     tick();
     if (!rom_loaded) $fatal(1, "rom_loaded did not assert after drain");
+
+    // A malformed replacement descriptor invalidates both the decoded profile
+    // and the prior loaded-ROM state, and must never emit an accepted commit.
+    ioctl_download = 1'b1;
+    send_cfg_image(malformed_cfg);
+    if (cfg_valid || rom_loaded || cfg_commit)
+        $fatal(1, "malformed replacement descriptor did not fail closed");
     $display("PASS tb_ssv_rom_loader");
     $finish;
 end

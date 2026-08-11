@@ -30,6 +30,7 @@ module ssv_rom_loader (
     // Per-game configuration, parsed from MRA <rom index="1">.
     output ssv_pkg::ssv_cfg_t cfg,
     output logic       cfg_valid,
+    output logic       cfg_commit,
     // ST010 data ROM ("dspdata"): 2048 x 16 on chip, so it is written straight
     // into the DSP wrapper's block RAM rather than read back from SDRAM. The
     // program half ("dspprg") is 48 M10K and goes to SDRAM instead.
@@ -303,6 +304,7 @@ always_ff @(posedge clk) begin
         busy        <= 1'b0;
         index0_seen <= 1'b0;
         cfg_valid   <= 1'b0;
+        cfg_commit  <= 1'b0;
         cfg_received <= '0;
         cfg_commit_pending <= 1'b0;
         cfg         <= '0;
@@ -317,6 +319,7 @@ always_ff @(posedge clk) begin
     end
     else begin
         st010_drom_we <= 1'b0;
+        cfg_commit <= 1'b0;
         if (sdr_wr_ack) begin
             sdr_wr_req <= 1'b0;
             busy       <= 1'b0;
@@ -330,6 +333,7 @@ always_ff @(posedge clk) begin
             // Address zero begins a new transaction even if a prior malformed
             // block left a partial receive mask behind.
             cfg_valid <= 1'b0;
+            rom_loaded <= 1'b0;
             if (ioctl_addr == 0)
                 cfg_received <= {{(CFG_BYTES-1){1'b0}}, 1'b1};
             else
@@ -349,8 +353,10 @@ always_ff @(posedge clk) begin
             cfg_commit_pending <= 1'b0;
             cfg_received <= '0;
             cfg_valid <= cfg_accept;
-            if (cfg_accept)
+            if (cfg_accept) begin
                 cfg <= cfg_decode();
+                cfg_commit <= 1'b1;
+            end
         end
 
         if (mem_ready && ioctl_download && ioctl_wr && !busy && cfg_valid &&

@@ -173,15 +173,15 @@ initial begin
         $display("OK       byte-enable = %04h", got);
 
     $display("errors=%0d", errors);
-    if (errors) $display("FAIL tb_ssv_sdram_module_contract");
-    else        $display("PASS tb_ssv_sdram_module_contract");
+    if (errors)
+        $fatal(1, "FAIL tb_ssv_sdram_module_contract (%0d errors)", errors);
+    $display("PASS tb_ssv_sdram_module_contract");
     $finish;
 end
 
 initial begin
     #50_000_000;
-    $display("FAIL tb_ssv_sdram_module_contract timeout (controller never completed a transaction)");
-    $finish;
+    $fatal(1, "FAIL tb_ssv_sdram_module_contract timeout (controller never completed a transaction)");
 end
 
 endmodule

@@ -26,6 +26,10 @@ wire         commit;
 wire [6:0]   commit_page;
 wire [3:0]   commit_reg;
 wire [31:0]  commit_data;
+wire         eng_cr_valid;
+wire [31:0]  eng_start;
+wire [31:0]  eng_end;
+wire [31:0]  eng_accum;
 
 ssv_es5506_regs dut (
     .clk, .rst, .cold_rst,
@@ -35,10 +39,10 @@ ssv_es5506_regs dut (
     .word_clock_start, .word_clock_end, .lr_clock_end,
     .commit, .commit_page, .commit_reg, .commit_data,
     .eng_voice(5'd0),
-    .eng_cr(), .eng_cr_valid(), .eng_fc(),
+    .eng_cr(), .eng_cr_valid, .eng_fc(),
     .eng_lvol(), .eng_lvramp(), .eng_rvol(), .eng_rvramp(),
     .eng_ecount(), .eng_k1(), .eng_k1ramp(), .eng_k2(), .eng_k2ramp(),
-    .eng_start(), .eng_end(), .eng_accum(),
+    .eng_start, .eng_end, .eng_accum,
     .eng_o4n1(), .eng_o3n1(), .eng_o3n2(),
     .eng_o2n1(), .eng_o2n2(), .eng_o1n1(),
     .eng_wr_accum(1'b0), .eng_accum_w(32'd0),
@@ -110,6 +114,9 @@ end
 endtask
 
 logic [31:0] value;
+logic [31:0] engine_start_before_steal;
+logic [31:0] engine_end_before_steal;
+logic [31:0] engine_accum_before_steal;
 
 initial begin
     host_we    = 1'b0;
@@ -157,6 +164,34 @@ initial begin
     write_reg(4'h2, 32'h3bb6_f07f); // END masks low 7 bits
     write_reg(4'h3, 32'h3894_3000); // ACCUM
     write_reg(4'h0, 32'h0000_0003); // stopped while configured
+
+    // The hold bank intentionally has no reset. It is hidden by eng_hold until
+    // this first byte-0 host steal captures every engine field on the same
+    // edge, and must preserve the engine voice while the MLAB port recovers.
+    engine_start_before_steal = eng_start;
+    engine_end_before_steal   = eng_end;
+    engine_accum_before_steal = eng_accum;
+    @(negedge clk);
+    host_addr = {4'h1, 2'd0};
+    host_re   = 1'b1;
+    @(posedge clk);
+    #1;
+    expect32(eng_start, engine_start_before_steal, "engine START during first steal");
+    expect32(eng_end, engine_end_before_steal, "engine END during first steal");
+    expect32(eng_accum, engine_accum_before_steal, "engine ACCUM during first steal");
+    if (eng_cr_valid !== 1'b1) begin
+        $display("FAIL engine CR validity during first steal");
+        $fatal(1);
+    end
+    @(negedge clk);
+    host_re = 1'b0;
+    repeat (2) begin
+        @(posedge clk);
+        #1;
+        expect32(eng_start, engine_start_before_steal, "engine START after first steal");
+        expect32(eng_end, engine_end_before_steal, "engine END after first steal");
+        expect32(eng_accum, engine_accum_before_steal, "engine ACCUM after first steal");
+    end
 
     read_reg(4'h1, value);
     expect32(value, 32'h3894_3000, "voice16 START");

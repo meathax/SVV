@@ -1,5 +1,24 @@
 # Pre-RBF optimization notes
 
+## ES5506 snapshot load-enable inference (12 Aug 2026, no Quartus/RBF)
+
+The last uncontaminated map report identified a 361-bit registered 3:1 mux
+group represented by `eng_start_h`, with 722 LEs of restructuring opportunity.
+Most of that group was the 345-bit ES5506 engine snapshot bank selecting among
+cold-reset zero, a host-steal capture and its held value. The reset value was
+unobservable: `eng_hold` resets low, and the first `host_rd_steal` loads every
+snapshot field on the same edge that makes the bank visible. The snapshot data
+resets were therefore removed while retaining the resets for `eng_hold`, host
+state and all functional device state. This gives Quartus a plain load-enable
+shape without changing host timing or voice data.
+
+The ES5506 register test now explicitly checks the first post-reset host steal
+and both recovery cycles. It passes in 4-state Icarus and headless,
+single-thread Verilator. The loader/core boot, ROM-write-ack and 30-frame
+hang-watch regressions also pass. The expected ALM reduction is deliberately
+unmeasured until a future authorized map/fit; no Quartus stage or RBF build was
+run for this optimization.
+
 ## Shared multiplier and renderer placement pass (10 Aug 2026, no Quartus/RBF)
 
 The newest retained fit completed placement at 39,397/41,910 ALMs (94%),

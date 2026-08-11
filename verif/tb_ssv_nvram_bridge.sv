@@ -93,8 +93,8 @@ module tb_ssv_nvram_bridge;
         ioctl_download = 1'b1;
         ioctl_wr = 1'b1;
         tick();
-        check(init_busy && !init_done,
-              "descriptor byte zero did not arm cold init");
+        check(!init_busy && init_done,
+              "raw descriptor byte zero changed idle init state");
         check(!sdr_wr_req, "cold init wrote before descriptor commit");
         ioctl_download = 1'b0;
         ioctl_wr = 1'b0;

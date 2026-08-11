@@ -67,6 +67,10 @@ SSV_CORE_FILES=(
 
 run_one() {
   local top="$1"; shift
+  if [[ -n "${SSV_BRINGUP_ONLY:-}" &&
+        ",${SSV_BRINGUP_ONLY}," != *",${top},"* ]]; then
+    return
+  fi
   local bdir="$OUT/$top"
   mkdir -p "$bdir"
   echo "=== BUILD $top ==="
@@ -76,7 +80,11 @@ run_one() {
   fi
   echo "=== RUN $top ==="
   verilator-safe status
-  verilator-sim-safe -- "$bdir/$top.exe" | tee "$bdir/run.log"
+  local exe="$bdir/$top.exe"
+  if [[ ! -x "$exe" ]]; then
+    exe="$bdir/$top"
+  fi
+  verilator-sim-safe -- "$exe" | tee "$bdir/run.log"
 }
 
 run_one tb_ssv_rom_loader \
@@ -142,6 +150,21 @@ run_one tb_ssv_line_buffer4 \
 run_one tb_ssv_st010_prg_fetch \
   rtl/ssv_pkg.sv rtl/cpu/upd96050/ssv_st010_prg_fetch.sv \
   verif/tb_ssv_st010_prg_fetch.sv
+
+# Physical 128 MB MiSTer SDRAM-module contract. These tests must stay in the
+# default gate: a stale capture tap previously returned all-zero reads while
+# the bench printed FAIL but exited successfully.
+run_one tb_ssv_sdram_command_timing \
+  rtl/mem/sdram.sv verif/tb_ssv_sdram_command_timing.sv
+
+run_one tb_ssv_sdram_module_contract \
+  rtl/mem/sdram.sv verif/ssv_sdram_module.sv \
+  verif/tb_ssv_sdram_module_contract.sv
+
+run_one tb_ssv_loader_image \
+  rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv rtl/mem/sdram.sv \
+  verif/ssv_sdram_module.sv verif/ssv_sdram_harness.sv \
+  verif/tb_ssv_loader_image.sv
 
 # Line doubler. Shipped in 095d3b2 with "never produced a pixel"; this bench
 # found three real defects (907-vs-908 tick ratio, a one-pixel line shift, and
