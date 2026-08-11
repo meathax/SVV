@@ -23,6 +23,9 @@ param(
     [int]$InputStartFrameLo = -1,
     [ValidateRange(-1, 100000)]
     [int]$InputStartFrameHi = -1,
+    [ValidateRange(-1000, 1000)]
+    [int]$ReferenceInputFrameOffset = 0,
+    [string]$ReferenceInputFrameMap = '',
     [string]$Session = '',
     [string]$RtlRestore = '',
     [string]$RtlInputJournal = '',
@@ -30,7 +33,12 @@ param(
     [int]$DumpIndexFrame = -1,
     [ValidateRange(-1, 100000)]
     [int]$CheckpointFrame = -1,
-    [string]$ModelDir = 'C:\tmp\ssv_obj_visual_lockstep'
+    [bool]$Headless = $true,
+    [switch]$ReusePinnedModel,
+    [switch]$PreseedScenarioInputs,
+    [string]$MamePcTrace = '',
+    [string]$ModelDir = 'C:\tmp\ssv_obj_visual_lockstep',
+    [string[]]$RtlExtraArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,9 +52,6 @@ if (-not (Test-Path -LiteralPath $mame)) { throw "Missing MAME executable: $mame
 if (-not (Test-Path -LiteralPath $simSafe)) { throw "Missing safe simulator wrapper: $simSafe" }
 $restoreMetadata = $null
 if ($RtlRestore) {
-    if ($ModelDir -eq 'C:\tmp\ssv_obj_visual_lockstep') {
-        $ModelDir = 'C:\tmp\ssv_obj_visual_savable'
-    }
     $RtlRestore = [System.IO.Path]::GetFullPath($RtlRestore)
     $restoreMetadataPath = "$RtlRestore.json"
     if (-not (Test-Path -LiteralPath $RtlRestore) -or
@@ -183,18 +188,41 @@ if ($RtlRestore) {
     & $python $journalTool --journal (Join-Path $Session 'inputs') --seed-neutral
     if ($LASTEXITCODE -ne 0) { throw 'Unable to seed neutral input packet' }
 }
+if ($PreseedScenarioInputs) {
+    $preseedTool = Join-Path $PSScriptRoot 'preseed_ssv_scenario_inputs.py'
+    $preseedScenario = Join-Path $project "verif\scenarios\$Set\$Scenario.json"
+    if (-not (Test-Path -LiteralPath $preseedScenario)) {
+        throw "Cannot preseed missing scenario: $preseedScenario"
+    }
+    $preseedArgs = @(
+        $preseedTool, '--scenario', $preseedScenario,
+        '--journal', (Join-Path $Session 'inputs'),
+        '--through', [string]$requestedEndFrame)
+    if ($CoinFrameLo -ge 0) { $preseedArgs += @('--coin-lo', [string]$CoinFrameLo) }
+    if ($CoinFrameHi -ge 0) { $preseedArgs += @('--coin-hi', [string]$CoinFrameHi) }
+    if ($InputStartFrameLo -ge 0) { $preseedArgs += @('--start-lo', [string]$InputStartFrameLo) }
+    if ($InputStartFrameHi -ge 0) { $preseedArgs += @('--start-hi', [string]$InputStartFrameHi) }
+    & $python @preseedArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to preseed deterministic scenario inputs' }
+}
 
-$buildArgs = @{ ModelDir = $ModelDir; Savable = $true }
-& (Join-Path $PSScriptRoot 'build_ssv_visual.ps1') @buildArgs
-if ($LASTEXITCODE -ne 0) { throw "Visual build failed: $LASTEXITCODE" }
-$printArgs = @{ ModelDir = $ModelDir; PrintExecutable = $true; Savable = $true }
+$buildArgs = @{ ModelDir = $ModelDir; Savable = $true; Headless = $Headless }
+if (-not $ReusePinnedModel) {
+    & (Join-Path $PSScriptRoot 'build_ssv_visual.ps1') @buildArgs
+    if ($LASTEXITCODE -ne 0) { throw "Visual build failed: $LASTEXITCODE" }
+}
+$printArgs = @{
+    ModelDir = $ModelDir; PrintExecutable = $true
+    Savable = $true; Headless = $Headless
+}
 $exe = (& (Join-Path $PSScriptRoot 'build_ssv_visual.ps1') @printArgs |
     Select-Object -Last 1)
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing visual executable: $exe" }
+$signaturePath = Join-Path ([System.IO.Path]::GetFullPath($ModelDir)) `
+    'source.signature'
+$signatureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $signaturePath).Hash
+$verilatorIdentity = Get-Content -LiteralPath $signaturePath -TotalCount 1
 if ($RtlRestore) {
-    $signaturePath = Join-Path ([System.IO.Path]::GetFullPath($ModelDir)) `
-        'source.signature'
-    $signatureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $signaturePath).Hash
     if ($signatureHash -ne $restoreMetadata.source_signature_sha256) {
         throw 'Checkpoint source signature does not match the selected savable executable'
     }
@@ -256,6 +284,12 @@ if ($CoinFrameLo -ge 0) { $rtlArgs += "+COIN_FRAME_LO=$CoinFrameLo" }
 if ($CoinFrameHi -ge 0) { $rtlArgs += "+COIN_FRAME_HI=$CoinFrameHi" }
 if ($InputStartFrameLo -ge 0) { $rtlArgs += "+START_FRAME_LO=$InputStartFrameLo" }
 if ($InputStartFrameHi -ge 0) { $rtlArgs += "+START_FRAME_HI=$InputStartFrameHi" }
+foreach ($extraArg in $RtlExtraArgs) {
+    if (-not $extraArg.StartsWith('+')) {
+        throw "RtlExtraArgs entries must be Verilator plusargs beginning with '+': $extraArg"
+    }
+    $rtlArgs += $extraArg
+}
 if ($proofFrame -lt 0) {
     $rtlArgs += @(
         ('"+CHECKPOINT={0}"' -f ($automaticCheckpoint -replace '\\','/')),
@@ -271,6 +305,12 @@ if ($Diagnostic) { $rtlArgs += @('+VISUAL_DIAG', '+LIGHT_DIAG') }
 # affects ordinary lockstep runs or the release core.
 if ($env:SSV_LOCKSTEP_IRQ_SCHEDULE) {
     $rtlArgs += ('"+DIFF_IRQ_SCHEDULE={0}"' -f ($env:SSV_LOCKSTEP_IRQ_SCHEDULE -replace '\\','/'))
+}
+if ($env:SSV_LOCKSTEP_IRQ_BUS_SCHEDULE) {
+    $rtlArgs += ('"+DIFF_IRQ_BUS_SCHEDULE={0}"' -f ($env:SSV_LOCKSTEP_IRQ_BUS_SCHEDULE -replace '\\','/'))
+    if ($env:SSV_LOCKSTEP_IRQ_BUS_START) {
+        $rtlArgs += "+DIFF_IRQ_BUS_START=$env:SSV_LOCKSTEP_IRQ_BUS_START"
+    }
 }
 if ($RtlRestore) {
     $rtlArgs += ('"+RESTORE={0}"' -f ($RtlRestore -replace '\\','/'))
@@ -288,10 +328,10 @@ if ($ProofMode -eq 'attract') {
 }
 
 $rtlEnvironment = @{
-    # The native UCRT64 visual model dynamically loads SDL2 and the MinGW
-    # runtime from this directory. The unified safe launcher deliberately
-    # preserves its caller environment, so make the model's ABI explicit.
+    # Native UCRT64 compiler/runtime DLL closure. The default lockstep host is
+    # non-SDL and does not create a window, renderer, audio device, or event loop.
     PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+    MISTER_DIFF_HEADLESS = $(if ($Headless) { '1' } else { '0' })
     SSV_LOCKSTEP_DIR = $Session
     SSV_LOCKSTEP_SET = $Set
     SSV_LOCKSTEP_WIDTH = [string]$width
@@ -348,6 +388,9 @@ function Get-RtlModelProcess {
         } |
         Sort-Object StartTime -Descending |
         Select-Object -First 1
+}
+if (-not $Headless) {
+    throw 'Project policy requires the non-SDL headless host for every Verilator run'
 }
 
 function Stop-RtlModelProcess {
@@ -408,9 +451,9 @@ try {
 # frame 850; the independent watchdog owns wall-clock cleanup.
 $mameRunSeconds = [Math]::Max(30, [Math]::Min(299, $TimeoutSeconds + 15))
 $mameArgs = @(
-    $Set, '-rompath', ('"{0}"' -f (Join-Path $project 'rom')), '-window', '-nomaximize',
-    '-skip_gameinfo', '-seconds_to_run', [string]$mameRunSeconds, '-throttle',
-    '-video', 'opengl', '-sound', 'auto', '-output', 'console',
+    $Set, '-rompath', ('"{0}"' -f (Join-Path $project 'rom')),
+    '-skip_gameinfo', '-seconds_to_run', [string]$mameRunSeconds, '-nothrottle',
+    '-video', 'none', '-sound', 'none', '-output', 'console',
     # SSV's PORT_IMPULSE(10) is a MAME UI convenience.  Lockstep packets
     # already carry the raw PCB input level for each native interval, so do
     # not add hidden coin-latch state between the RTL owner and MAME.
@@ -422,6 +465,18 @@ $mameArgs = @(
     '-snapshot_directory', ('"{0}"' -f (Join-Path $Session 'mame\snapshot')),
     '-autoboot_script', ('"{0}"' -f (Join-Path $PSScriptRoot 'mame-ssv-lockstep.lua'))
 )
+if ($MamePcTrace) {
+    $MamePcTrace = [System.IO.Path]::GetFullPath($MamePcTrace)
+    $mameDebugScript = Join-Path $Session 'mame\v60-trace.cmd'
+    [System.IO.File]::WriteAllLines(
+        $mameDebugScript,
+        @(
+            ('trace {0},maincpu,noloop' -f ($MamePcTrace -replace '\\','/')),
+            'go'
+        ),
+        [System.Text.Encoding]::ASCII)
+    $mameArgs += @('-debug', '-debugscript', ('"{0}"' -f $mameDebugScript))
+}
 $mameEnvironment = @{
     SSV_LOCKSTEP_DIR = $Session
     SSV_LOCKSTEP_SET = $Set
@@ -434,6 +489,8 @@ $mameEnvironment = @{
     SSV_LOCKSTEP_CATCHUP_TARGET = $(if ($RtlRestore) {
         [string]$StartFrame } else { '-1' })
     SSV_LOCKSTEP_STRICT_INPUTS = $(if ($RtlRestore) { '1' } else { '0' })
+    SSV_LOCKSTEP_INPUT_FRAME_OFFSET = [string]$ReferenceInputFrameOffset
+    SSV_LOCKSTEP_INPUT_FRAME_MAP = $ReferenceInputFrameMap
     SSV_LOCKSTEP_TRACE_REGS = $(if ($TraceRegisters) { '1' } else { '0' })
 }
 if ($DumpIndexFrame -ge 0) {
@@ -479,6 +536,63 @@ Write-Host "SSV_LOCKSTEP_STARTED set=$Set rtl_pid=$($rtl.Id) mame_pid=$($mamePro
     if ($RtlRestore) { $coordinatorArgs += '--reference-catchup' }
     & $python (Join-Path $PSScriptRoot 'ssv_lockstep_compare.py') @coordinatorArgs
     $coordinatorExit = $LASTEXITCODE
+    if ($proofFrame -lt 0 -and (Test-Path -LiteralPath $automaticCheckpoint)) {
+        $saveMarker = "SSV_VISUAL_CHECKPOINT_SAVED frame=$automaticCheckpointFrame"
+        if (-not (Select-String -LiteralPath $rtlLog -SimpleMatch $saveMarker -Quiet)) {
+            throw "Checkpoint archive exists without its save marker: $automaticCheckpoint"
+        }
+        $journalThrough = $automaticCheckpointFrame + 1
+        $journalJson = (& $python $journalTool --journal (Join-Path $Session 'inputs') `
+            --through $journalThrough | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $journalJson) {
+            throw "Saved checkpoint lacks an RTL-owned input prefix through frame $journalThrough"
+        }
+        $scenarioPath = Join-Path $project `
+            "verif\scenarios\$Set\$Scenario.json"
+        if (-not (Test-Path -LiteralPath $scenarioPath)) {
+            throw "Checkpointed lockstep requires a scenario identity: $scenarioPath"
+        }
+        $archive = Get-Item -LiteralPath $automaticCheckpoint
+        $metadata = @{
+            schema = 'ssv-verilator-checkpoint-v3'
+            set = $Set
+            game_id = $gameId
+            frame = $automaticCheckpointFrame
+            coordinate = @{ kind='frame'; value=$automaticCheckpointFrame }
+            scenario = $Scenario
+            capture_start_frame = $StartFrame
+            archive = $archive.FullName
+            archive_bytes = $archive.Length
+            archive_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash
+            source_signature_sha256 = $signatureHash
+            verilator = $verilatorIdentity
+            top = 'tb_ssv_frame_crc'
+            media = @{
+                maincpu_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $mainRom).Hash
+                sprites_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $spriteRom).Hash
+                samples_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $sampleRom).Hash
+            }
+            input_journal = ($journalJson | ConvertFrom-Json)
+            input_identity = @{
+                scenario_path = [System.IO.Path]::GetFullPath($scenarioPath)
+                scenario_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $scenarioPath).Hash
+                owner = 'rtl'
+                packet_for_first_post_restore_frame = $journalThrough
+            }
+            proof = @{
+                mode = $ProofMode
+                frame = $null
+                screenshot = $null
+                max_frames = $frameLimit
+                soak_frames = $proofSoakFrames
+            }
+            restored_from = $(if ($RtlRestore) { $RtlRestore } else { $null })
+            timestamp = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        $metadata | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath "$automaticCheckpoint.json"
+        Write-Host "SSV_LOCKSTEP_CHECKPOINT_READY frame=$automaticCheckpointFrame path=$automaticCheckpoint"
+    }
     if ($proofFrame -ge 0 -and $coordinatorExit -in @(0,5)) {
         # Releasing the compared proof token lets the bounded RTL model reach
         # its own gate checks and exit naturally. Do not publish STOP first or

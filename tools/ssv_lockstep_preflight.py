@@ -490,7 +490,7 @@ def main() -> int:
             "first_complete_token": 1,
             "first_comparable_token": first_comparable_token,
             "warmup_excluded_tokens": list(range(first_comparable_token)),
-            "rtl_expected_boundary": "completed post-video-enable native surface before SDL scaling",
+            "rtl_expected_boundary": "completed post-video-enable native surface before presentation scaling",
         },
         "checks": checks,
         "scenario_identity": scenario_identity,

@@ -2,6 +2,7 @@ param(
     [switch]$Force,
     [switch]$Profile,
     [switch]$Savable,
+    [switch]$Headless,
     [switch]$PrintExecutable,
     [string]$ModelDir = 'C:\tmp\ssv_obj_visual'
 )
@@ -22,7 +23,10 @@ if ($objDir -notmatch '^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$') {
 $exe = Join-Path $objDir 'Vtb_ssv_frame_crc.exe'
 $stamp = Join-Path $objDir 'source.signature'
 $modeStamp = Join-Path $objDir 'build.mode'
-$buildMode = if ($Savable) { 'savable' } elseif ($Profile) { 'profile' } else { 'release' }
+$buildMode = if ($Headless -and $Savable) { 'savable-headless' } `
+    elseif ($Headless) { 'headless' } `
+    elseif ($Savable) { 'savable' } `
+    elseif ($Profile) { 'profile' } else { 'release' }
 if ($Savable -and $Profile) {
     throw '-Savable and -Profile require distinct builds and cannot be combined'
 }
@@ -72,8 +76,13 @@ $coreSources = @(
     'verif/tb_ssv_frame_crc.sv'
 )
 $visualMainSource = Join-Path $project 'verif/ssv_visual_main.cpp'
+$hostSource = if ($Headless) {
+    Join-Path $project 'verif/ssv_visual_headless.cpp'
+} else {
+    Join-Path $project 'verif/ssv_visual_sdl.cpp'
+}
 $trackedInputs = @($coreSources | ForEach-Object { Join-Path $project $_ }) + @(
-    (Join-Path $project 'verif/ssv_visual_sdl.cpp'),
+    $hostSource,
     (Join-Path $project 'verif/ssv_tb_crc32.svh'),
     $PSCommandPath
 )
@@ -83,19 +92,26 @@ foreach ($source in $trackedInputs) {
 }
 
 $verilatorVersion = (& $verilator --version | Select-Object -First 1)
-$sdlCflags = ((& $pkgConfig --cflags sdl2) -replace '-Dmain=SDL_main', '').Trim()
-$sdlLibs = ((& $pkgConfig --libs sdl2) `
-    -replace '-lmingw32', '' `
-    -replace '-mwindows', '' `
-    -replace '-lSDL2main', '').Trim()
-if ($LASTEXITCODE -ne 0) { throw 'SDL2 pkg-config lookup failed' }
+$sdlCflags = ''
+$sdlLibs = ''
+if (-not $Headless) {
+    $sdlCflags = ((& $pkgConfig --cflags sdl2) -replace '-Dmain=SDL_main', '').Trim()
+    $sdlLibs = ((& $pkgConfig --libs sdl2) `
+        -replace '-lmingw32', '' `
+        -replace '-mwindows', '' `
+        -replace '-lSDL2main', '').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'SDL2 pkg-config lookup failed' }
+}
 
 $saveDefine = if ($Savable) { '' } else { ' -DSSV_VISUAL_NO_SAVE' }
-$cflags = "$sdlCflags -DSDL_MAIN_HANDLED$saveDefine -D_GLIBCXX_USE_CXX11_ABI=0 -O3 -march=native -mtune=native"
+$headlessDefine = if ($Headless) { ' -DSSV_HEADLESS' } else { ' -DSDL_MAIN_HANDLED' }
+$cflags = "$sdlCflags$headlessDefine$saveDefine -D_GLIBCXX_USE_CXX11_ABI=0 -O3 -march=native -mtune=native"
 if (-not $Profile) { $cflags += ' -fomit-frame-pointer' }
 $buildProfile = @(
     'top=tb_ssv_frame_crc',
     "mode=$buildMode",
+    "headless=$($Headless.ToString().ToLowerInvariant())",
+    "display_backend=$(if($Headless){'none'}else{'sdl2'})",
     "defines=SIMULATION,SSV_VISUAL,SSV_VISUAL_BEHAVIORAL_ONLY,$(if($Savable){'SSV_VISUAL_EXTERNAL_CLOCK'}else{'SSV_VISUAL_NO_SAVE'})",
     "timing=$(if($Savable){'off'}else{'on'}),savable=$(if($Savable){'on'}else{'off'}),assert=on",
     'model_threads=1',
@@ -122,9 +138,9 @@ if (-not $Force -and (Test-Path -LiteralPath $exe) -and
 }
 
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
-$visualCpp = Join-Path $objDir 'ssv_visual_sdl.cpp'
-Copy-Item -Force -LiteralPath (Join-Path $project 'verif/ssv_visual_sdl.cpp') `
-    -Destination $visualCpp
+$hostName = if ($Headless) { 'ssv_visual_headless.cpp' } else { 'ssv_visual_sdl.cpp' }
+$visualCpp = Join-Path $objDir $hostName
+Copy-Item -Force -LiteralPath $hostSource -Destination $visualCpp
 $visualMainCpp = Join-Path $objDir 'ssv_visual_main.cpp'
 if ($Savable) {
     Copy-Item -Force -LiteralPath $visualMainSource -Destination $visualMainCpp
@@ -182,9 +198,12 @@ $objMsys = ('/{0}/{1}' -f $objDir.Substring(0, 1).ToLowerInvariant(),
     ($objDir.Substring(3) -replace '\\', '/'))
 $tempMsys = ('/{0}/{1}' -f $msysTemp.Substring(0, 1).ToLowerInvariant(),
     ($msysTemp.Substring(3) -replace '\\', '/'))
+$makeOptimization = if ($Headless) {
+    " OPT_FAST='-O3 -march=native -mtune=native' OPT_SLOW='-O3 -march=native -mtune=native'"
+} else { '' }
 $makeCommand = "export MSYSTEM=UCRT64; export PATH=/ucrt64/bin:/usr/bin; " +
     "export TMP='$tempMsys'; export TEMP=`$TMP; export TMPDIR=`$TMP; " +
-    "cd '$objMsys'; mingw32-make -f Vtb_ssv_frame_crc.mk -j4"
+    "cd '$objMsys'; mingw32-make -f Vtb_ssv_frame_crc.mk -j4$makeOptimization"
 $buildCommand = "& $(ConvertTo-PowerShellLiteral $bash) " +
     "'--noprofile' '--norc' '-c' $(ConvertTo-PowerShellLiteral $makeCommand)"
 Write-Host "SSV_VISUAL_BUILD_COMMAND $buildCommand"

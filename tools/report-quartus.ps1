@@ -153,10 +153,21 @@ $lineMetaPlacements = @([regex]::Matches(
 $lineMetaPlacementMet = $fitIsCurrent -and
     $lineMetaPlacements.Count -eq 1 -and
     $lineMetaPlacements[0] -eq 'M10K block'
+# The four-bank scanline store has eight independent 88x15 simple-dual-port
+# memories.  At the current ALM-limited balance they must all use spare M10Ks;
+# an ignored ramstyle would silently restore about 346 ALMs of distributed RAM.
+$lineBufferPlacements = @([regex]::Matches(
+    $fitReport,
+    '(?m)^;.*ssv_line_buffer4:line_buffer.*line[01]_b[0-3]_rtl_0.*;\s*(MLAB|M10K block)\s*;'
+) | ForEach-Object { $_.Groups[1].Value })
+$lineBufferPlacementMet = $fitIsCurrent -and
+    $lineBufferPlacements.Count -eq 8 -and
+    @($lineBufferPlacements | Where-Object { $_ -ne 'M10K block' }).Count -eq 0
 
 $ready = $mapIsCurrent -and $fitIsCurrent -and $staIsCurrent -and
     $timingMet -and $constraintsMet -and $rbfIsCurrent -and
-    $linePageStartsPlacementMet -and $lineMetaPlacementMet
+    $linePageStartsPlacementMet -and $lineMetaPlacementMet -and
+    $lineBufferPlacementMet
 $result = [ordered]@{
     ProjectRoot = $ProjectRoot
     Revision = $Revision
@@ -182,6 +193,8 @@ $result = [ordered]@{
     LinePageStartsPlacementMet = $linePageStartsPlacementMet
     LineMetaPlacements = $lineMetaPlacements
     LineMetaPlacementMet = $lineMetaPlacementMet
+    LineBufferPlacements = $lineBufferPlacements
+    LineBufferPlacementMet = $lineBufferPlacementMet
     WorstTimingType = if ($worstTiming) { $worstTiming.Type } else { $null }
     WorstSlackNs = if ($worstTiming) { $worstTiming.Slack } else { $null }
     WorstPathTNSNs = if ($worstTiming) { $worstTiming.TNS } else { $null }

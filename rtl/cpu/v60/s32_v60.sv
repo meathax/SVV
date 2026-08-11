@@ -181,6 +181,11 @@ reg [7:0]  fb_prev[0:23];   // previous sequential window for tight loops
 reg [31:0] fb_prev_base;
 reg [4:0]  fb_prev_valid;
 reg        fb_realigning;
+// Registered successor metadata keeps the exact-length decoder off the
+// retirement critical path for the common two-operand instruction stream.
+reg        seq_pd_valid;
+reg [4:0]  seq_pd_start;
+reg [4:0]  seq_pd_need;
 localparam [4:0] FB_THRESH = 5'd20;   // max instruction length
 wire [7:0] opcode = fb[0];
 
@@ -213,11 +218,155 @@ always @* begin
     end
 end
 
+function automatic [4:0] seq_need(input [7:0] op);
+    casez (op)
+        8'h00,
+        8'hc8, 8'hc9, 8'hca, 8'hcd: seq_need = 5'd1;
+        8'b0110_????:                 seq_need = 5'd2;
+        8'b0111_????, 8'h48:          seq_need = 5'd3;
+        8'hc6, 8'hc7:                 seq_need = 5'd4;
+        default:                      seq_need = FB_THRESH;
+    endcase
+endfunction
+
+// Exact lengths for common non-deferred addressing modes. Zero means unknown
+// and deliberately falls back to the conservative 20-byte requirement.
+function automatic [4:0] common_am_len_at(input [4:0] o, input modm);
+    logic [2:0] top;
+    logic [4:0] mr;
+    begin
+        top = fb[o][7:5];
+        mr  = fb[o][4:0];
+        common_am_len_at = 5'd0;
+        if (!modm) begin
+            case (top)
+                3'd0: common_am_len_at = 5'd2;
+                3'd1: common_am_len_at = 5'd3;
+                3'd2: common_am_len_at = 5'd5;
+                3'd3: common_am_len_at = 5'd1;
+                3'd4: common_am_len_at = 5'd2;
+                3'd5: common_am_len_at = 5'd3;
+                3'd6: common_am_len_at = 5'd5;
+                default: begin
+                    case (mr)
+                        5'h00,5'h01,5'h02,5'h03,5'h04,5'h05,5'h06,5'h07,
+                        5'h08,5'h09,5'h0a,5'h0b,5'h0c,5'h0d,5'h0e,5'h0f:
+                            common_am_len_at = 5'd1;
+                        5'h10,5'h18: common_am_len_at = 5'd2;
+                        5'h11,5'h19: common_am_len_at = 5'd3;
+                        5'h12,5'h1a,5'h13,5'h1b: common_am_len_at = 5'd5;
+                        5'h1c: common_am_len_at = 5'd3;
+                        5'h1d: common_am_len_at = 5'd5;
+                        5'h1e: common_am_len_at = 5'd9;
+                        default: common_am_len_at = 5'd0;
+                    endcase
+                end
+            endcase
+        end
+        else begin
+            case (top)
+                3'd0: common_am_len_at = 5'd3;
+                3'd1: common_am_len_at = 5'd5;
+                3'd2: common_am_len_at = 5'd9;
+                3'd3,3'd4,3'd5: common_am_len_at = 5'd1;
+                default: common_am_len_at = 5'd0;
+            endcase
+        end
+    end
+endfunction
+
+function automatic is_f12_primary(input [7:0] op);
+    begin
+        case (op)
+            8'h01,8'h02,8'h08,8'h09,8'h0a,8'h0b,8'h0c,8'h0d,8'h12,8'h13,
+            8'h19,8'h1b,8'h1c,8'h1d,8'h20,8'h21,8'h22,8'h23,8'h24,8'h25,
+            8'h29,8'h2b,8'h2c,8'h2d,8'h38,8'h39,8'h3a,8'h3b,8'h3c,8'h3d,
+            8'h3f,8'h40,8'h41,8'h42,8'h43,8'h44,8'h45,8'h47,8'h49,8'h4a,
+            8'h4b,8'h4d,8'h4e,8'h4f,8'h50,8'h51,8'h52,8'h53,8'h54,8'h55,
+            8'h80,8'h81,8'h82,8'h83,8'h84,8'h85,8'h86,8'h87,8'h88,8'h89,
+            8'h8a,8'h8b,8'h8c,8'h8d,8'h90,8'h91,8'h92,8'h93,8'h94,8'h95,
+            8'h96,8'h97,8'h98,8'h99,8'h9a,8'h9b,8'h9c,8'h9d,8'ha0,8'ha1,
+            8'ha2,8'ha3,8'ha4,8'ha5,8'ha6,8'ha7,8'ha8,8'ha9,8'haa,8'hab,
+            8'hac,8'had,8'hb0,8'hb1,8'hb2,8'hb3,8'hb4,8'hb5,8'hb6,8'hb7,
+            8'hb8,8'hb9,8'hba,8'hbb,8'hbc,8'hbd: is_f12_primary = 1'b1;
+            default: is_f12_primary = 1'b0;
+        endcase
+    end
+endfunction
+
+function automatic is_short_primary(input [7:0] op);
+    is_short_primary = (op[7:5] == 3'b110) || (op[7:5] == 3'b111);
+endfunction
+
+function automatic [4:0] exact_need_at(input [4:0] o);
+    logic [4:0] alen;
+    begin
+        exact_need_at = FB_THRESH;
+        if (fb_valid > o) begin
+            casez (fb[o])
+                8'h00,8'h10,8'hc8,8'hc9,8'hca,8'hcb,8'hcd:
+                    exact_need_at = 5'd1;
+                8'b0110_????: exact_need_at = 5'd2;
+                8'b0111_????,8'h48: exact_need_at = 5'd3;
+                8'hc6,8'hc7: exact_need_at = 5'd4;
+                default: begin
+                    if ((fb[o] == 8'h2d || fb[o] == 8'hbc) &&
+                        fb_valid >= o + 5'd8 && fb[o+1] == 8'h80 &&
+                        fb[o+2] == 8'hf4 && fb[o+7][7:5] == 3'd3) begin
+                        exact_need_at = 5'd8;
+                    end
+                    else if (fb[o] == 8'h2d && fb_valid >= o + 5'd4 &&
+                             fb[o+1] == 8'ha0 && fb[o+2] == 8'he0 &&
+                             fb[o+3][7:5] == 3'd4) begin
+                        exact_need_at = 5'd4;
+                    end
+                    else if ((fb[o] == 8'h2d || fb[o] == 8'hbc) &&
+                             fb_valid >= o + 5'd4 &&
+                             fb[o+1] == 8'h80 && fb[o+2] == 8'he0 &&
+                             fb[o+3][7:5] == 3'd3) begin
+                        exact_need_at = 5'd4;
+                    end
+                    else if (is_f12_primary(fb[o]) && fb_valid >= o + 5'd3 &&
+                        !fb[o+1][7]) begin
+                        alen = common_am_len_at(o + 5'd2, fb[o+1][6]);
+                        if (alen != 0) exact_need_at = 5'd2 + alen;
+                    end
+                    else if (is_short_primary(fb[o]) && fb_valid >= o + 5'd2) begin
+                        alen = common_am_len_at(o + 5'd1, fb[o][0]);
+                        if (alen != 0) exact_need_at = 5'd1 + alen;
+                    end
+                end
+            endcase
+        end
+    end
+endfunction
+
 function automatic [31:0] fb32(input [4:0] o);
     fb32 = {fb[o+3], fb[o+2], fb[o+1], fb[o]};
 endfunction
 function automatic [15:0] fb16(input [4:0] o);
     fb16 = {fb[o+1], fb[o]};
+endfunction
+
+// Minimum complete encoding required before a retained fetch window can be
+// dispatched directly. Unknown/variable addressing modes keep the original
+// 20-byte safety requirement; the fixed forms cover the hot branch-loop heads.
+function automatic [4:0] fb_prev_need;
+    begin
+        fb_prev_need = FB_THRESH;
+        if (fb_prev_valid != 0) begin
+            casez (fb_prev[0])
+                8'h00, 8'hc8, 8'hc9, 8'hca, 8'hcd: fb_prev_need = 5'd1;
+                8'b0110_????:                         fb_prev_need = 5'd2;
+                8'b0111_????, 8'h48:                  fb_prev_need = 5'd3;
+                8'hc6, 8'hc7:                         fb_prev_need = 5'd4;
+                8'h2d: if (fb_prev_valid >= 5'd3 &&
+                           fb_prev[1][7:5] == 3'b001 &&
+                           fb_prev[2] == 8'hf4) fb_prev_need = 5'd7;
+                default: ;
+            endcase
+        end
+    end
 endfunction
 
 // ---------------------------------------------------------------------------
@@ -360,6 +509,17 @@ typedef enum logic [6:0] {
 } st_t;
 
 st_t st, st_after_ea, st_after_fill;
+
+// Sequential-retirement overlap. The shift remains capped at four bytes to
+// preserve the established fetch-buffer mux depth.
+wire [4:0] seq_s = (total_len >= 5'd4) ? 5'd4 : total_len;
+wire       seq_shift_ok = (fb_base == pc) && (total_len != 5'd0) &&
+                          (total_len < fb_valid);
+wire [4:0] seq_valid_after = fb_valid - total_len;
+wire [4:0] seq_required = (seq_pd_valid && seq_pd_start == total_len)
+                          ? seq_pd_need : seq_need(fb[total_len]);
+wire       seq_dispatch_now = seq_shift_ok && (total_len <= 5'd4) &&
+                              (seq_valid_after >= seq_required);
 
 // A control-flow decode may replace the active fetch window with the retained
 // loop window below. A fast-fetch response can be visible in this same clock;
@@ -542,6 +702,50 @@ task automatic write_psw(input [31:0] v);
     f_cy <= v[3];
 endtask
 
+// Retire an EA directly when its producer already has the final value. This
+// removes the copy-only S_EA_DONE bubble without changing any bus transaction.
+task automatic complete_ea_now(
+    input [31:0] value,
+    input        value_is_reg,
+    input        value_is_immediate,
+    input [4:0]  encoded_len
+);
+    begin
+        if (!ea_target2) begin
+            op1   <= value;
+            flag1 <= value_is_reg;
+            len1  <= encoded_len;
+        end
+        else begin
+            op2   <= value;
+            flag2 <= value_is_reg;
+            len2  <= encoded_len;
+            if (value_is_immediate) begin
+                op2val   <= value;
+                op2val_v <= 1'b1;
+            end
+        end
+        if (ea_ret == 3'd1) begin
+            ea_ret       <= 3'd0;
+            ea_modm      <= instflags[5];
+            ea_ofs       <= 5'd2 + encoded_len;
+            ea_target2   <= 1'b1;
+            ea_want_addr <= 1'b1;
+            ea_dim       <= f12_dim2(cur_op);
+            st           <= S_EA_MODE;
+        end
+        else if (ea_target2 && !value_is_reg && !value_is_immediate &&
+                 cls == C_F12 && f12_reads_dest(cur_op)) begin
+            dbus_req  <= 1'b1;
+            dbus_we   <= 1'b0;
+            dbus_size <= f12_fetch_dim2(cur_op);
+            dbus_addr <= value;
+            st        <= S_OP2_LD;
+        end
+        else st <= st_after_ea;
+    end
+endtask
+
 // ---------------------------------------------------------------------------
 // EA engine (combinational mode/extension parse; sequential memory derefs)
 //   Implements s_AMTable1/2/3 dispatch:
@@ -606,8 +810,20 @@ always @* begin
     rf_raddr_a = 5'd0;
     rf_raddr_b = 5'd0;
     case (st)
-        S_DECODE:  rf_raddr_a = fb[1][4:0];
-        S_IF2:     rf_raddr_a = instflags[4:0];
+        S_DECODE: begin
+            rf_raddr_a = fb[1][4:0];
+            if (decode_f1_imm32_regind) rf_raddr_b = fb[5'd7][4:0];
+            else if (decode_f1_zero_autoinc || decode_f1_zero_regind)
+                rf_raddr_b = fb[5'd3][4:0];
+        end
+        S_IF2: begin
+            rf_raddr_a = instflags[4:0];
+            // The second existing port is idle in S_IF2. Reuse it for the AM
+            // base/register peek instead of adding the third 32:1 mux used by
+            // the System 32 implementation.
+            rf_raddr_b = f1_imm32_regind ? fb[5'd7][4:0]
+                                         : fb[5'd2][4:0];
+        end
         S_EA_MODE: begin
             rf_raddr_a = modreg;
             rf_raddr_b = modval2[4:0];
@@ -667,6 +883,38 @@ function automatic [31:0] dim_step(input [1:0] d);
                (d==2'd2) ? 32'd4 : 32'd8;
 endfunction
 
+// F2 same-instruction EA overlap. The AM mode byte is always fb[2], so simple
+// register and base+displacement forms can resolve in S_IF2 with no RAW hazard.
+wire [4:0] eaf_reg = fb[5'd2][4:0];
+wire       eaf_reg_direct = (fb[5'd2][7:5] == 3'd3);
+wire [1:0] eaf_disp_sz = fb[5'd2][6:5];
+wire       eaf_disp_direct = (fb[5'd2][7:5] < 3'd3);
+reg [31:0] eaf_disp;
+always @* begin
+    case (eaf_disp_sz)
+        2'd0: eaf_disp = {{24{fb[5'd3][7]}}, fb[5'd3]};
+        2'd1: eaf_disp = {{16{fb[5'd4][7]}}, fb[5'd4], fb[5'd3]};
+        default: eaf_disp = {fb[5'd6], fb[5'd5], fb[5'd4], fb[5'd3]};
+    endcase
+end
+wire [4:0] eaf_disp_len = 5'd1 + disp_len(eaf_disp_sz);
+// Common F1 word form: immediate source followed by register-indirect memory
+// destination. Both EAs are complete in the fetch window, so the independent
+// decode/address stages can start the unchanged BCU access directly.
+wire f1_imm32_regind = instflags == 8'h80 &&
+                       (cur_op == 8'h2d || cur_op == 8'hbc) &&
+                       fb[5'd2] == 8'hf4 && fb[5'd7][7:5] == 3'd3;
+wire decode_f1_imm32_regind = fb[5'd1] == 8'h80 &&
+                              (opcode == 8'h2d || opcode == 8'hbc) &&
+                              fb[5'd2] == 8'hf4 &&
+                              fb[5'd7][7:5] == 3'd3;
+wire decode_f1_zero_autoinc = opcode == 8'h2d && fb[5'd1] == 8'ha0 &&
+                              fb[5'd2] == 8'he0 &&
+                              fb[5'd3][7:5] == 3'd4;
+wire decode_f1_zero_regind = (opcode == 8'h2d || opcode == 8'hbc) &&
+                             fb[5'd1] == 8'h80 &&
+                             fb[5'd2] == 8'he0 &&
+                             fb[5'd3][7:5] == 3'd3;
 // ---------------------------------------------------------------------------
 // main FSM
 // ---------------------------------------------------------------------------
@@ -694,6 +942,9 @@ if (rst) begin
     pf_epoch <= 0;
     pf_iss_epoch <= 0;
     pf_suppress <= 0;
+    seq_pd_valid <= 0;
+    seq_pd_start <= 0;
+    seq_pd_need <= FB_THRESH;
 end
 else if (ce) begin
     // bus ownership: grant per-transaction, data priority, hold until ack.  A
@@ -825,6 +1076,7 @@ else if (ce) begin
 `ifdef SIMULATION
         dbg_pc <= pc;
 `endif
+        seq_pd_valid <= 1'b0;
         cur_op <= opcode;
         total_len <= 5'd2;      // default for F12 base
         // exception-frame defaults (A8): 2-word frame returning to current PC;
@@ -899,7 +1151,8 @@ else if (ce) begin
                 ? pc + {{24{fb[1][7]}}, fb[1]}
                 : pc + 2;
             pc <= branch_target;
-            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+            if (branch_target == fb_prev_base &&
+                fb_prev_valid >= fb_prev_need()) begin
                 for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
                 fb_valid <= fb_prev_valid;
                 fb_wr    <= fb_prev_valid;
@@ -920,7 +1173,8 @@ else if (ce) begin
                 ? pc + {{16{bd16[15]}}, bd16}
                 : pc + 3;
             pc <= branch_target;
-            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+            if (branch_target == fb_prev_base &&
+                fb_prev_valid >= fb_prev_need()) begin
                 for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
                 fb_valid <= fb_prev_valid;
                 fb_wr    <= fb_prev_valid;
@@ -975,7 +1229,8 @@ else if (ce) begin
                 end
             end
             pc <= branch_target;
-            if (branch_target == fb_prev_base && fb_prev_valid >= FB_THRESH) begin
+            if (branch_target == fb_prev_base &&
+                fb_prev_valid >= fb_prev_need()) begin
                 for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
                 fb_valid <= fb_prev_valid;
                 fb_wr    <= fb_prev_valid;
@@ -1011,9 +1266,80 @@ else if (ce) begin
         8'hb8, 8'hb9, 8'hba, 8'hbb, 8'hbc, 8'hbd,// CMP/SHA
         8'h86, 8'h96, 8'ha6, 8'hb6,              // MULX/MULUX/DIVX/DIVUX
         8'h3f: begin                             // MOVD (64-bit move)
-            instflags <= fb[1];
-            cls <= C_F12;
-            st <= S_IF2;
+            if (decode_f1_imm32_regind) begin
+                instflags <= fb[1];
+                cls       <= C_F12;
+                op1       <= fb32(5'd3);
+                flag1     <= 1'b0;
+                len1      <= 5'd5;
+                op2       <= rf_rdata_b;
+                flag2     <= 1'b0;
+                len2      <= 5'd1;
+                total_len <= 5'd8;
+                dbus_req  <= 1'b1;
+                dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_b;
+                if (opcode == 8'h2d) begin
+                    wb_val     <= fb32(5'd3);
+                    dbus_we    <= 1'b1;
+                    dbus_wdata <= fb32(5'd3);
+                    st         <= S_WB_MEM;
+                end
+                else begin
+                    dbus_we <= 1'b0;
+                    st      <= S_OP2_LD;
+                end
+            end
+            else if (decode_f1_zero_autoinc) begin
+                instflags <= fb[1];
+                cls       <= C_F12;
+                op1       <= 32'd0;
+                flag1     <= 1'b0;
+                len1      <= 5'd1;
+                op2       <= rf_rdata_b;
+                flag2     <= 1'b0;
+                len2      <= 5'd1;
+                total_len <= 5'd4;
+                queue_reg_write(fb[5'd3][4:0],
+                                rf_rdata_b + dim_step(2'd2),
+                                32'hffff_ffff);
+                wb_val     <= 32'd0;
+                dbus_req   <= 1'b1;
+                dbus_we    <= 1'b1;
+                dbus_size  <= 2'd2;
+                dbus_addr  <= rf_rdata_b;
+                dbus_wdata <= 32'd0;
+                st         <= S_WB_MEM;
+            end
+            else if (decode_f1_zero_regind) begin
+                instflags <= fb[1];
+                cls       <= C_F12;
+                op1       <= 32'd0;
+                flag1     <= 1'b0;
+                len1      <= 5'd1;
+                op2       <= rf_rdata_b;
+                flag2     <= 1'b0;
+                len2      <= 5'd1;
+                total_len <= 5'd4;
+                dbus_req  <= 1'b1;
+                dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_b;
+                if (opcode == 8'h2d) begin
+                    wb_val     <= 32'd0;
+                    dbus_we    <= 1'b1;
+                    dbus_wdata <= 32'd0;
+                    st         <= S_WB_MEM;
+                end
+                else begin
+                    dbus_we <= 1'b0;
+                    st      <= S_OP2_LD;
+                end
+            end
+            else begin
+                instflags <= fb[1];
+                cls <= C_F12;
+                st <= S_IF2;
+            end
         end
 
         // ---- single-operand format (opcode LSB = modm), operand at PC+1 ----
@@ -1033,6 +1359,21 @@ else if (ce) begin
         8'hde, 8'hdf,                                      // PREPARE
         8'he2, 8'he3,                                      // RET
         8'hea, 8'heb, 8'hfa, 8'hfb: begin                  // RETIU/RETIS
+            if ((opcode[7:4] == 4'hd) &&
+                (opcode[3:1] <= 3'd6) && (opcode[3:1] != 3'd3) &&
+                opcode[0] &&
+                fb[5'd1][7:5] == 3'd3) begin
+                // Register-direct INC/DEC already has its complete operand at
+                // decode. Skip only the generic EA parser; S_EXEC retains the
+                // normal width, flag and masked-register-write semantics.
+                cls       <= C_SHORT;
+                op1       <= {27'b0, fb[5'd1][4:0]};
+                flag1     <= 1'b1;
+                len1      <= 5'd1;
+                total_len <= 5'd2;
+                st        <= S_EXEC;
+            end
+            else begin
             cls <= C_SHORT;
             ea_modm  <= opcode[0];
             ea_ofs   <= 5'd1;
@@ -1073,6 +1414,7 @@ else if (ce) begin
             ea_ret <= 3'd0;
             st <= S_EA_MODE;
             st_after_ea <= S_EXEC;
+            end
         end
 
         // ---- GETPSW is a write op: handle as address ----
@@ -1266,7 +1608,31 @@ else if (ce) begin
     S_IF2: begin
         // operand roles: for most ops op1=ReadAM(value), op2=addr(write) —
         // exceptions handled in S_EXEC via flags.
-        if (instflags[7]) begin
+        if (f1_imm32_regind) begin
+            op1       <= fb32(5'd3);
+            flag1     <= 1'b0;
+            len1      <= 5'd5;
+            op2       <= rf_rdata_b;
+            flag2     <= 1'b0;
+            len2      <= 5'd1;
+            total_len <= 5'd8;
+            dbus_req  <= 1'b1;
+            dbus_size <= 2'd2;
+            dbus_addr <= rf_rdata_b;
+            if (cur_op == 8'h2d) begin
+                // MOV has no flag side effects; the immediate is already the
+                // final write value, so execution overlaps bus issue.
+                wb_val     <= fb32(5'd3);
+                dbus_we    <= 1'b1;
+                dbus_wdata <= fb32(5'd3);
+                st         <= S_WB_MEM;
+            end
+            else begin
+                dbus_we <= 1'b0;
+                st      <= S_OP2_LD;
+            end
+        end
+        else if (instflags[7]) begin
             // F1: both operands have mode bytes
             ea_modm  <= instflags[6];
             ea_ofs   <= 5'd2;
@@ -1292,8 +1658,60 @@ else if (ce) begin
                 ea_want_addr <= f12_op1_is_addr(cur_op);
                 ea_dim  <= f12_dim1(cur_op);
                 ea_ret  <= 3'd0;
-                st <= S_EA_MODE;
-                st_after_ea <= S_EXEC;
+                if (eaf_reg_direct && instflags[6]) begin
+                    if (f12_op1_is_addr(cur_op)) begin
+                        op1   <= {27'b0, eaf_reg};
+                        flag1 <= 1'b1;
+                    end
+                    else begin
+                        op1   <= dimext(rf_rdata_b, f12_dim1(cur_op));
+                        flag1 <= 1'b0;
+                    end
+                    len1 <= 5'd1;
+                    st   <= S_EXEC;
+                end
+                else if (eaf_disp_direct && !instflags[6]) begin
+                    if (f12_op1_is_addr(cur_op)) begin
+                        op1   <= rf_rdata_b + eaf_disp;
+                        flag1 <= 1'b0;
+                        len1  <= eaf_disp_len;
+                        st    <= S_EXEC;
+                    end
+                    else begin
+                        ea_addr   <= rf_rdata_b + eaf_disp;
+                        ea_len    <= eaf_disp_len;
+                        ea_flag   <= 1'b0;
+                        ea_isval  <= 1'b0;
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= f12_dim1(cur_op);
+                        dbus_addr <= rf_rdata_b + eaf_disp;
+                        st        <= S_EA_VAL;
+                    end
+                end
+                else if (!instflags[6] && fb[5'd2][7:5] == 3'd3) begin
+                    if (f12_op1_is_addr(cur_op)) begin
+                        op1   <= rf_rdata_b;
+                        flag1 <= 1'b0;
+                        len1  <= 5'd1;
+                        st    <= S_EXEC;
+                    end
+                    else begin
+                        ea_addr   <= rf_rdata_b;
+                        ea_len    <= 5'd1;
+                        ea_flag   <= 1'b0;
+                        ea_isval  <= 1'b0;
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= f12_dim1(cur_op);
+                        dbus_addr <= rf_rdata_b;
+                        st        <= S_EA_VAL;
+                    end
+                end
+                else begin
+                    st <= S_EA_MODE;
+                    st_after_ea <= S_EXEC;
+                end
             end
             else begin
                 // F2 D=0: op1 = reg value, op2 = AM(write)
@@ -1322,8 +1740,58 @@ else if (ce) begin
                 ea_want_addr <= 1'b1;   // op2 as address for write
                 ea_dim  <= f12_dim2(cur_op);
                 ea_ret  <= 3'd0;
-                st <= S_EA_MODE;
-                st_after_ea <= S_EXEC;
+                if (instflags[6] && fb[5'd2][7:5] == 3'd4 &&
+                    (cur_op == 8'h09 || cur_op == 8'h1b || cur_op == 8'h2d)) begin
+                    op2       <= rf_rdata_b;
+                    flag2     <= 1'b0;
+                    len2      <= 5'd1;
+                    total_len <= 5'd3;
+                    queue_reg_write(eaf_reg,
+                                    rf_rdata_b + dim_step(f12_dim2(cur_op)),
+                                    32'hffff_ffff);
+                    dbus_req   <= 1'b1;
+                    dbus_we    <= 1'b1;
+                    dbus_size  <= f12_dim2(cur_op);
+                    dbus_addr  <= rf_rdata_b;
+                    dbus_wdata <= rf_rdata_a;
+                    st         <= S_WB_MEM;
+                end
+                else if (eaf_reg_direct && instflags[6]) begin
+                    op2   <= {27'b0, eaf_reg};
+                    flag2 <= 1'b1;
+                    len2  <= 5'd1;
+                    st    <= S_EXEC;
+                end
+                else if (eaf_disp_direct && !instflags[6]) begin
+                    op2   <= rf_rdata_b + eaf_disp;
+                    flag2 <= 1'b0;
+                    len2  <= eaf_disp_len;
+                    if (f12_reads_dest(cur_op)) begin
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= f12_fetch_dim2(cur_op);
+                        dbus_addr <= rf_rdata_b + eaf_disp;
+                        st        <= S_OP2_LD;
+                    end
+                    else st <= S_EXEC;
+                end
+                else if (!instflags[6] && fb[5'd2][7:5] == 3'd3) begin
+                    op2   <= rf_rdata_b;
+                    flag2 <= 1'b0;
+                    len2  <= 5'd1;
+                    if (f12_reads_dest(cur_op)) begin
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= f12_fetch_dim2(cur_op);
+                        dbus_addr <= rf_rdata_b;
+                        st        <= S_OP2_LD;
+                    end
+                    else st <= S_EXEC;
+                end
+                else begin
+                    st <= S_EA_MODE;
+                    st_after_ea <= S_EXEC;
+                end
             end
         end
     end
@@ -1366,7 +1834,7 @@ else if (ce) begin
                     ea_len <= 5'd1;
                     ea_flag <= 1'b0;
                     ea_isval <= 1'b1;
-                    st <= S_EA_DONE;  // value already
+                    complete_ea_now({28'b0, modreg[3:0]}, 1'b0, 1'b1, 5'd1);
                 end
                 5'h10, 5'h11, 5'h12: begin // PC displacement
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
@@ -1384,13 +1852,22 @@ else if (ce) begin
                     d1t = fb32(ea_ofs+1);
                     d2t = {16'b0, fb16(ea_ofs+1)};
                     case (ea_dim)
-                        2'd0: ea_out <= {24'b0, fb[ea_ofs+1]};
-                        2'd1: ea_out <= d2t;
-                        default: ea_out <= d1t;
+                        2'd0: begin
+                            ea_out <= {24'b0, fb[ea_ofs+1]};
+                            complete_ea_now({24'b0, fb[ea_ofs+1]},
+                                            1'b0, 1'b1, 5'd2);
+                        end
+                        2'd1: begin
+                            ea_out <= d2t;
+                            complete_ea_now(d2t, 1'b0, 1'b1, 5'd3);
+                        end
+                        default: begin
+                            ea_out <= d1t;
+                            complete_ea_now(d1t, 1'b0, 1'b1, 5'd5);
+                        end
                     endcase
                     ea_len <= 5'd1 + imm_len(ea_dim);
                     ea_isval <= 1'b1;
-                    st <= S_EA_DONE;
                 end
                 5'h18, 5'h19, 5'h1a: begin // PC displacement indirect
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
@@ -1437,10 +1914,14 @@ else if (ce) begin
                 if (ea_want_addr) begin
                     ea_out  <= {27'b0, modreg};
                     ea_flag <= 1'b1;
+                    complete_ea_now({27'b0, modreg}, 1'b1, 1'b0, 5'd1);
                 end
-                else ea_out <= dimext(rf_rdata_a, ea_dim);
+                else begin
+                    ea_out <= dimext(rf_rdata_a, ea_dim);
+                    complete_ea_now(dimext(rf_rdata_a, ea_dim),
+                                    1'b0, 1'b0, 5'd1);
+                end
                 ea_len <= 5'd1;
-                st <= S_EA_DONE;
             end
             3'd4: begin             // Autoincrement
                 ea_addr <= rf_rdata_a;
@@ -1586,6 +2067,11 @@ else if (ce) begin
     // ------------------------------------------------------------------
     // EXEC: per-opcode semantics on op1/op2
     S_EXEC: begin
+        if (cls == C_F12) begin
+            seq_pd_start <= 5'd2 + len1 + len2;
+            seq_pd_need  <= exact_need_at(5'd2 + len1 + len2);
+            seq_pd_valid <= 1'b1;
+        end
         if (cls == C_F12 && !flag2 && !op2val_v && f12_reads_dest(cur_op)) begin
             st <= S_OP2_LD;   // V60-1: load memory destination before exec
         end
@@ -1606,10 +2092,38 @@ else if (ce) begin
             dbus_addr <= op2;
         end
         else if (dack) begin
+            logic [1:0] cmp_dim;
+            logic [31:0] cmp_dst, cmp_res;
             dbus_req <= 0;
-            op2val   <= dimext(bus_rdata, f12_fetch_dim2(cur_op));
-            op2val_v <= 1'b1;
-            st <= S_EXEC;
+            cmp_dim = f12_dim2(cur_op);
+            cmp_dst = dimext(bus_rdata, cmp_dim);
+            if (cur_op == 8'hb8 || cur_op == 8'hba || cur_op == 8'hbc) begin
+                // The memory read and the compare are independent pipeline
+                // stages in the V60. Resolve CMP as the BCU returns its final
+                // half instead of serializing it through a separate S_EXEC
+                // enable; no writeback or bus transaction is changed.
+                cmp_res = cmp_dst - dimext(op1, cmp_dim);
+                f_cy <= (cmp_dst < dimext(op1, cmp_dim));
+                f_ov <= (cmp_dim == 2'd0)
+                        ? ((cmp_dst[7] ^ op1[7]) &
+                           (cmp_dst[7] ^ cmp_res[7]))
+                        : (cmp_dim == 2'd1)
+                        ? ((cmp_dst[15] ^ op1[15]) &
+                           (cmp_dst[15] ^ cmp_res[15]))
+                        : ((cmp_dst[31] ^ op1[31]) &
+                           (cmp_dst[31] ^ cmp_res[31]));
+                set_zs(cmp_res, cmp_dim);
+                total_len    <= 5'd2 + len1 + len2;
+                seq_pd_start <= 5'd2 + len1 + len2;
+                seq_pd_need  <= exact_need_at(5'd2 + len1 + len2);
+                seq_pd_valid <= 1'b1;
+                st <= S_NEXT;
+            end
+            else begin
+                op2val   <= dimext(bus_rdata, f12_fetch_dim2(cur_op));
+                op2val_v <= 1'b1;
+                st <= S_EXEC;
+            end
         end
     end
 
@@ -1863,55 +2377,24 @@ else if (ce) begin
 
     // advance PC and refill
     S_NEXT: begin
-        // Fuse the first (at most four-byte) sequential window realignment
-        // into the otherwise-idle retirement state.  S_FILL previously spent
-        // a full extra V60 enable doing this exact 5:1 shift after every normal
-        // instruction.  Twin Eagle II's RAM-test boot averaged 10.9 enables per
-        // instruction and missed its physical three-second watchdog even though
-        // execution was correct.  The shift width remains capped at four—the
-        // established timing-closure guard—while longer instructions finish in
-        // S_FILL exactly as before.
         st <= S_FILL;
-        if (fb_base == pc && total_len < fb_valid) begin
-            logic [2:0] s;
-            logic [4:0] remaining, next_need;
-            logic [7:0] next_opcode;
-            s = (total_len >= 5'd4) ? 3'd4 : total_len[2:0];
-            remaining = fb_valid - total_len;
-            next_opcode = fb[total_len];
-            next_need = FB_THRESH;
-            casez (next_opcode)
-                8'h00,
-                8'hc8, 8'hc9, 8'hca, 8'hcd: next_need = 5'd1;
-                8'b0110_????:                 next_need = 5'd2;
-                8'b0111_????, 8'h48:          next_need = 5'd3;
-                8'hc6, 8'hc7:                 next_need = 5'd4;
-                8'h2d: begin
-                    if (remaining < 5'd3)
-                        next_need = 5'd3;
-                    else if (fb[total_len + 1'd1][7:5] == 3'b001 &&
-                             fb[total_len + 2'd2] == 8'hf4)
-                        next_need = 5'd11;
-                end
-                default: ;
-            endcase
+        if (seq_shift_ok) begin
+            // The retained window is a loop head, not a rolling previous-
+            // instruction buffer.  Replacing it on every retirement loses the
+            // head before a normal Bcc reaches the loop tail, turning the hot
+            // branch from a cache restore into a full refill.
             if (!fb_realigning && fb_prev_valid == 0) begin
                 for (int i = 0; i < 24; i++) fb_prev[i] <= fb[i];
                 fb_prev_base  <= fb_base;
                 fb_prev_valid <= fb_valid;
             end
             for (int i = 0; i < 24; i++)
-                if (i + s < 24) fb[i] <= fb[i + s];
-            fb_base  <= fb_base + {29'b0, s};
-            fb_valid <= fb_valid - {2'b0, s};
-            fb_wr    <= fb_wr - {2'b0, s};
+                if (i + seq_s < 24) fb[i] <= fb[i + seq_s];
+            fb_base  <= fb_base + {27'b0, seq_s};
+            fb_valid <= fb_valid - seq_s;
+            fb_wr    <= fb_wr - seq_s;
             fb_realigning <= (total_len > 5'd4);
-            // With the next instruction already complete in the shifted
-            // window, enter decode directly.  This removes the former
-            // aligned S_FILL dispatch bubble; conservative variable-EA
-            // instructions still require the full 20-byte frontier.
-            if (total_len <= 5'd4 && remaining >= next_need)
-                st <= S_DECODE;
+            if (seq_dispatch_now) st <= S_DECODE;
         end
         pc <= pc + total_len;
         st_after_fill <= S_DECODE;
@@ -3647,7 +4130,9 @@ task automatic exec_op;
         mdop <= ma;
         mdacc <= {32'b0, mb};
         md_sign <= mul_signed & (sa[31] ^ sb[31]);
-        mdcnt <= 6'd32;
+        // Consume two multiplier bits per enabled CPU clock. This retains the
+        // resource-light iterative datapath while halving MUL latency.
+        mdcnt <= 6'd16;
         st <= S_MULDIV;
     end
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5,       // DIV/DIVU
@@ -3707,7 +4192,7 @@ task automatic exec_op;
         mdop <= ma;
         mdacc <= {32'b0, mb};
         md_sign <= mul_signed & (op1[31] ^ b[31]);
-        mdcnt <= 6'd32;
+        mdcnt <= 6'd16;
         st <= S_MULDIV;
     end
     8'ha6, 8'hb6: begin // DIVX/DIVUX: (reg-pair 64) / op1 -> q in reg, r in reg+1
@@ -4116,14 +4601,19 @@ task automatic md_step;
     if (cur_op == 8'h81 || cur_op == 8'h83 || cur_op == 8'h85 ||
         cur_op == 8'h91 || cur_op == 8'h93 || cur_op == 8'h95 ||
         cur_op == 8'h86 || cur_op == 8'h96) begin
-        // Multiply: shift-add.  Preserve the carry from the 32-bit upper-half
-        // addition as the new bit 63 when the combined accumulator shifts
-        // right.  Prepending zero to an already-truncated 32-bit sum silently
-        // produced wrong unsigned/high-magnitude products.
-        logic [32:0] partial;
-        partial = {1'b0, mdacc[63:32]} + {1'b0, mdop};
-        mdacc <= mdacc[0] ? {partial, mdacc[31:1]}
-                          : {1'b0, mdacc[63:32], mdacc[31:1]};
+        // Exact radix-4 shift-add. Add 0/1/2/3 times the multiplicand to the
+        // upper half, then consume the multiplier's low two bits together.
+        // The 66-bit temporary preserves both carries for 3*0xffffffff.
+        logic [33:0] partial;
+        logic [65:0] wide;
+        case (mdacc[1:0])
+            2'd0: partial = 34'd0;
+            2'd1: partial = {2'b00, mdop};
+            2'd2: partial = {1'b0, mdop, 1'b0};
+            default: partial = {2'b00, mdop} + {1'b0, mdop, 1'b0};
+        endcase
+        wide = {2'b00, mdacc} + {partial, 32'b0};
+        mdacc <= wide[65:2];
     end
     else begin
         // divide: non-restoring-ish simple restoring step

@@ -1,0 +1,40 @@
+{
+  "id": "coin_start_p1_gameplay",
+  "set": "vasara2",
+  "mame": "0.289",
+  "mra": "Vasara 2 (set 1).mra",
+  "rom_zip_sha256": "f1032fb6d0aee00554e45969eed146047a1e46199f49d1fadb3fff7b109b76d4",
+  "maincpu_sha256": "122976ed8a011522995211ea120cee112f5dfe3335d3785190b1482defdb8497",
+  "sprites_sha256": "93c48bb701f73ae262901388fbc735b0152ab8ba151d3b4c1fd145131c0e5ea4",
+  "dsw1": "0x00FF",
+  "dsw2": "0x00FF",
+  "defaults": {
+    "in_p1": "0xFFFF",
+    "in_p2": "0xFFFF",
+    "in_system": "0xFFFF",
+    "in_extra": "0xFFFF"
+  },
+  "schedule": [
+    { "frames": "30-33", "input": "COIN1", "state": "pressed" },
+    { "frames": "165-169", "input": "P1 START", "state": "pressed" },
+    { "frames": "250-254", "input": "P1 START", "state": "pressed" },
+    { "frames": "255-261", "input": "P1 B1", "state": "pressed" },
+    { "frames": "300-329", "input": "P1 RIGHT", "state": "pressed" },
+    { "frames": "330-359", "input": "P1 B1", "state": "pressed" },
+    { "frames": "360-389", "input": "P1 UP", "state": "pressed" },
+    { "frames": "420-424", "input": "P1 B1", "state": "pressed" },
+    { "frames": "480-484", "input": "P1 START", "state": "pressed" },
+    { "frames": "540-544", "input": "P1 B1", "state": "pressed" },
+    { "frames": "820-869", "input": "P1 RIGHT", "state": "pressed" },
+    { "frames": "840-847,875-882", "input": "P1 B1", "state": "pressed" },
+    { "frames": "890-919", "input": "P1 UP", "state": "pressed" }
+  ],
+  "geometry": {
+    "active_w": 336,
+    "active_h": 240
+  },
+  "stop": {
+    "after_video_enable_frames": 950,
+    "note": "Vasara 2 coin/start, selection, and gameplay differential scenario"
+  }
+}

@@ -1,5 +1,27 @@
 # Pre-RBF optimization notes
 
+## Scanline-buffer ALM relief (10 Aug 2026, fit pending)
+
+The seed-3 fit closed the former SDRAM setup failure but remained just outside
+the release gate at -0.055 ns hold in `clk_sys` and -0.017 ns setup in the
+MiSTer HDMI domain.  Routing was not congested (34% average, 56% peak), so
+broad floorplanning or framework/PLL edits are not justified.
+
+The fitter's per-entity and RAM tables exposed a safer pressure reduction:
+the eight 88x15 simple-dual-port banks in `ssv_line_buffer4` were implemented
+as MLABs at about 42-44 ALMs each, roughly 346 ALMs total, and the router also
+duplicated several of their output registers.  That fit had 36 spare M10Ks but
+only 2,810 spare ALMs.  The banks are now explicitly steered to eight M10Ks,
+preserving their registered-read/write schedule while removing distributed
+RAM from the binding resource.  Expected balance from the retained fit is
+about 38.75k ALMs and 525 M10Ks; only a fresh map/fit may claim the actual
+numbers or timing effect.
+
+`report-quartus.ps1` now fails closed unless a fresh fit proves exactly eight
+M10K line-buffer placements.  Slang reports zero errors/warnings and the
+standalone Icarus line-buffer regression passes (`clear_clocks=88`).  No new
+Quartus build or RBF was run for this change.
+
 ## Shared multiplier and renderer placement pass (10 Aug 2026, no Quartus/RBF)
 
 The newest retained fit completed placement at 39,397/41,910 ALMs (94%),

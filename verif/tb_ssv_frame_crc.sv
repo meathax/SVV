@@ -355,6 +355,11 @@ longint cycle_count, max_cycles;
 // Enabled with +V60_CYCLE_PROFILE; window and output path are configurable.
 // ---------------------------------------------------------------------
 bit                    v60_prof_enable;
+// A restored Verilator archive overwrites ordinary testbench variables after
+// the initial block has parsed plusargs.  Keep the request live so profiling
+// can be enabled on a checkpoint replay without changing saved RTL state.
+wire                   v60_prof_requested = v60_prof_enable ||
+                                               $test$plusargs("V60_CYCLE_PROFILE");
 bit                    v60_prof_started;
 integer                v60_prof_lo_frame, v60_prof_hi_frame;
 string                 v60_prof_path;
@@ -486,11 +491,25 @@ logic ignore_overrun;
 // the frame black; allow their allocator census to print without weakening
 // the normal strict attract gate.
 logic ignore_nonblack;
-string irq_schedule_path, ppm_path, ppm_prefix;
+string irq_schedule_path, irq_bus_schedule_path, ppm_path, ppm_prefix;
 integer ppm_fd, ppm_frame, ppm_pixels;
 integer ppm_start, ppm_count, ppm_step, ppm_shots_done;
 integer irq_schedule_fd, irq_scan_result;
 logic diff_irq_enabled, diff_vblank_pulse, diff_count_started;
+logic [31:0] diff_irq_align_pc;
+logic diff_sound_ce_enabled, diff_sound_ce;
+integer diff_sound_num0, diff_sound_den0;
+integer diff_sound_num1, diff_sound_den1;
+integer diff_sound_switch_frame;
+integer diff_sound_accum, diff_sound_sum;
+integer irq_schedule_count, irq_schedule_index;
+longint unsigned irq_schedule [0:4095];
+logic diff_irq_bus_enabled, diff_irq_bus_pulse;
+logic diff_irq_bus_active;
+integer irq_bus_schedule_fd, irq_bus_schedule_count, irq_bus_schedule_index;
+longint unsigned diff_irq_bus_start;
+longint unsigned irq_bus_schedule [0:4095];
+longint unsigned visual_trace_event_count;
 longint unsigned retire_count, next_irq_retire;
 longint unsigned cpu_activity_count;
 longint unsigned last_vb_retire, last_irq_entry_retire;
@@ -542,10 +561,46 @@ wire core_cold_rst = rst | st010_load_active |
 wire wdog_rst;
 wire core_rst = core_cold_rst | wdog_rst;
 
+// MAME's flat-eight-clock V60 model and the hardware-timed RTL reach the same
+// retired event at different wall-clock frames.  Retire-scheduled diagnosis
+// therefore needs an explicitly normalized OTTO timeline or autonomous voice
+// completion will create a false behavioral mismatch.  This state and port
+// exist only in the external-clock Verilator profile; ordinary simulation and
+// the release core continue to use ce_cpu directly.
+always_ff @(posedge clk_sys) begin
+    if (core_rst) begin
+        diff_sound_ce    <= 1'b0;
+        diff_sound_accum <= 0;
+    end else begin
+        diff_sound_ce <= 1'b0;
+        if (diff_sound_ce_enabled && ce_cpu) begin
+            if (post_ve_frames < diff_sound_switch_frame)
+                diff_sound_sum = diff_sound_accum + diff_sound_num0;
+            else
+                diff_sound_sum = diff_sound_accum + diff_sound_num1;
+            if (diff_sound_sum >= ((post_ve_frames < diff_sound_switch_frame)
+                                   ? diff_sound_den0 : diff_sound_den1)) begin
+                diff_sound_ce <= 1'b1;
+                diff_sound_accum <= diff_sound_sum -
+                    ((post_ve_frames < diff_sound_switch_frame)
+                     ? diff_sound_den0 : diff_sound_den1);
+            end else begin
+                diff_sound_accum <= diff_sound_sum;
+            end
+        end
+    end
+end
+
 ssv_core dut (
     .cfg(sim_cfg),
     .clk_sys(clk_sys), .rst(core_rst), .cold_rst(core_cold_rst), .ce_cpu(ce_cpu),
     .watchdog_hold(1'b0),
+`ifdef SSV_VISUAL_EXTERNAL_CLOCK
+    .diff_irq_enable(diff_irq_enabled || diff_irq_bus_active),
+    .diff_irq3_pulse(diff_vblank_pulse),
+    .diff_sound_ce_enable(diff_sound_ce_enabled),
+    .diff_sound_ce(diff_sound_ce),
+`endif
     .sdr_p0_req(sdr_p0_req), .sdr_p0_addr(sdr_p0_addr),
     .sdr_p0_dout(sdr_p0_dout), .sdr_p0_ack(sdr_p0_ack),
     .sdr_p2_req(sdr_p2_req), .sdr_p2_addr(sdr_p2_addr),
@@ -670,7 +725,11 @@ always_ff @(posedge clk_sys) begin
         // C3 -- the build has just completed; the bucket table is final.
         if (obj_cache_busy_d && !dut.obj_cache_busy) begin
             for (occ_i = 0; occ_i < 240; occ_i = occ_i + 1) begin
-                occ_v = int'(dut.sprite_renderer.line_counts[occ_i]);
+                // line_counts and line_bases were merged into the packed
+                // line_meta M10K. Decode the same fields for diagnostics;
+                // this is observation-only and does not drive the DUT.
+                occ_v = int'(dut.sprite_renderer.line_meta[occ_i][
+                    dut.sprite_renderer.LINE_COUNT_WIDTH-1:0]);
                 if (occ_v >= 0 && occ_v < OCC_BINS)
                     occ_hist[occ_v] = occ_hist[occ_v] + 1;
                 occ_lines_sampled = occ_lines_sampled + 1;
@@ -1120,10 +1179,38 @@ always_ff @(posedge clk_sys) begin
 end
 
 always_comb begin
-    diff_vblank_pulse =
-        diff_irq_enabled && diff_count_started && ce_cpu &&
-        dut.cpu.st == 7'd3 &&
-        retire_count + 1 == next_irq_retire;
+    if (diff_irq_bus_enabled)
+        diff_vblank_pulse = diff_irq_bus_pulse;
+    else
+        diff_vblank_pulse =
+            diff_irq_enabled && diff_count_started && ce_cpu &&
+            dut.cpu.st == 7'd3 &&
+            retire_count + 1 == next_irq_retire;
+end
+
+// Checkpoint-safe architectural IRQ replay.  The schedule names the zero-
+// based index of the first traced bus event in each MAME IRQ handler.  Once
+// the preceding event has committed, pulse IRQ3 before another traced event
+// can pass.  The preloaded table and index are ordinary Verilator state;
+// unlike a live $fscanf cursor or hierarchical force, they serialize.
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        diff_irq_bus_pulse <= 1'b0;
+        diff_irq_bus_active <= 1'b0;
+        irq_bus_schedule_index <= 0;
+    end else begin
+        diff_irq_bus_pulse <= 1'b0;
+        if (diff_irq_bus_enabled && !diff_irq_bus_active &&
+            visual_trace_event_count >= diff_irq_bus_start)
+            diff_irq_bus_active <= 1'b1;
+        if (diff_irq_bus_active &&
+            irq_bus_schedule_index < irq_bus_schedule_count &&
+            visual_trace_event_count ==
+                irq_bus_schedule[irq_bus_schedule_index]) begin
+            diff_irq_bus_pulse <= 1'b1;
+            irq_bus_schedule_index <= irq_bus_schedule_index + 1;
+        end
+    end
 end
 
 always_ff @(posedge clk_sys) begin
@@ -1131,21 +1218,25 @@ always_ff @(posedge clk_sys) begin
         retire_count <= 0;
         cpu_activity_count <= 0;
         diff_count_started <= 1'b0;
+        irq_schedule_index <= 0;
+        if (diff_irq_enabled && irq_schedule_count != 0)
+            next_irq_retire <= irq_schedule[0];
     end else begin
         if (ce_cpu && dut.cpu.st == 7'd3 &&
             !(!dut.irq_n && dut.cpu.psw_ie)) begin
             cpu_activity_count <= cpu_activity_count + 1;
             if (!diff_count_started) begin
-                if (dut.cpu.pc == 32'h00f1_0120) begin
+                if (dut.cpu.pc == diff_irq_align_pc) begin
                     diff_count_started <= 1'b1;
                     retire_count <= 1;
                 end
             end else begin
                 if (diff_irq_enabled &&
                     retire_count + 1 == next_irq_retire) begin
-                    irq_scan_result = $fscanf(
-                        irq_schedule_fd, "%d\n", next_irq_retire);
-                    if (irq_scan_result != 1)
+                    if (irq_schedule_index + 1 < irq_schedule_count) begin
+                        irq_schedule_index <= irq_schedule_index + 1;
+                        next_irq_retire <= irq_schedule[irq_schedule_index + 1];
+                    end else
                         next_irq_retire <= {64{1'b1}};
                 end
                 retire_count <= retire_count + 1;
@@ -1469,6 +1560,7 @@ always_ff @(posedge clk_sys) begin
         visual_total_spr_writes <= 0;
         visual_total_pal_writes <= 0;
         visual_total_scroll_writes <= 0;
+        visual_trace_event_count <= 0;
 `endif
     end else begin
 `ifdef SSV_VISUAL
@@ -1490,10 +1582,13 @@ always_ff @(posedge clk_sys) begin
             else if (dut.sel_st010)                   visual_trace_device = 9;
             else if (dut.sel_drifto_unknown)          visual_trace_device = 10;
             if (visual_trace_device != 0)
+            begin
                 ssv_visual_trace_bus(
                     post_ve_frames, cycle_count, debug_pc, dut.m_we, dut.a,
                     dut.m_we ? dut.m_wdata : dut.m_rdata, dut.m_be,
                     visual_trace_device, dut.cpu.r, dut.cpu.psw);
+                visual_trace_event_count <= visual_trace_event_count + 1'd1;
+            end
         end
         if (visual_diag) begin
         if (dut.line_buffer_start) visual_line_starts <= visual_line_starts + 1;
@@ -1896,6 +1991,12 @@ always_ff @(posedge clk_sys) begin
             end
             if (dump_ppm_open) begin
                 $fclose(ppm_fd);
+                // File-descriptor values are process-local and therefore
+                // cannot cross a VerilatedSave boundary.  $fclose does not
+                // clear the SystemVerilog integer, so leaving the stale
+                // nonzero value made every checkpoint after a completed PPM
+                // capture fail the external-clock safety assertion.
+                ppm_fd = 0;
                 dump_ppm_open <= 1'b0;
                 ppm_shots_done <= ppm_shots_done + 1;
                 $display("DUMP_PPM wrote %s frame=%0d pixels=%0d shot=%0d/%0d",
@@ -2203,8 +2304,11 @@ always_ff @(posedge clk_sys) begin
                         dut.sprite_renderer.line_page_q,
                         overflow_i),
                     dut.sprite_renderer.line_entries[
-                        dut.sprite_renderer.line_bases[
-                            dut.sprite_renderer.bucket_y] + overflow_i]
+                        dut.sprite_renderer.line_meta[
+                            dut.sprite_renderer.bucket_y][
+                                dut.sprite_renderer.LINE_META_WIDTH-1:
+                                dut.sprite_renderer.LINE_COUNT_WIDTH] +
+                        overflow_i]
                 };
                 overflow_desc =
                     dut.sprite_renderer.descriptor_cache[overflow_entry];
@@ -2292,7 +2396,7 @@ end
 // execute+writeback cost. Purely observational: no RTL signal is written,
 // no synthesizable behavior is touched.
 always @(posedge clk_sys) begin
-    if (v60_prof_enable && !rst && dut.cpu.dbg_retire) begin
+    if (v60_prof_requested && !rst && dut.cpu.dbg_retire) begin
         v60_prof_delta  = cycle_count - v60_prof_last_tick;
         v60_prof_op_tmp = dut.cpu.cur_op;
         if (v60_prof_started &&
@@ -2351,7 +2455,7 @@ end
 task automatic finalize_run;
 begin
     run_done = 1'b1;
-    if (v60_prof_enable) begin
+    if (v60_prof_requested) begin
         integer v60_prof_buckets;
         v60_prof_buckets = 0;
         v60_prof_fd = $fopen(v60_prof_path, "w");
@@ -2690,24 +2794,74 @@ initial begin
     irq_entries_post_ve = 0;
     vb_pulses_post_ve = 0;
     diff_irq_enabled = 1'b0;
+    diff_irq_align_pc = 32'h00f1_0120;
+    diff_sound_ce_enabled = $test$plusargs("DIFF_SOUND_SCALE");
+    if (!$value$plusargs("DIFF_SOUND_NUM0=%d", diff_sound_num0))
+        diff_sound_num0 = 42;
+    if (!$value$plusargs("DIFF_SOUND_DEN0=%d", diff_sound_den0))
+        diff_sound_den0 = 55;
+    if (!$value$plusargs("DIFF_SOUND_NUM1=%d", diff_sound_num1))
+        diff_sound_num1 = 61;
+    if (!$value$plusargs("DIFF_SOUND_DEN1=%d", diff_sound_den1))
+        diff_sound_den1 = 86;
+    if (!$value$plusargs("DIFF_SOUND_SWITCH_FRAME=%d", diff_sound_switch_frame))
+        diff_sound_switch_frame = 165;
+    diff_sound_accum = 0;
+    diff_sound_ce = 1'b0;
+    if (diff_sound_ce_enabled &&
+        (diff_sound_num0 <= 0 || diff_sound_den0 <= 0 ||
+         diff_sound_num0 > diff_sound_den0 ||
+         diff_sound_num1 <= 0 || diff_sound_den1 <= 0 ||
+         diff_sound_num1 > diff_sound_den1))
+        $fatal(1, "invalid DIFF_SOUND_SCALE ratios");
+    irq_schedule_count = 0;
+    irq_schedule_index = 0;
+    diff_irq_bus_enabled = 1'b0;
+    diff_irq_bus_pulse = 1'b0;
+    diff_irq_bus_active = 1'b0;
+    diff_irq_bus_start = 0;
+    irq_bus_schedule_count = 0;
+    irq_bus_schedule_index = 0;
+    visual_trace_event_count = 0;
     irq_schedule_fd = 0;
     if ($value$plusargs("DIFF_IRQ_SCHEDULE=%s", irq_schedule_path)) begin
-`ifdef SSV_VISUAL_EXTERNAL_CLOCK
-        // The generated model represents force/release state as VlForceVec,
-        // which is not
-        // serializable. Checkpoint runs use the board's natural IRQ schedule;
-        // the legacy timing diagnostic retains forced differential IRQs.
-        $fatal(1, "DIFF_IRQ_SCHEDULE is unavailable in checkpoint builds");
-`else
         irq_schedule_fd = $fopen(irq_schedule_path, "r");
         if (irq_schedule_fd == 0)
             $fatal(1, "cannot open IRQ schedule: %s", irq_schedule_path);
-        irq_scan_result = $fscanf(
-            irq_schedule_fd, "%d\n", next_irq_retire);
-        if (irq_scan_result != 1)
+        while (irq_schedule_count < 4096 &&
+               $fscanf(irq_schedule_fd, "%d\n",
+                       irq_schedule[irq_schedule_count]) == 1)
+            irq_schedule_count = irq_schedule_count + 1;
+        $fclose(irq_schedule_fd);
+        irq_schedule_fd = 0;
+        if (irq_schedule_count == 0)
             $fatal(1, "empty IRQ schedule: %s", irq_schedule_path);
+        next_irq_retire = irq_schedule[0];
+        if (!$value$plusargs("DIFF_IRQ_ALIGN_PC=%h", diff_irq_align_pc))
+            diff_irq_align_pc = 32'h00f1_0120;
         diff_irq_enabled = 1'b1;
-        force dut.vblank_pulse = diff_vblank_pulse;
+`ifndef SSV_VISUAL_EXTERNAL_CLOCK
+        force dut.irq3_pulse = diff_vblank_pulse;
+`endif
+    end
+    if ($value$plusargs("DIFF_IRQ_BUS_SCHEDULE=%s", irq_bus_schedule_path)) begin
+`ifndef SSV_VISUAL_EXTERNAL_CLOCK
+        $fatal(1, "DIFF_IRQ_BUS_SCHEDULE requires the checkpoint-capable visual model");
+`else
+        irq_bus_schedule_fd = $fopen(irq_bus_schedule_path, "r");
+        if (irq_bus_schedule_fd == 0)
+            $fatal(1, "cannot open IRQ bus schedule: %s", irq_bus_schedule_path);
+        while (irq_bus_schedule_count < 4096 &&
+               $fscanf(irq_bus_schedule_fd, "%d\n",
+                       irq_bus_schedule[irq_bus_schedule_count]) == 1)
+            irq_bus_schedule_count = irq_bus_schedule_count + 1;
+        $fclose(irq_bus_schedule_fd);
+        irq_bus_schedule_fd = 0;
+        if (irq_bus_schedule_count == 0)
+            $fatal(1, "empty IRQ bus schedule: %s", irq_bus_schedule_path);
+        if (!$value$plusargs("DIFF_IRQ_BUS_START=%d", diff_irq_bus_start))
+            diff_irq_bus_start = 0;
+        diff_irq_bus_enabled = 1'b1;
 `endif
     end
 
@@ -2833,7 +2987,7 @@ initial begin
     // runs through this default (non-SSV_VISUAL, non-EXTERNAL_CLOCK) path --
     // i.e. every plain `run_gameplay_sims.sh`-style build -- silently never
     // write a CSV despite v60_prof_enable being set correctly.
-    if (v60_prof_enable) begin
+    if (v60_prof_requested) begin
         integer v60_prof_buckets;
         v60_prof_buckets = 0;
         v60_prof_fd = $fopen(v60_prof_path, "w");
@@ -3016,8 +3170,9 @@ always @(posedge checkpoint_prepare) begin
 end
 
 always @(posedge checkpoint_restore) begin
-    if (diff_irq_enabled)
-        $fatal(1, "checkpoint restore does not support DIFF_IRQ_SCHEDULE");
+    // IRQ schedules are preloaded into ordinary model arrays.  Their index,
+    // next retirement target, and enable state are serialized with the CPU;
+    // no process-local file cursor remains to reconstruct here.
     // Proof and capture controls are process/request configuration, not game
     // state.  A checkpoint made in a non-proof chunk otherwise restores them
     // as false and silently bypasses the requested gameplay/screenshot gate.

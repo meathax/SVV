@@ -20,6 +20,16 @@ module ssv_core #(
     // servicing its physical watchdog. Freeze only for explicit host pauses;
     // normal CPU and bus stalls must still trip the board watchdog.
     input              watchdog_hold,
+`ifdef SSV_VISUAL_EXTERNAL_CLOCK
+    // Verification-only IRQ injection.  Natural release timing remains the
+    // default, and this port does not exist in the Quartus source profile.
+    input              diff_irq_enable,
+    input              diff_irq3_pulse,
+    // Diagnostic clock-domain normalization for MAME-retire replay. The
+    // release core always keeps OTTO on the board-rate CPU enable.
+    input              diff_sound_ce_enable,
+    input              diff_sound_ce,
+`endif
 
     // Per-game configuration. The Dyna Gear record (ssv_pkg::cfg_dynagear)
     // reproduces the behaviour that used to be hardwired here.
@@ -368,6 +378,10 @@ endgenerate
 logic [8:0] hcnt, vcnt;
 logic vblank_pulse;
 logic irq3_pulse;
+`ifdef SSV_VISUAL_EXTERNAL_CLOCK
+logic natural_irq3_pulse;
+assign irq3_pulse = diff_irq_enable ? diff_irq3_pulse : natural_irq3_pulse;
+`endif
 logic video_enable;
 wire [8:0] active_width = active_width_cfg(cfg);
 wire [8:0] active_height = active_height_cfg(cfg);
@@ -378,7 +392,11 @@ ssv_video_timing timing (
     .active_width(active_width), .active_height(active_height),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse),
+`ifdef SSV_VISUAL_EXTERNAL_CLOCK
+    .irq3_pulse(natural_irq3_pulse)
+`else
     .irq3_pulse(irq3_pulse)
+`endif
 );
 
 logic [8:0] renderer_target_y;
@@ -978,7 +996,11 @@ wire        sound_sample_tick, sound_underrun;
 
 // Share the CPU enable so voice and V60 stay phase-aligned (saves a second
 // fractional accumulator and matches board 16 MHz OTTO / V60 clocking).
+`ifdef SSV_VISUAL_EXTERNAL_CLOCK
+wire ce_snd = diff_sound_ce_enable ? diff_sound_ce : ce_cpu;
+`else
 wire ce_snd = ce_cpu;
+`endif
 
 ssv_es5506_regs sound_registers (
     .clk(clk_sys),

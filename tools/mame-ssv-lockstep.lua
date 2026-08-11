@@ -9,6 +9,14 @@ local trace_start_frame = tonumber(os.getenv("SSV_LOCKSTEP_START_FRAME")) or 0
 local startup_mode = os.getenv("SSV_LOCKSTEP_REFERENCE_STARTUP_MODE") or "cold-lockstep"
 local catchup_target = tonumber(os.getenv("SSV_LOCKSTEP_CATCHUP_TARGET")) or -1
 local strict_inputs = os.getenv("SSV_LOCKSTEP_STRICT_INPUTS") == "1"
+local input_frame_offset = tonumber(os.getenv("SSV_LOCKSTEP_INPUT_FRAME_OFFSET")) or 0
+local input_frame_map = {}
+for threshold, offset in (os.getenv("SSV_LOCKSTEP_INPUT_FRAME_MAP") or ""):gmatch(
+        "(%d+)%s*:%s*([+-]?%d+)") do
+    input_frame_map[#input_frame_map + 1] = {
+        threshold = tonumber(threshold), offset = tonumber(offset)}
+end
+table.sort(input_frame_map, function(a, b) return a.threshold < b.threshold end)
 local trace_registers = os.getenv("SSV_LOCKSTEP_TRACE_REGS") == "1"
 local dump_index_frame = tonumber(os.getenv("SSV_LOCKSTEP_DUMP_INDEX_FRAME")) or -1
 local dump_index_path = os.getenv("SSV_LOCKSTEP_DUMP_INDEX_PATH")
@@ -173,7 +181,20 @@ local function apply_inputs(packet_frame)
     neutral_port(p1)
     neutral_port(p2)
     neutral_port(system)
-    local p1_mask, p2_mask, system_mask = parse_packet(packet_frame)
+    -- Input transitions are owned by the RTL journal, but a functional
+    -- differential run may align them to the same architectural polling
+    -- event rather than the same video-frame number.  The default remains
+    -- exact frame replay; a measured reference offset is diagnostic-only.
+    local aligned_offset = input_frame_offset
+    for _, segment in ipairs(input_frame_map) do
+        if packet_frame >= segment.threshold then
+            aligned_offset = segment.offset
+        else
+            break
+        end
+    end
+    local aligned_frame = math.max(0, packet_frame + aligned_offset)
+    local p1_mask, p2_mask, system_mask = parse_packet(aligned_frame)
     for _, binding in ipairs(p1_fields) do
         set_named(p1, binding[2], (p1_mask & binding[1]) ~= 0)
     end

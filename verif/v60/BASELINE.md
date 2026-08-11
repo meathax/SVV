@@ -27,3 +27,22 @@ Re-run `bash verif/v60/run_v60_verilator.sh` and compare after each phase.
 - CPI ~10-12 (P2), ~9-11 (P3); S_FILLW < 10%
 - select work ~18-22%, attract idle ~55-65% (within DESIGN.md +/-20% policy band)
 - tb_v60_fetch budget tightened to ~<=2200 cyc at P4
+
+## 2026-08-11 SSV throughput update
+
+- `tb_v60_fetch`: **cycles=2097, reads=12** for 256 MOVW/DBcc iterations.
+  The immediately preceding SSV implementation measured 2353 cycles / 14 reads;
+  the current System 32 working tree measured 2101 cycles / 12 reads.
+- Imported selectively: held CPU ACK/re-arm cadence, exact retained-loop reuse,
+  registered exact successor predecode, and same-instruction F2 EA overlap.
+- SSV-specific extension: the F2 overlap reuses the existing second register-file
+  read port instead of adding System 32's third 32:1 mux.
+- SSV-specific extension: integer MUL/MULU and MULX/MULUX use an exact radix-4
+  iterative magnitude datapath (16 steps), retaining SSV's no-combinational-
+  multiplier resource contract and qword EA behavior.
+- Verification: 26 executable V60 tests pass, including fetch, bus lanes,
+  qword EA, MUL flags, MULX/DIVX memory, SMC and gated-CE. Six legacy
+  Icarus-only white-box entries remain blocked at elaboration by the existing
+  enum-ternary cast incompatibility and did not simulate.
+- Integrated Vasara 2 cold boot: native video becomes nonblack/changing at frame
+  61 and continues with watchdog service and audio activity in the visible model.

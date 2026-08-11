@@ -25,15 +25,20 @@ localparam logic [8:0] ACTIVE_WIDTH = 9'd352;
 localparam logic [6:0] LAST_WORD = 7'd87;
 
 // Consecutive four-pixel batches contain at most one write for each x[1:0]
-// bank. Tiny 88x15 banks waste a full M10K each, so keep them in MLABs.
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b0 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b1 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b2 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line0_b3 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b0 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b1 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b2 [0:87];
-(* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b3 [0:87];
+// bank. Each 88x15 simple-dual-port bank used about 42-44 ALMs when placed in
+// MLABs in the 10 Aug fit (about 346 ALMs total, plus duplicated output
+// registers for routing). The same fit had 36 spare M10Ks but only 2,810 spare
+// ALMs, so use eight M10Ks to remove that distributed memory from the binding
+// resource. This is a placement-only change: the registered read and write
+// schedule below is unchanged.
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b0 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b1 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b2 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line0_b3 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b0 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b1 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b2 [0:87];
+(* ramstyle = "M10K, no_rw_check" *) logic [14:0] line1_b3 [0:87];
 
 logic front_select;
 logic clear_select;

@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
+
+
+DEBUGGER_PC = re.compile(r"^([0-9a-fA-F]+):")
 
 
 def main() -> int:
@@ -34,6 +38,10 @@ def main() -> int:
                 if len(fields) >= 2:
                     pc = int(fields[1], 16)
             else:
+                match = DEBUGGER_PC.match(line)
+                if match:
+                    pc = int(match.group(1), 16)
+            if pc is None:
                 continue
             if pc == args.handler_pc:
                 entries.append(state_index)
