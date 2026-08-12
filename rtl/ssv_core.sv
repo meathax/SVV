@@ -104,7 +104,8 @@ module ssv_core #(
     // Sticky one-shot after exactly WDOG_TIMEOUT_CYCLES without the correct
     // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
-    output logic [1:0] coin_lockout
+    output logic [1:0] coin_lockout,
+    output logic       renderer_overrun
     ,output logic       motor_output
 `ifdef SIMULATION
     , output logic [31:0] debug_pc
@@ -568,6 +569,8 @@ assign renderer_done = obj_done;
 
 ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst), .line_start(line_buffer_start),
+    .line_ready(!renderer_busy),
+    .render_start(renderer_line_start),
     .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
     .plot_color(renderer_plot_color), .plot_shadow(renderer_plot_shadow),
     .plot_pen(renderer_plot_pen), .shadow_4bit(renderer_shadow_4bit),
@@ -616,6 +619,13 @@ ssv_cached_sprite_renderer sprite_renderer (
     .cache_overflow(obj_cache_overflow),
     .busy(obj_busy), .done(obj_done)
 );
+
+always_ff @(posedge clk_sys) begin
+    if (rst)
+        renderer_overrun <= 1'b0;
+    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
+        renderer_overrun <= 1'b1;
+end
 
 wire vector_we = m_req && m_we && sel_irqvec;
 wire ack_we    = m_req && m_we && sel_irqack;
@@ -1393,7 +1403,8 @@ always_ff @(posedge clk_sys) begin
 end
 `ifdef SIMULATION
 always_comb debug_status = {cpu_halted, video_enable, irq_n, vb, hb, ext_busy,
-                            ext_done, 1'b0, irq_requested, irq_enabled};
+                            ext_done, renderer_overrun,
+                            irq_requested, irq_enabled};
 `endif
 
 endmodule

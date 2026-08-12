@@ -30,6 +30,17 @@ wire         eng_cr_valid;
 wire [31:0]  eng_start;
 wire [31:0]  eng_end;
 wire [31:0]  eng_accum;
+logic [4:0]  eng_voice;
+logic        eng_wr_accum;
+logic [31:0] eng_accum_w;
+logic        eng_wr_cr;
+logic [15:0] eng_cr_w;
+logic        eng_wr_filt;
+logic [17:0] eng_o4n1_w, eng_o3n1_w, eng_o3n2_w;
+logic [17:0] eng_o2n1_w, eng_o2n2_w, eng_o1n1_w;
+logic        eng_wr_env;
+logic [15:0] eng_lvol_w, eng_rvol_w, eng_k1_w, eng_k2_w;
+logic [8:0]  eng_ecount_w;
 
 ssv_es5506_regs dut (
     .clk, .rst, .cold_rst,
@@ -38,21 +49,21 @@ ssv_es5506_regs dut (
     .current_page, .active_voices, .mode,
     .word_clock_start, .word_clock_end, .lr_clock_end,
     .commit, .commit_page, .commit_reg, .commit_data,
-    .eng_voice(5'd0),
+    .eng_voice,
     .eng_cr(), .eng_cr_valid, .eng_fc(),
     .eng_lvol(), .eng_lvramp(), .eng_rvol(), .eng_rvramp(),
     .eng_ecount(), .eng_k1(), .eng_k1ramp(), .eng_k2(), .eng_k2ramp(),
     .eng_start, .eng_end, .eng_accum,
     .eng_o4n1(), .eng_o3n1(), .eng_o3n2(),
     .eng_o2n1(), .eng_o2n2(), .eng_o1n1(),
-    .eng_wr_accum(1'b0), .eng_accum_w(32'd0),
-    .eng_wr_cr(1'b0), .eng_cr_w(16'd0),
-    .eng_wr_filt(1'b0),
-    .eng_o4n1_w(18'd0), .eng_o3n1_w(18'd0), .eng_o3n2_w(18'd0),
-    .eng_o2n1_w(18'd0), .eng_o2n2_w(18'd0), .eng_o1n1_w(18'd0),
-    .eng_wr_env(1'b0),
-    .eng_lvol_w(16'd0), .eng_rvol_w(16'd0),
-    .eng_k1_w(16'd0), .eng_k2_w(16'd0), .eng_ecount_w(9'd0)
+    .eng_wr_accum, .eng_accum_w,
+    .eng_wr_cr, .eng_cr_w,
+    .eng_wr_filt,
+    .eng_o4n1_w, .eng_o3n1_w, .eng_o3n2_w,
+    .eng_o2n1_w, .eng_o2n2_w, .eng_o1n1_w,
+    .eng_wr_env,
+    .eng_lvol_w, .eng_rvol_w,
+    .eng_k1_w, .eng_k2_w, .eng_ecount_w
 );
 
 task automatic write_byte(input [5:0] address, input [7:0] data);
@@ -113,6 +124,41 @@ begin
 end
 endtask
 
+task automatic collide_host_engine(
+    input [3:0]  reg_index,
+    input [31:0] host_data
+);
+    logic do_accum, do_cr, do_filt, do_env;
+begin
+    do_accum = eng_wr_accum;
+    do_cr    = eng_wr_cr;
+    do_filt  = eng_wr_filt;
+    do_env   = eng_wr_env;
+    eng_wr_accum = 1'b0;
+    eng_wr_cr    = 1'b0;
+    eng_wr_filt  = 1'b0;
+    eng_wr_env   = 1'b0;
+    write_byte({reg_index, 2'd0}, host_data[31:24]);
+    write_byte({reg_index, 2'd1}, host_data[23:16]);
+    write_byte({reg_index, 2'd2}, host_data[15:8]);
+    @(negedge clk);
+    host_addr  = {reg_index, 2'd3};
+    host_wdata = host_data[7:0];
+    host_we    = 1'b1;
+    eng_wr_accum = do_accum;
+    eng_wr_cr    = do_cr;
+    eng_wr_filt  = do_filt;
+    eng_wr_env   = do_env;
+    @(negedge clk);
+    host_we       = 1'b0;
+    eng_wr_accum  = 1'b0;
+    eng_wr_cr     = 1'b0;
+    eng_wr_filt   = 1'b0;
+    eng_wr_env    = 1'b0;
+    repeat (3) @(posedge clk);
+end
+endtask
+
 logic [31:0] value;
 logic [31:0] engine_start_before_steal;
 logic [31:0] engine_end_before_steal;
@@ -126,6 +172,24 @@ initial begin
     par_data   = 10'h155;
     irq_set    = 1'b0;
     irq_voice  = 5'd0;
+    eng_voice = 5'd0;
+    eng_wr_accum = 1'b0;
+    eng_accum_w = 32'd0;
+    eng_wr_cr = 1'b0;
+    eng_cr_w = 16'd0;
+    eng_wr_filt = 1'b0;
+    eng_o4n1_w = 18'd0;
+    eng_o3n1_w = 18'd0;
+    eng_o3n2_w = 18'd0;
+    eng_o2n1_w = 18'd0;
+    eng_o2n2_w = 18'd0;
+    eng_o1n1_w = 18'd0;
+    eng_wr_env = 1'b0;
+    eng_lvol_w = 16'd0;
+    eng_rvol_w = 16'd0;
+    eng_k1_w = 16'd0;
+    eng_k2_w = 16'd0;
+    eng_ecount_w = 9'd0;
 
     repeat (3) @(posedge clk);
     rst = 1'b0;
@@ -199,6 +263,38 @@ initial begin
     expect32(value, 32'h3bb6_f000, "voice16 END mask");
     read_reg(4'h3, value);
     expect32(value, 32'h3894_3000, "voice16 ACCUM");
+
+    // A host byte-3 commit used to silently discard an engine writeback on
+    // the same edge. Different fields of the same voice must both survive.
+    eng_voice    = 5'd16;
+    eng_accum_w  = 32'hdead_beef;
+    eng_wr_accum = 1'b1;
+    collide_host_engine(4'h1, 32'h1122_3344);
+    read_reg(4'h1, value);
+    expect32(value, 32'h1122_3000, "host START across engine collision");
+    read_reg(4'h3, value);
+    expect32(value, 32'hdead_beef, "engine ACCUM replay after host collision");
+
+    // If both writers target the same voice field, the host programming
+    // transaction is authoritative and the stale engine value is discarded.
+    eng_accum_w  = 32'hcafe_babe;
+    eng_wr_accum = 1'b1;
+    collide_host_engine(4'h3, 32'h5566_7788);
+    read_reg(4'h3, value);
+    expect32(value, 32'h5566_7788, "host ACCUM wins same-field collision");
+
+    // A deferred control write must mark the deferred voice valid, not the
+    // host-selected voice. Exercise a different voice to catch index errors.
+    eng_voice = 5'd17;
+    eng_cr_w  = 16'h8000;
+    eng_wr_cr = 1'b1;
+    collide_host_engine(4'h1, 32'h3894_3000);
+    write_reg(4'hf, 32'h0000_0011);
+    read_reg(4'h0, value);
+    expect32(value, 32'h0000_8000, "voice17 deferred CR");
+    write_reg(4'h0, 32'h0000_0003);
+    write_reg(4'hf, 32'h0000_0030);
+    write_reg(4'h3, 32'h3894_3000);
 
     // Switch to the low page for the same voice and apply the trace values.
     write_reg(4'hf, 32'h0000_0010);

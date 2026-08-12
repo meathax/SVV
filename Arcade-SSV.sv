@@ -627,6 +627,7 @@ wire [15:0] dsw2_port = {8'hff, sw[1]};
 
 wire [23:0] core_rgb;
 wire core_ce, core_hs, core_vs, core_hb, core_vb;
+wire renderer_overrun;
 wire signed [15:0] core_audio_l, core_audio_r;
 ssv_core core (
     .cfg(game_cfg),
@@ -658,7 +659,7 @@ ssv_core core (
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
-    .coin_lockout(), .motor_output()
+    .coin_lockout(), .renderer_overrun(renderer_overrun), .motor_output()
 );
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1067,9 @@ assign AUDIO_L = game_pause ? 16'd0 : core_audio_l;
 assign AUDIO_R = game_pause ? 16'd0 : core_audio_r;
 assign AUDIO_MIX = status[47:46];
 
-assign LED_DISK = 1'b1;
+// {override, activity}: make a renderer deadline/cache overflow visible on
+// hardware even though debug_status itself is simulation-only.
+assign LED_DISK = {1'b1, renderer_overrun};
 
 wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,

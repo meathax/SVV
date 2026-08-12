@@ -6,6 +6,8 @@ module ssv_line_buffer4 (
     input  logic        clk,
     input  logic        rst,
     input  logic        line_start,
+    input  logic        line_ready,
+    input  logic        render_start,
 
     input  logic  [3:0] plot_we,
     input  logic [35:0] plot_x,
@@ -36,6 +38,9 @@ localparam logic [6:0] LAST_WORD = 7'd87;
 (* ramstyle = "MLAB, no_rw_check" *) logic [14:0] line1_b3 [0:87];
 
 logic front_select;
+logic render_select;
+logic render_valid;
+logic render_missed;
 logic clear_select;
 logic [6:0] clear_word;
 logic [6:0] scan_word;
@@ -83,7 +88,7 @@ always_comb begin
         bank_color[bank_i] = 15'd0;
         bank_pen[bank_i] = 8'd0;
         for (lane_i = 0; lane_i < 4; lane_i = lane_i + 1) begin
-            if (plot_we[lane_i] &&
+            if (render_valid && plot_we[lane_i] &&
                 (lane_x[lane_i] < ACTIVE_WIDTH) &&
                 (lane_x[lane_i][1:0] == bank_i[1:0])) begin
                 bank_req[bank_i] = 1'b1;
@@ -155,6 +160,9 @@ always_ff @(posedge clk) begin
         scan_valid_q <= 1'b0;
         plot_pending <= 4'd0;
         plot_select_q <= 1'b0;
+        render_select <= 1'b0;
+        render_valid <= 1'b0;
+        render_missed <= 1'b0;
         plot_shadow_q <= 1'b0;
         shadow_4bit_q <= 1'b0;
         bypass_q <= 4'd0;
@@ -168,7 +176,7 @@ always_ff @(posedge clk) begin
     else begin
         plot_pending <= bank_req;
         if (|bank_req) begin
-            plot_select_q <= ~front_select;
+            plot_select_q <= render_select;
             plot_shadow_q <= plot_shadow;
             shadow_4bit_q <= shadow_4bit;
             for (bank_ff_i = 0; bank_ff_i < 4; bank_ff_i = bank_ff_i + 1) begin
@@ -176,7 +184,7 @@ always_ff @(posedge clk) begin
                 bank_color_q[bank_ff_i] <= bank_color[bank_ff_i];
                 bank_pen_q[bank_ff_i] <= bank_pen[bank_ff_i];
                 bypass_q[bank_ff_i] <= plot_pending[bank_ff_i] &&
-                                   (plot_select_q == ~front_select) &&
+                                   (plot_select_q == render_select) &&
                                    (bank_addr_q[bank_ff_i] == bank_addr[bank_ff_i]);
                 bypass_value_q[bank_ff_i] <= write_value[bank_ff_i];
             end
@@ -185,7 +193,28 @@ always_ff @(posedge clk) begin
             bypass_q <= 4'd0;
         end
 
-        if (line_start) begin
+        if (line_start && !line_ready) begin
+            // The producer missed this line's publication deadline.  Freeze
+            // scanout on the last completed line and close the producer epoch
+            // immediately: late plots must not leak into a future line.
+            render_valid <= 1'b0;
+            render_missed <= 1'b1;
+            plot_pending <= 4'd0;
+            bypass_q <= 4'd0;
+        end
+        else if (line_start && line_ready && render_missed) begin
+            // The late renderer has drained.  Reclaim and clear its fixed
+            // producer bank without publishing the stale line, then let the
+            // newly launched pass reuse that same bank.
+            render_missed <= 1'b0;
+            render_valid <= render_start;
+            clear_select <= render_select;
+            clear_word <= 7'd0;
+            clear_busy <= 1'b1;
+            plot_pending <= 4'd0;
+            bypass_q <= 4'd0;
+        end
+        else if (line_start && line_ready) begin
             // Plots are registered one cycle late. Commit any in-flight RMW
             // into the just-finished back buffer before the buffer flip, or
             // the last batch of the line is dropped.
@@ -206,6 +235,14 @@ always_ff @(posedge clk) begin
                 else               line0_b3[bank_addr_q[3]] <= write_value[3];
             end
             front_select <= ~front_select;
+            // Publish only a completed producer buffer. A missed boundary
+            // leaves the fixed producer bank in place so the pass can finish.
+            // After an accepted swap, render_start opens the next epoch; if
+            // no pass starts, later stale plots are rejected.
+            render_valid <= render_start;
+            if (render_start)
+                render_select <= front_select;
+            render_missed <= 1'b0;
             clear_select <= front_select;
             clear_word <= 7'd0;
             clear_busy <= 1'b1;

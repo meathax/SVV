@@ -1,5 +1,41 @@
 # Pre-RBF optimization notes
 
+## Audio/renderer ownership and HDMI placement pass (12 Aug 2026, no Quartus/RBF)
+
+Hardware feedback on the retained seed-15 RBF reported harsh/static sound in
+multiple titles (with Drift Out as a clean control) and horizontal black bands
+in busy Dyna Gear scenes. Two concrete shared-state ownership defects were
+corrected without changing game descriptors or MiSTer framework RTL.
+
+The ES5506 register file gave a CPU byte-3 commit unconditional ownership of
+all voice-state MLAB write ports, silently dropping a coincident engine
+accumulator, control, filter or envelope writeback. A field-masked one-entry
+replay now preserves the engine transaction on the next free clock and keeps
+the CPU authoritative only when both writers update the same voice field. The
+focused collision matrix and complete audio suite pass. A 120-million-cycle
+Dyna Gear real-ROM audio gate reports 46,720 sample requests, 93,440
+acknowledged nonzero words, 77,608 audio ticks, peak 26,833 and zero underruns.
+
+The line buffer previously swapped on every deadline boundary and selected a
+plot destination from live `front_select`. A late renderer could therefore
+publish an incomplete/cleared line and continue writing into the bank assigned
+to a later line. Producer bank, validity and missed-epoch state are now
+separate: a miss keeps the last complete front line, closes the stale epoch,
+rejects late plots and clears/reclaims that fixed bank only after the renderer
+drains. The focused miss/recovery regression passes. The real SDRAM-controller
+Dyna attract gate reaches 120 frames with 4,266,611 graphics transactions,
+zero background/object overruns, zero cache deadline aborts and zero SDRAM
+protocol violations.
+
+The retained full-fit report isolates its failure to the reconfigurable HDMI
+domain: -0.411 ns setup at slow -40 C and -0.271 ns at 100 C, while `clk_sys`,
+`clk_ram`, the SDRAM interface and HDMI hold pass. No framework or generated
+PLL file was changed. The Fast-Fit `PLACEMENT_EFFORT_MULTIPLIER` is raised from
+1.0 to 2.0 to spend more search on global placement while retaining seed 15,
+NORMAL routing, MEDIUM packing and the documented one-processor memory limit.
+This is not timing evidence: a fresh authorized Quartus fit and physical HDMI,
+audio and gameplay test are still mandatory. No RBF was built in this pass.
+
 ## Descriptor checksum reduction (12 Aug 2026, no Quartus/RBF)
 
 The retained timing report showed the descriptor validator's modulo-256

@@ -50,7 +50,11 @@ set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
 # design that is at 98% block RAM. Registers are far cheaper here.
 set_global_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
-set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 1.0
+# The current seed-15 image misses only the reconfigurable HDMI domain
+# (-0.411 ns at the slow -40 C corner) while clk_sys/clk_ram/SDRAM all pass.
+# Spend more Fast-Fit placement search globally without enabling Standard Fit
+# or dense packing, both of which are documented below as unsafe on this host.
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 2.0
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
 set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON

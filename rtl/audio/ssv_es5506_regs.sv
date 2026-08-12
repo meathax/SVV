@@ -189,6 +189,24 @@ logic [17:0] eng_o2n1_h;
 logic [17:0] eng_o2n2_h;
 logic [17:0] eng_o1n1_h;
 
+// Host byte-3 commits and engine state advances share the MLAB write ports.
+// Preserve a coincident engine transaction for replay on the following clock;
+// per-field masks keep the host authoritative when both update the same field.
+logic        eng_pending;
+logic [4:0]  pend_voice;
+logic        pend_control, pend_accum;
+logic        pend_lvol, pend_rvol, pend_k1, pend_k2, pend_ecount;
+logic        pend_o4n1, pend_o3n1, pend_o3n2;
+logic        pend_o2n1, pend_o2n2, pend_o1n1;
+logic [15:0] pend_control_w;
+logic [31:0] pend_accum_w;
+logic [15:0] pend_lvol_w, pend_rvol_w, pend_k1_w, pend_k2_w;
+logic [8:0]  pend_ecount_w;
+logic [17:0] pend_o4n1_w, pend_o3n1_w, pend_o3n2_w;
+logic [17:0] pend_o2n1_w, pend_o2n2_w, pend_o1n1_w;
+
+wire eng_write_any = eng_wr_accum | eng_wr_cr | eng_wr_filt | eng_wr_env;
+
 assign eng_cr       = eng_hold ? eng_cr_h       : q_control;
 assign eng_cr_valid = (eng_hold ? eng_cr_valid_h : voice_control_valid[eng_voice]) &&
                       !cold_init_active;
@@ -301,6 +319,35 @@ always_comb begin
                 default: ;
             endcase
         end
+    end
+    else if (eng_pending) begin
+        wr_addr = pend_voice;
+        we_control = pend_control;
+        we_accum = pend_accum;
+        we_lvol = pend_lvol;
+        we_rvol = pend_rvol;
+        we_k1 = pend_k1;
+        we_k2 = pend_k2;
+        we_ecount = pend_ecount;
+        we_o4n1 = pend_o4n1;
+        we_o3n1 = pend_o3n1;
+        we_o3n2 = pend_o3n2;
+        we_o2n1 = pend_o2n1;
+        we_o2n2 = pend_o2n2;
+        we_o1n1 = pend_o1n1;
+        w_control = pend_control_w;
+        w_accum = pend_accum_w;
+        w_lvol = pend_lvol_w;
+        w_rvol = pend_rvol_w;
+        w_k1 = pend_k1_w;
+        w_k2 = pend_k2_w;
+        w_ecount = pend_ecount_w;
+        w_o4n1 = pend_o4n1_w;
+        w_o3n1 = pend_o3n1_w;
+        w_o3n2 = pend_o3n2_w;
+        w_o2n1 = pend_o2n1_w;
+        w_o2n2 = pend_o2n2_w;
+        w_o1n1 = pend_o1n1_w;
     end
     else begin
         wr_addr = eng_voice;
@@ -537,6 +584,7 @@ always_ff @(posedge clk) begin
         commit_data      <= 32'd0;
         host_rd_pending  <= 1'b0;
         eng_hold         <= 1'b0;
+        eng_pending      <= 1'b0;
         page_r           <= 7'd0;
         reg_r            <= 4'd0;
         irqv_r           <= 8'h80;
@@ -554,6 +602,7 @@ always_ff @(posedge clk) begin
             commit        <= 1'b0;
             host_rd_pending <= 1'b0;
             eng_hold      <= 1'b0;
+            eng_pending   <= 1'b0;
         end
         else begin
             commit <= 1'b0;
@@ -643,8 +692,101 @@ always_ff @(posedge clk) begin
                 end
             end
 
-            if (!host_commit && eng_wr_cr)
+            // Replay one deferred transaction at a time. Engine updates are
+            // spaced by the 16 MHz enable, but retaining a new update while a
+            // prior one replays makes the ordering explicit and lossless.
+            if (eng_pending && !host_commit) begin
+                eng_pending <= eng_write_any;
+                if (eng_write_any) begin
+                    pend_voice <= eng_voice;
+                    pend_control <= eng_wr_cr;
+                    pend_accum <= eng_wr_accum;
+                    pend_lvol <= eng_wr_env;
+                    pend_rvol <= eng_wr_env;
+                    pend_k1 <= eng_wr_env;
+                    pend_k2 <= eng_wr_env;
+                    pend_ecount <= eng_wr_env;
+                    pend_o4n1 <= eng_wr_filt;
+                    pend_o3n1 <= eng_wr_filt;
+                    pend_o3n2 <= eng_wr_filt;
+                    pend_o2n1 <= eng_wr_filt;
+                    pend_o2n2 <= eng_wr_filt;
+                    pend_o1n1 <= eng_wr_filt;
+                    pend_control_w <= eng_cr_w;
+                    pend_accum_w <= eng_accum_w;
+                    pend_lvol_w <= eng_lvol_w;
+                    pend_rvol_w <= eng_rvol_w;
+                    pend_k1_w <= eng_k1_w;
+                    pend_k2_w <= eng_k2_w;
+                    pend_ecount_w <= eng_ecount_w;
+                    pend_o4n1_w <= eng_o4n1_w;
+                    pend_o3n1_w <= eng_o3n1_w;
+                    pend_o3n2_w <= eng_o3n2_w;
+                    pend_o2n1_w <= eng_o2n1_w;
+                    pend_o2n2_w <= eng_o2n2_w;
+                    pend_o1n1_w <= eng_o1n1_w;
+                end
+            end
+            else if (host_commit && !eng_pending && eng_write_any) begin
+                pend_voice <= eng_voice;
+                pend_control <= eng_wr_cr &&
+                    !((voice == eng_voice) && we_control);
+                pend_accum <= eng_wr_accum &&
+                    !((voice == eng_voice) && we_accum);
+                pend_lvol <= eng_wr_env &&
+                    !((voice == eng_voice) && we_lvol);
+                pend_rvol <= eng_wr_env &&
+                    !((voice == eng_voice) && we_rvol);
+                pend_k1 <= eng_wr_env &&
+                    !((voice == eng_voice) && we_k1);
+                pend_k2 <= eng_wr_env &&
+                    !((voice == eng_voice) && we_k2);
+                pend_ecount <= eng_wr_env &&
+                    !((voice == eng_voice) && we_ecount);
+                pend_o4n1 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o4n1);
+                pend_o3n1 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o3n1);
+                pend_o3n2 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o3n2);
+                pend_o2n1 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o2n1);
+                pend_o2n2 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o2n2);
+                pend_o1n1 <= eng_wr_filt &&
+                    !((voice == eng_voice) && we_o1n1);
+                pend_control_w <= eng_cr_w;
+                pend_accum_w <= eng_accum_w;
+                pend_lvol_w <= eng_lvol_w;
+                pend_rvol_w <= eng_rvol_w;
+                pend_k1_w <= eng_k1_w;
+                pend_k2_w <= eng_k2_w;
+                pend_ecount_w <= eng_ecount_w;
+                pend_o4n1_w <= eng_o4n1_w;
+                pend_o3n1_w <= eng_o3n1_w;
+                pend_o3n2_w <= eng_o3n2_w;
+                pend_o2n1_w <= eng_o2n1_w;
+                pend_o2n2_w <= eng_o2n2_w;
+                pend_o1n1_w <= eng_o1n1_w;
+                eng_pending <=
+                    (eng_wr_cr && !((voice == eng_voice) && we_control)) |
+                    (eng_wr_accum && !((voice == eng_voice) && we_accum)) |
+                    (eng_wr_env && !((voice == eng_voice) &&
+                        we_lvol && we_rvol && we_k1 && we_k2 && we_ecount)) |
+                    (eng_wr_filt && !((voice == eng_voice) &&
+                        we_o4n1 && we_o3n1 && we_o3n2 &&
+                        we_o2n1 && we_o2n2 && we_o1n1));
+            end
+
+`ifdef SIMULATION
+            if (host_commit && eng_pending && eng_write_any)
+                $fatal(1, "ES5506 writeback skid overflow");
+`endif
+
+            if (!host_commit && !eng_pending && eng_wr_cr)
                 voice_control_valid[eng_voice] <= 1'b1;
+            if (eng_pending && !host_commit && pend_control)
+                voice_control_valid[pend_voice] <= 1'b1;
         end
 
         if (cold_init_active) begin
