@@ -133,7 +133,7 @@ localparam CONF_STR = {
     "R[0],Reset;",
     // Six game buttons: SSV's P1/P2 ports carry B1-B3 and the
     // $500008 window carries B4-B6. Survival Arts uses all six.
-    "J1,Fire,Jump,Button 3,Button 4,Button 5,Button 6,Test,Service,Start,Coin;",
+    "J1,Fire,Jump,Button 3,Button 4,Button 5,Button 6,Start,Coin,Service,Test;",
     "V,v",`BUILD_DATE
 };
 
@@ -557,7 +557,7 @@ sdram sdram (
     .p5_req(p5_req), .p5_addr(p5_addr), .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
-// MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Test,Service,Start,Coin
+// MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Start,Coin,Service,Test
 //                  joy[4]..joy[13]
 // (the MRA's <buttons names=...> list must stay in this same order).
 //
@@ -576,10 +576,10 @@ wire [11:0] optional_coord_x = 12'h800 + (12'($signed(analog_x)) <<< 3);
 wire [11:0] optional_coord_y = 12'h800 + (12'($signed(analog_y)) <<< 3);
 wire [7:0] optional_paddle = 8'h80 + 8'($signed(analog_x));
 
-wire test_button = status[6] | joy_p1[10] | joy_p2[10];
-wire service_button = joy_p1[11] | joy_p2[11];
-wire coin1_button = joy_p1[13];
-wire coin2_button = joy_p2[13];
+wire test_button = status[6] | joy_p1[13] | joy_p2[13];
+wire service_button = joy_p1[12] | joy_p2[12];
+wire coin1_button = joy_p1[11];
+wire coin2_button = joy_p2[11];
 wire [15:0] system_port;
 wire [15:0] extra_input_port;
 

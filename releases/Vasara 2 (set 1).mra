@@ -54,5 +54,5 @@
     <dip bits="14" name="English Subtitles" ids="Off,On" values="0,1"/>
     <dip bits="15" name="Secret Character" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Attack,Vasara Attack,-,-,-,-,Test,Service,Start,Coin" default="A,B,Start,Select,R,L" count="2"/>
+  <buttons names="Attack,Vasara Attack,-,-,-,-,Start,Coin,Service,Test" default="A,B,Start,Select,R,L" count="2"/>
 </misterromdescription>

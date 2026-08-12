@@ -22,41 +22,41 @@ import ssv_cfg_block as cfgblk
 from ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
 
 # The core's J1 list is ten entries: six game buttons followed by
-# Test/Service/Start/Coin. Keep that positional list in every MRA, using '-'
+# Start/Coin/Service/Test. Keep that positional list in every MRA, using '-'
 # for unused game buttons. The <buttons count> is the number of actual game
 # buttons, as required by the MiSTer MRA convention. SSV's P1/P2 ports carry
 # B1-B3 and the $500008 window carries B4-B6 (the retired Survival Arts family
 # used all six). Test and Service reuse R and L, which is what they mapped to
 # before the widening.
 BUTTONS_DEFAULT = ('Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,'
-                   'Test,Service,Start,Coin',
+                   'Start,Coin,Service,Test',
                    'A,B,X,Y,L,R,R,L,Start,Select',
                    6)
 BUTTONS = {
-    'dynagear': ('Jump,Attack,-,-,-,-,Test,Service,Start,Coin',
+    'dynagear': ('Jump,Attack,-,-,-,-,Start,Coin,Service,Test',
                  'A,B,Start,Select,R,L', 2),
-    'cairblad': ('Fire,Bomb,Special,-,-,-,Test,Service,Start,Coin',
+    'cairblad': ('Fire,Bomb,Special,-,-,-,Start,Coin,Service,Test',
                  'A,B,X,Start,Select,R,L', 3),
-    'vasara': ('Attack,Bomb,-,-,-,-,Test,Service,Start,Coin',
+    'vasara': ('Attack,Bomb,-,-,-,-,Start,Coin,Service,Test',
                'A,B,Start,Select,R,L', 2),
-    'vasara2': ('Attack,Vasara Attack,-,-,-,-,Test,Service,Start,Coin',
+    'vasara2': ('Attack,Vasara Attack,-,-,-,-,Start,Coin,Service,Test',
                 'A,B,Start,Select,R,L', 2),
-    'drifto94': ('Accelerate,Brake,-,-,-,-,Test,Service,Start,Coin',
+    'drifto94': ('Brake,Accelerate,-,-,-,-,Start,Coin,Service,Test',
                  'A,B,Start,Select,R,L', 2),
-    'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Test,Service,Start,Coin',
+    'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test',
                  'A,B,X,Start,Select,R,L', 3),
-    'stmblade': ('Fire,Bomb,-,-,-,-,Test,Service,Start,Coin',
+    'stmblade': ('Fire,Bomb,-,-,-,-,Start,Coin,Service,Test',
                  'A,B,Start,Select,R,L', 2),
-    'ultrax': ('Fire,Grenade,Bomb,-,-,-,Test,Service,Start,Coin',
+    'ultrax': ('Fire,Grenade,Bomb,-,-,-,Start,Coin,Service,Test',
                'A,B,X,Start,Select,R,L', 3),
     'survarts': ('Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,'
-                 'Strong Kick,Test,Service,Start,Coin',
+                 'Strong Kick,Start,Coin,Service,Test',
                  'A,B,X,Y,L,R,R,L,Start,Select', 6),
     'survartsu': ('Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,'
-                  'Strong Kick,Test,Service,Start,Coin',
+                  'Strong Kick,Start,Coin,Service,Test',
                   'A,B,X,Y,L,R,R,L,Start,Select', 6),
     'survartsj': ('Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,'
-                  'Strong Kick,Test,Service,Start,Coin',
+                  'Strong Kick,Start,Coin,Service,Test',
                   'A,B,X,Y,L,R,R,L,Start,Select', 6),
 }
 

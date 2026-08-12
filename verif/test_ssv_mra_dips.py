@@ -19,28 +19,28 @@ MAME_TO_MRA_ROTATION = {
 }
 
 EXPECTED_BUTTONS = {
-    "dynagear": ("Jump,Attack,-,-,-,-,Test,Service,Start,Coin", 2),
-    "cairblad": ("Fire,Bomb,Special,-,-,-,Test,Service,Start,Coin", 3),
-    "vasara": ("Attack,Bomb,-,-,-,-,Test,Service,Start,Coin", 2),
-    "vasara2": ("Attack,Vasara Attack,-,-,-,-,Test,Service,Start,Coin", 2),
-    "drifto94": ("Accelerate,Brake,-,-,-,-,Test,Service,Start,Coin", 2),
-    "stmblade": ("Fire,Bomb,-,-,-,-,Test,Service,Start,Coin", 2),
-    "twineag2": ("Cannon,Ground Attack,Bomb,-,-,-,Test,Service,Start,Coin", 3),
-    "ultrax": ("Fire,Grenade,Bomb,-,-,-,Test,Service,Start,Coin", 3),
+    "dynagear": ("Jump,Attack,-,-,-,-,Start,Coin,Service,Test", 2),
+    "cairblad": ("Fire,Bomb,Special,-,-,-,Start,Coin,Service,Test", 3),
+    "vasara": ("Attack,Bomb,-,-,-,-,Start,Coin,Service,Test", 2),
+    "vasara2": ("Attack,Vasara Attack,-,-,-,-,Start,Coin,Service,Test", 2),
+    "drifto94": ("Brake,Accelerate,-,-,-,-,Start,Coin,Service,Test", 2),
+    "stmblade": ("Fire,Bomb,-,-,-,-,Start,Coin,Service,Test", 2),
+    "twineag2": ("Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test", 3),
+    "ultrax": ("Fire,Grenade,Bomb,-,-,-,Start,Coin,Service,Test", 3),
     "survarts": (
         "Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,"
-        "Strong Kick,Test,Service,Start,Coin",
+        "Strong Kick,Start,Coin,Service,Test",
         6,
     ),
     "survartsu": (
         "Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,"
-        "Strong Kick,Test,Service,Start,Coin",
+        "Strong Kick,Start,Coin,Service,Test",
         6,
     ),
     "survartsj": (
         "Weak Punch,Medium Punch,Strong Punch,Weak Kick,Medium Kick,"
         "Strong Kick,"
-        "Test,Service,Start,Coin",
+        "Start,Coin,Service,Test",
         6,
     ),
 }
@@ -79,6 +79,15 @@ def main() -> int:
         assert actual_names == expected_names, (setname, actual_names)
         assert actual_count == expected_count, (setname, actual_count)
 
+    wrapper = (ROOT / "Arcade-SSV.sv").read_text(encoding="utf-8")
+    compact_wrapper = re.sub(r"\s+", "", wrapper)
+    assert ('"J1,Fire,Jump,Button3,Button4,Button5,Button6,'
+            'Start,Coin,Service,Test;"') in compact_wrapper
+    assert "wiretest_button=status[6]|joy_p1[13]|joy_p2[13];" in compact_wrapper
+    assert "wireservice_button=joy_p1[12]|joy_p2[12];" in compact_wrapper
+    assert "wirecoin1_button=joy_p1[11];" in compact_wrapper
+    assert "wirecoin2_button=joy_p2[11];" in compact_wrapper
+
     source_rotations = mame_rotations(text)
     checked = []
     controls_checked = []
@@ -109,6 +118,7 @@ def main() -> int:
     print(f"PASS {len(checked)} MRA rotations match MAME GAME declarations")
     print(f"PASS {len(controls_checked)} MRA control declarations match generator")
     print(f"PASS {len(EXPECTED_BUTTONS)} exact control mappings")
+    print("PASS wrapper Start/Coin/Service/Test joystick-bit contract")
     return 0
 
 
