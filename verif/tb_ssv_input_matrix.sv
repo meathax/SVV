@@ -1,180 +1,92 @@
 `timescale 1ns/1ps
-// Lock Arcade-SSV.sv player/system/DSW1/DSW2 bit mapping vs MAME dynagear ports.
-//
-// SCOPE WARNING: this bench re-declares its own copy of the wrapper functions
-// and checks them against constants in this same file. It is a change-detector
-// for Arcade-SSV.sv, NOT an independent golden — when the P1 bit order was
-// corrected, this file was edited in the same commit, so a PASS here proved
-// only that the two copies agreed.
-//
-// What actually pins the port order to the board is the raw in_p1 / in_system
-// values in verif/scenarios/dynagear/coin_start_p1*.json: they come from a
-// MAME 0.288 replay and are driven straight into ssv_core by tb_ssv_frame_crc,
-// so the game itself has to respond to them. Change a mapping here and re-run
-// that scenario before believing it.
 
+// Directly verifies the same synthesizable cabinet-input block instantiated by
+// Arcade-SSV.sv. No copied wrapper functions are used here.
 module tb_ssv_input_matrix;
 
-// Mirror of Arcade-SSV.sv mapping (keep in sync).
-// joy bits: 0=R 1=L 2=D 3=U 4..9=B1..B6 10=Test 11=Service 12=Start 13=Coin
-function automatic [15:0] player_port(input [31:0] joy);
-    // MAME bits 7:0 = UP,DOWN,LEFT,RIGHT,B1,B2,B3,START. B3 is a real button
-    // now: SSV's port always carried it and Dyna Gear simply never presses it.
-    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
-                              joy[4], joy[5], joy[6], joy[12]}};
-endfunction
-
-// MAME ADD_BUTTONS ($500008): P1 B4-B6 on bits 0-2, P2 B4-B6 on bits 4-6,
-// active low. Mirror of Arcade-SSV.sv extra_port.
-function automatic [15:0] extra_port(input [31:0] j1, input [31:0] j2);
-    extra_port = {8'hff, ~{1'b0, j2[9], j2[8], j2[7],
-                           1'b0, j1[9], j1[8], j1[7]}};
-endfunction
-
-function automatic [15:0] system_port(
-    input coin1, input coin2, input service, input test_btn
-);
-    system_port = {8'hff, ~{3'b000, test_btn, 1'b0, service, coin2, coin1}};
-endfunction
-
-function automatic [15:0] system_port_cfg(
-    input [15:0] live_port, input bit fixed_test_tilt
-);
-    system_port_cfg = fixed_test_tilt ? (live_port | 16'h0018) : live_port;
-endfunction
-
-function automatic [15:0] extra_port_cfg(
-    input logic [1:0] mode, input [31:0] j1, input [31:0] j2
-);
-    extra_port_cfg = (mode == 2'd2) ? extra_port(j1, j2) : 16'hffff;
-endfunction
-
-// DIP switches now come straight from the MRA on ioctl index 254; the wrapper
-// no longer translates anything, so these mirror the whole of what it does.
-function automatic [15:0] dsw1_port(input [7:0] sw0);
-    dsw1_port = {8'hff, sw0};
-endfunction
-
-function automatic [15:0] dsw2_port(input [7:0] sw1);
-    dsw2_port = {8'hff, sw1};
-endfunction
-
+logic [31:0] joy_p1, joy_p2;
+logic [3:0] input_layout;
+logic system_input_mode;
+logic [1:0] extra_input_mode;
+logic test_button, service_button, coin1_button, coin2_button;
+logic [15:0] p1_port, p2_port, system_port, extra_port;
 integer fails;
+
+ssv_input_ports dut (.*);
 
 task automatic expect16(input string name, input [15:0] got, input [15:0] exp);
     if (got !== exp) begin
         $display("FAIL %s got=%04x exp=%04x", name, got, exp);
-        fails = fails + 1;
+        fails++;
     end
 endtask
 
+task automatic settle;
+    #1;
+endtask
+
+// DIP bytes are direct wrapper passthroughs and remain checked independently;
+// they are not descriptor-selected cabinet transforms handled by the DUT.
+function automatic logic [15:0] dsw_port(input logic [7:0] value);
+    dsw_port = {8'hff, value};
+endfunction
+
 initial begin
     fails = 0;
+    joy_p1 = '0; joy_p2 = '0;
+    input_layout = 4'd0;
+    system_input_mode = 1'b0;
+    extra_input_mode = 2'd0;
+    test_button = 1'b0; service_button = 1'b0;
+    coin1_button = 1'b0; coin2_button = 1'b0;
+    settle();
 
-    // Idle joysticks → all ones (active-low released).
-    expect16("P1 idle", player_port(32'd0), 16'hFFFF);
-    expect16("P2 idle", player_port(32'd0), 16'hFFFF);
+    expect16("P1 idle", p1_port, 16'hffff);
+    expect16("P2 idle", p2_port, 16'hffff);
 
-    // MAME P1 low byte: UP,DOWN,LEFT,RIGHT,B1,B2,B3,START
-    // joy bits: 0=R 1=L 2=D 3=U 4=Fire 5=Jump 6=Test 7=Service 8=Start 9=Coin
-    expect16("P1 UP", player_port(32'h8), 16'hFF7F);
-    expect16("P1 DOWN", player_port(32'h4), 16'hFFBF);
-    expect16("P1 LEFT", player_port(32'h2), 16'hFFDF);
-    expect16("P1 RIGHT", player_port(32'h1), 16'hFFEF);
-    expect16("P1 FIRE", player_port(32'h10), 16'hFFF7);
-    expect16("P1 JUMP", player_port(32'h20), 16'hFFFB);
-    expect16("P1 START", player_port(32'h1000), 16'hFFFE);
-    expect16("P1 B3", player_port(32'h40), 16'hFFFD);
+    joy_p1 = 32'h0000_0008; settle(); expect16("P1 UP", p1_port, 16'hff7f);
+    joy_p1 = 32'h0000_0004; settle(); expect16("P1 DOWN", p1_port, 16'hffbf);
+    joy_p1 = 32'h0000_0002; settle(); expect16("P1 LEFT", p1_port, 16'hffdf);
+    joy_p1 = 32'h0000_0001; settle(); expect16("P1 RIGHT", p1_port, 16'hffef);
+    joy_p1 = 32'h0000_0010; settle(); expect16("P1 B1", p1_port, 16'hfff7);
+    joy_p1 = 32'h0000_0020; settle(); expect16("P1 B2", p1_port, 16'hfffb);
+    joy_p1 = 32'h0000_0040; settle(); expect16("P1 B3", p1_port, 16'hfffd);
+    joy_p1 = 32'h0000_1000; settle(); expect16("P1 START", p1_port, 16'hfffe);
+    joy_p1 = 32'hffff_ffff; settle(); expect16("P1 all", p1_port, 16'hff00);
 
-    // With every joystick bit pressed the whole low byte must go active
-    // (0xFF00): all four directions, B1-B3 and START. B3 used to be excluded
-    // here to prove it was tied off; it is now wired, so its absence from the
-    // result would be the bug.
-    expect16("P1 ALL", player_port(32'hFFFFFFFF), 16'hFF00);
+    // Quiz layout maps B1-B4 to bits 7:4 and retains START on bit 0.
+    input_layout = 4'd2;
+    joy_p1 = 32'h0000_0010; settle(); expect16("quiz B1", p1_port, 16'hff7f);
+    joy_p1 = 32'h0000_0020; settle(); expect16("quiz B2", p1_port, 16'hffbf);
+    joy_p1 = 32'h0000_0040; settle(); expect16("quiz B3", p1_port, 16'hffdf);
+    joy_p1 = 32'h0000_0080; settle(); expect16("quiz B4", p1_port, 16'hffef);
+    joy_p1 = 32'h0000_1000; settle(); expect16("quiz START", p1_port, 16'hfffe);
+    input_layout = 4'd1;
+    joy_p1 = 32'h0000_0001; settle(); expect16("unknown layout defaults normal", p1_port, 16'hffef);
 
-    // $500008 extra buttons. P1 B4/B5/B6 are joy[7]/[8]/[9] -> bits 0/1/2.
-    expect16("P1 B4", extra_port(32'h80, 32'd0), 16'hFFFE);
-    expect16("P1 B5", extra_port(32'h100, 32'd0), 16'hFFFD);
-    expect16("P1 B6", extra_port(32'h200, 32'd0), 16'hFFFB);
-    expect16("P2 B4", extra_port(32'd0, 32'h80), 16'hFFEF);
-    expect16("P2 B6", extra_port(32'd0, 32'h200), 16'hFFBF);
-    expect16("EXTRA IDLE", extra_port(32'd0, 32'd0), 16'hFFFF);
-    expect16("EXTRA mode none", extra_port_cfg(2'd0, 32'h380, 32'h380),
-             16'hFFFF);
-    expect16("EXTRA mode decoded-idle", extra_port_cfg(2'd1, 32'h380, 32'h380),
-             16'hFFFF);
-    expect16("EXTRA mode six-button", extra_port_cfg(2'd2, 32'h380, 32'h380),
-             16'hFF88);
+    joy_p1 = 32'h0000_0380; joy_p2 = 32'h0000_0380;
+    extra_input_mode = 2'd0; settle(); expect16("extra absent idle", extra_port, 16'hffff);
+    extra_input_mode = 2'd1; settle(); expect16("extra decoded idle", extra_port, 16'hffff);
+    extra_input_mode = 2'd2; settle(); expect16("extra six button", extra_port, 16'hff88);
+    extra_input_mode = 2'd3; settle(); expect16("extra reserved idle", extra_port, 16'hffff);
 
-    // ---------------------------------------------------------------------
-    // Independent anchor: these five constants are NOT derived from
-    // Arcade-SSV.sv. They are the literal in_p1 / in_system words that
-    // verif/scenarios/dynagear/coin_start_p1.json feeds straight into
-    // ssv_core, captured from a MAME 0.288 dynagear replay in which the game
-    // actually inserts a coin, starts, confirms a character and moves. If the
-    // wrapper mapping and these disagree, the wrapper is wrong -- editing the
-    // mirror above cannot make this block pass.
-    //
-    // scenario frame 165/250: "P1 START pressed (active-low bit0)"
-    expect16("SCENARIO START", player_port(32'h1000), 16'hFFFE);
-    // scenario frame 255/330: "P1 B1 confirm" / "P1 B1 attack"
-    expect16("SCENARIO B1", player_port(32'h10), 16'hFFF7);
-    // scenario frame 300: "P1 RIGHT"
-    expect16("SCENARIO RIGHT", player_port(32'h1), 16'hFFEF);
-    // scenario frame 360: "P1 UP"
-    expect16("SCENARIO UP", player_port(32'h8), 16'hFF7F);
-    // scenario frame 840 (gameplay): "RIGHT+B1 attack" == 0xFFE7
-    expect16("SCENARIO RIGHT+B1", player_port(32'h11), 16'hFFE7);
-    // scenario frame 30: "COIN1 pressed (active-low bit0)"
-    expect16("SCENARIO COIN1", system_port(1, 0, 0, 0), 16'hFFFE);
-    // ---------------------------------------------------------------------
+    joy_p1 = '0; joy_p2 = '0;
+    coin1_button = 1'b1; settle(); expect16("SYSTEM coin1", system_port, 16'hfffe);
+    coin1_button = 1'b0; coin2_button = 1'b1; settle(); expect16("SYSTEM coin2", system_port, 16'hfffd);
+    coin2_button = 1'b0; service_button = 1'b1; settle(); expect16("SYSTEM service", system_port, 16'hfffb);
+    service_button = 1'b0; test_button = 1'b1; settle(); expect16("SYSTEM live test", system_port, 16'hffef);
+    system_input_mode = 1'b1; settle(); expect16("SYSTEM fixed Test/Tilt high", system_port, 16'hffff);
+    coin1_button = 1'b1; settle(); expect16("SYSTEM fixed mode preserves coin", system_port, 16'hfffe);
 
-    // SYSTEM: COIN1,COIN2,SERVICE1,TILT=0,TEST
-    expect16("SYS idle", system_port(0, 0, 0, 0), 16'hFFFF);
-    expect16("SYS COIN1", system_port(1, 0, 0, 0), 16'hFFFE);
-    expect16("SYS COIN2", system_port(0, 1, 0, 0), 16'hFFFD);
-    expect16("SYS SERVICE", system_port(0, 0, 1, 0), 16'hFFFB);
-    expect16("SYS TEST", system_port(0, 0, 0, 1), 16'hFFEF);
-    expect16("SYS normal TEST live",
-             system_port_cfg(system_port(0, 0, 0, 1), 1'b0), 16'hFFEF);
-    expect16("SYS Vasara TEST/TILT fixed high",
-             system_port_cfg(system_port(0, 0, 0, 1), 1'b1), 16'hFFFF);
-
-    // ---------------------------------------------------------------------
-    // DIP switches. These constants are NOT derived from Arcade-SSV.sv -- they
-    // are the raw DSW1/DSW2 bytes MAME 0.288 puts on $210002/$210004 for
-    // dynagear, read off INPUT_PORTS_START(dynagear) and SSV_COINAGE_EXTENDED
-    // in src/mame/seta/ssv.cpp. They are also exactly what mra/Dyna Gear.mra
-    // now has to produce, so this block pins the MRA and the board together.
-    //
-    // Defaults FF / FD: Coin A and B 1C/1C, Flip Off, Demo Sounds On,
-    // Difficulty Normal, 2 lives, Free Play Off, 4 Hearts.
-    expect16("DSW1 default", dsw1_port(8'hff), 16'hFFFF);
-    expect16("DSW2 default", dsw2_port(8'hfd), 16'hFFFD);
-
-    // Coin A = 4C/1C is nibble 7 (SSV_COINAGE_EXTENDED 0x0007 << 0).
-    expect16("DSW1 4C/1C A", dsw1_port(8'hf7), 16'hFFF7);
-    // Coin B = Multi E is nibble 1 in the high half (0x0001 << 4).
-    expect16("DSW1 Multi E B", dsw1_port(8'h1f), 16'hFF1F);
-    // DSW2 bit 7 clear = 3 Hearts (0x0080 selects 4 Hearts).
-    expect16("DSW2 3 Hearts", dsw2_port(8'h7d), 16'hFF7D);
-    // DSW2 bits 3:2 = 00 is Hardest (0x000c is Normal).
-    expect16("DSW2 Hardest", dsw2_port(8'hf1), 16'hFFF1);
-
-    // The wrapper must not alter the byte on its way to the game: whatever the
-    // MRA sends is what $210002/$210004 read back, high half tied to 1.
-    for (int i = 0; i < 256; i++) begin
-        if (dsw1_port(i[7:0]) !== {8'hff, i[7:0]}) begin
-            $display("FAIL DSW1 passthrough %02x", i); fails = fails + 1;
-        end
-        if (dsw2_port(i[7:0]) !== {8'hff, i[7:0]}) begin
-            $display("FAIL DSW2 passthrough %02x", i); fails = fails + 1;
-        end
-    end
+    expect16("DSW1 default", dsw_port(8'hff), 16'hffff);
+    expect16("DSW2 default", dsw_port(8'hfd), 16'hfffd);
+    for (int i = 0; i < 256; i++)
+        expect16("DSW passthrough", dsw_port(i[7:0]), {8'hff, i[7:0]});
 
     if (fails != 0)
         $fatal(1, "input matrix failures=%0d", fails);
-    $display("PASS tb_ssv_input_matrix");
+    $display("PASS tb_ssv_input_matrix direct_synth_block=1");
     $finish;
 end
+
 endmodule

@@ -8,6 +8,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_host_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_mode_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_input_ports.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_mahjong_matrix.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_upd4701.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_upd7001.sv

@@ -54,6 +54,8 @@ logic [SDR_AW:1] sdr_addr;
 logic [15:0] sdr_dout;
 logic signed [15:0] audio_l, audio_r;
 logic sample_tick, underrun;
+logic check_sdr_addr = 1'b0;
+logic [SDR_AW:1] expected_sdr_addr;
 
 // Tiny synthetic sample ROM: ramp at words 0..
 logic [15:0] samp [0:255];
@@ -66,12 +68,10 @@ wire [SDR_AW:1] samp_base = SDR_SAMPLES_BASE[SDR_AW:1];
 always_ff @(posedge clk) begin
     sdr_ack <= 0;
     if (!rst && sdr_req) begin
-        // Dyna Gear plays CR bank 2, but that bank aliases loaded slot 0.
-        // This catches the stale identity bank map that used to send it 8 MiB
-        // beyond its only 4 MiB sample image.
-        if ((sdr_addr - samp_base) >= (25'd1 << 21))
-            $fatal(1, "Dyna Gear bank 2 did not alias sample slot 0: %h",
-                   sdr_addr);
+        if (check_sdr_addr && sdr_addr !== expected_sdr_addr &&
+            sdr_addr !== expected_sdr_addr + 1'd1)
+            $fatal(1, "ES5506 bank map address mismatch: got=%h expected=%h",
+                   sdr_addr, expected_sdr_addr);
         sdr_dout <= samp[(sdr_addr - samp_base) & 21'hff];
         sdr_ack  <= 1;
     end
@@ -163,6 +163,45 @@ begin
 end
 endtask
 
+task automatic check_bank(input logic [3:0] valid,
+                          input logic [7:0] map,
+                          input logic [1:0] bank,
+                          input logic [1:0] slot);
+begin
+    defaults();
+    cfg = cfg_dynagear();
+    cfg.bank_valid = valid;
+    cfg.bank_map = map;
+    eng_cr = {bank, 14'h0000};
+    expected_sdr_addr = samp_base + (25'(slot) << 21);
+    check_sdr_addr = 1'b1;
+    reset_dut();
+    wait_sample();
+    if (sdr_fetches < 2)
+        $fatal(1, "valid ES5506 bank did not fetch: valid=%h map=%h bank=%0d",
+               valid, map, bank);
+    check_sdr_addr = 1'b0;
+end
+endtask
+
+task automatic check_invalid_bank(input logic [3:0] valid,
+                                  input logic [7:0] map,
+                                  input logic [1:0] bank);
+begin
+    defaults();
+    cfg = cfg_dynagear();
+    cfg.bank_valid = valid;
+    cfg.bank_map = map;
+    eng_cr = {bank, 14'h0000};
+    check_sdr_addr = 1'b0;
+    reset_dut();
+    wait_sample();
+    if (sdr_fetches != 0 || audio_l != 0 || audio_r != 0)
+        $fatal(1, "invalid ES5506 bank was not silent/no-fetch: bank=%0d fetches=%0d L=%0d R=%0d",
+               bank, sdr_fetches, audio_l, audio_r);
+end
+endtask
+
 task automatic reset_dut;
 begin
     rst = 1'b1;
@@ -188,6 +227,20 @@ initial begin
     for (ticks = 0; ticks < 8; ticks = ticks + 1) wait_sample();
     if (audio_l == 0 && audio_r == 0)
         $fatal(1, "baseline PCM remained silent");
+
+    // Every bank-valid/map shape used by the qualified set matrix.  valid=1
+    // covers Cair Blade/Storm Blade, valid=3 map04 covers Vasara/Drift Out,
+    // and valid=f map44 covers Twin Eagle II/Ultra X.  Exercise every valid
+    // CR-bank alias plus an absent bank, rather than only Dyna Gear's bank 2.
+    check_bank(4'h1, 8'h00, 2'd0, 2'd0);
+    check_invalid_bank(4'h1, 8'h00, 2'd1);
+    check_bank(4'h3, 8'h04, 2'd0, 2'd0);
+    check_bank(4'h3, 8'h04, 2'd1, 2'd1);
+    check_invalid_bank(4'h3, 8'h04, 2'd2);
+    check_bank(4'hf, 8'h44, 2'd0, 2'd0);
+    check_bank(4'hf, 8'h44, 2'd1, 2'd1);
+    check_bank(4'hf, 8'h44, 2'd2, 2'd0);
+    check_bank(4'hf, 8'h44, 2'd3, 2'd1);
 
     // BLE without LPE is ES5506 trans-wave mode: wrap once, clear BLE/LPE,
     // and set LEI so later crossings do not loop again.

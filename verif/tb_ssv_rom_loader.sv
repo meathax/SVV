@@ -246,7 +246,8 @@ initial begin
     // first. The expectations below are unchanged by it.
     dynagear_cfg = cfg_dynagear();
     send_cfg_then_byte0_no_gap(dynagear_cfg, 8'h34);
-    if (!cfg_valid || cfg.extra_ram_mode !== 2'd1 || cfg.nvram_mode !== 2'd0)
+    if (!cfg_valid || cfg.extra_ram_mode !== 2'd1 || cfg.nvram_mode !== 2'd0 ||
+        cfg.gfx_code_mask !== 20'h1ffff)
         $fatal(1, "Dyna Gear configuration/RAM-map block was rejected");
 
     send_byte(1, 8'h12);
@@ -327,7 +328,7 @@ initial begin
     cairblad_cfg = cfg_cairblad();
     send_cfg(cairblad_cfg);
     if (!cfg_valid || !cfg.has_nvram || cfg.extra_ram_mode !== 2'd0 ||
-        cfg.nvram_mode !== 2'd2)
+        cfg.nvram_mode !== 2'd2 || cfg.gfx_code_mask !== 20'h3ffff)
         $fatal(1, "Cairblad NVRAM configuration flag was rejected");
 
     // Version 3 commits only after all 24 bytes and decodes its extension
@@ -350,8 +351,31 @@ initial begin
         malformed_sum = malformed_sum + v3_image[v3_i * 8 +: 8];
     v3_image[23 * 8 +: 8] = -malformed_sum;
     send_cfg_v3_image(v3_image);
-    if (cfg_valid || cfg_commit)
+    if (cfg_valid || cfg_commit || cfg.custom_output_mode !== 3'd1)
         $fatal(1, "unsupported version-3 custom-output enum was accepted");
+    // The timing cut deliberately permits the rejected payload to appear on
+    // cfg, but cfg_valid remains its ownership qualifier.  Index 0 must not
+    // use that payload for either SDRAM or the ST010 side destination.
+    if (ioctl_wait)
+        $fatal(1, "rejected descriptor left the loader waiting");
+    ioctl_index = 8'd0;
+    ioctl_addr = 27'd0; ioctl_dout = 8'h5a; ioctl_wr = 1'b1; tick();
+    ioctl_addr = 27'd1; ioctl_dout = 8'ha5; tick();
+    ioctl_wr = 1'b0; tick();
+    if (sdr_wr_req || st010_drom_we || rom_loaded)
+        $fatal(1, "rejected descriptor allowed index-0 side effects");
+
+    // An out-of-domain exponent is rejected and its unqualified decoded mask
+    // takes the safe default rather than evaluating a variable shift.
+    v3_image = encode_cfg_v3(cairblad_cfg);
+    v3_image[4 * 8 +: 8] = 8'd13;
+    malformed_sum = 8'd0;
+    for (int mask_i = 0; mask_i < 23; mask_i++)
+        malformed_sum = malformed_sum + v3_image[mask_i * 8 +: 8];
+    v3_image[23 * 8 +: 8] = -malformed_sum;
+    send_cfg_v3_image(v3_image);
+    if (cfg_valid || cfg_commit || cfg.gfx_code_mask !== 20'h00000)
+        $fatal(1, "invalid graphics exponent did not fail to safe mask");
 
     v3_image = encode_cfg_v3(cairblad_cfg);
     v3_image[23 * 8 +: 8] = v3_image[23 * 8 +: 8] ^ 8'h01;
@@ -382,7 +406,8 @@ initial begin
     cairblad_cfg.srmp7_irqv_mame = 1'b1;
     send_cfg_v3_image(encode_cfg_v3(cairblad_cfg));
     if (!cfg_valid || cfg.gfx_mb !== 7'd64 || cfg.sample_mb !== 6'd24 ||
-        cfg.extra_ram_mode !== 2'd3 || cfg.mahjong_mode !== 3'd5)
+        cfg.extra_ram_mode !== 2'd3 || cfg.mahjong_mode !== 3'd5 ||
+        cfg.gfx_code_mask !== 20'h7ffff)
         $fatal(1, "SRMP7 family descriptor was rejected");
 
     cairblad_cfg = cfg_dynagear();
@@ -396,7 +421,8 @@ initial begin
     cairblad_cfg.lockout_inverted = 1'b1;
     cairblad_cfg.wdog_mode = 2'd0;
     send_cfg_v3_image(encode_cfg_v3(cairblad_cfg));
-    if (!cfg_valid || cfg.optional_io_mode !== 2'd1 || cfg.gfx_mb !== 7'd14)
+    if (!cfg_valid || cfg.optional_io_mode !== 2'd1 || cfg.gfx_mb !== 7'd14 ||
+        cfg.gfx_code_mask !== 20'h03fff)
         $fatal(1, "Eagle Shot optional-device descriptor was rejected");
 
     cairblad_cfg = cfg_cairblad();
@@ -425,7 +451,8 @@ initial begin
     stmblade_cfg = cfg_stmblade();
     send_cfg(stmblade_cfg);
     if (!cfg_valid || cfg.game_id !== stmblade_cfg.game_id ||
-        cfg.extra_ram_mode !== 2'd0 || cfg.nvram_mode !== 2'd1)
+        cfg.extra_ram_mode !== 2'd0 || cfg.nvram_mode !== 2'd1 ||
+        cfg.gfx_code_mask !== 20'h0ffff)
         $fatal(1, "24 MiB configuration block was rejected");
     send_byte(stream_gfx_start_cfg(stmblade_cfg) +
               gfx_quarter_bytes_cfg(stmblade_cfg), 8'h77);
@@ -441,7 +468,8 @@ initial begin
     ultrax_cfg = cfg_ultrax();
     send_cfg(ultrax_cfg);
     if (!cfg_valid || cfg.game_id !== ultrax_cfg.game_id ||
-        cfg.extra_ram_mode !== 2'd2 || cfg.nvram_mode !== 2'd0)
+        cfg.extra_ram_mode !== 2'd2 || cfg.nvram_mode !== 2'd0 ||
+        cfg.gfx_code_mask !== 20'h07fff)
         $fatal(1, "12 MiB configuration block was rejected");
     send_byte(stream_gfx_start_cfg(ultrax_cfg) +
               gfx_quarter_bytes_cfg(ultrax_cfg) * 27'd2, 8'h88);
@@ -543,6 +571,36 @@ initial begin
     send_cfg_image(malformed_cfg);
     if (cfg_valid || rom_loaded || cfg_commit)
         $fatal(1, "malformed replacement descriptor did not fail closed");
+
+    // Reset on the validation cycle must cancel the pending transaction and
+    // its wait without publishing either validity or a commit pulse.
+    v3_image = encode_cfg_v3(cfg_cairblad());
+    ioctl_index = 8'd1;
+    for (int reset_i = 0; reset_i < 23; reset_i++) begin
+        ioctl_addr = 27'(reset_i);
+        ioctl_dout = v3_image[reset_i * 8 +: 8];
+        ioctl_wr = 1'b1; tick(); ioctl_wr = 1'b0; tick();
+    end
+    ioctl_addr = 27'd23;
+    ioctl_dout = v3_image[23 * 8 +: 8];
+    ioctl_wr = 1'b1; tick();
+    if (!ioctl_wait || cfg_valid || cfg_commit)
+        $fatal(1, "final descriptor byte did not enter pending commit");
+    rst = 1'b1; tick();
+    ioctl_wr = 1'b0;
+    if (ioctl_wait || cfg_valid || cfg_commit || rom_loaded ||
+        sdr_wr_req || st010_drom_we)
+        $fatal(1, "reset did not clear pending descriptor state");
+    rst = 1'b0; tick();
+
+    // Re-prove the no-gap path after that interrupted transaction: the final
+    // descriptor byte commits once, byte zero is retained, and byte one makes
+    // exactly the expected first SDRAM word.
+    send_cfg_then_byte0_no_gap(dynagear_cfg, 8'h78);
+    send_byte(27'd1, 8'h56);
+    if (!sdr_wr_req || sdr_wr_addr !== (SDR_MAINCPU_BASE >> 1) ||
+        sdr_wr_din !== 16'h5678 || sdr_wr_be !== 2'b11)
+        $fatal(1, "post-reset no-gap descriptor/first write mismatch");
     $display("PASS tb_ssv_rom_loader");
     $finish;
 end

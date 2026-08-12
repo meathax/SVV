@@ -24,6 +24,7 @@ if (( SCREENSHOT_FRAME < 0 || SCREENSHOT_FRAME >= MAX_FRAMES )); then
 fi
 
 VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
+        -CFLAGS -D_GLIBCXX_USE_CXX11_ABI=0
         -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-UNOPTFLAT
         -Wno-CASEINCOMPLETE -Wno-BLKANDNBLK -Wno-MULTIDRIVEN -Wno-INITIALDLY
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
@@ -40,12 +41,17 @@ fi
 
 CORE=(
   rtl/ssv_pkg.sv rtl/mem/sdram.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv
+  rtl/io/ssv_mahjong_matrix.sv
+  rtl/io/ssv_upd4701.sv rtl/io/ssv_upd7001.sv
+  rtl/io/ssv_adc0809.sv rtl/io/ssv_93c46_16.sv
   rtl/common/s32_big_dpram.sv
   rtl/video/ssv_palette_ram.sv rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv rtl/video/ssv_gfx_row_decode.sv
+  rtl/video/ssv_st0020_ctrl.sv
   rtl/video/ssv_bg_renderer.sv rtl/video/ssv_mlab240_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_srmp7_bank.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   rtl/cpu/upd96050/upd96050.sv rtl/cpu/upd96050/upd96050_st010.sv
@@ -60,22 +66,34 @@ verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_frame_crc \
   "${CORE[@]}" verif/tb_ssv_frame_crc.sv >"$OUT/build.log" 2>&1
 
 if [[ "${BUILD_ONLY:-0}" == 1 ]]; then
-  echo "BUILD_ONLY complete: $OUT/model/tb_ssv_frame_crc"
+  model_bin="$OUT/model/tb_ssv_frame_crc"; [[ -f "$model_bin.exe" ]] && model_bin="$model_bin.exe"
+  echo "BUILD_ONLY complete: $model_bin"
   exit 0
 fi
 
+model_bin="$OUT/model/tb_ssv_frame_crc"
+[[ -f "$model_bin.exe" ]] && model_bin="$model_bin.exe"
+
 # Read the set list from the authoritative manifest and defaults from the
 # generated MRA. This script intentionally contains no second game list.
-mapfile -t PROFILE < <(python3 -c '
+PROFILE_TEXT="$(python3 -c '
 import pathlib, xml.etree.ElementTree as ET
 from tools.ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
 for setname in SUPPORTED_SETS:
-    mra = next(path for path in pathlib.Path("mra").glob("*.mra")
-               if ET.parse(path).getroot().findtext("setname") == setname)
+    matches = [path for path in pathlib.Path("releases").glob("*.mra")
+               if ET.parse(path).getroot().findtext("setname") == setname]
+    if len(matches) != 1:
+        raise SystemExit(f"expected one release MRA for {setname}, found {len(matches)}")
+    mra = matches[0]
     root = ET.parse(mra).getroot()
     dsw = (root.find("switches").get("default", "FF,FD")).split(",")
     print(f"{setname}|{SUPPORTED_SET_IDS[setname]}|FF{dsw[0]}|FF{dsw[1]}")
-')
+')"
+mapfile -t PROFILE <<<"$PROFILE_TEXT"
+if (( ${#PROFILE[@]} != 8 )); then
+  echo "expected 8 authoritative supported profiles, got ${#PROFILE[@]}" >&2
+  exit 1
+fi
 
 for row in "${PROFILE[@]}"; do
   IFS='|' read -r setname game_id dsw1 dsw2 <<<"$row"
@@ -106,7 +124,7 @@ for row in "${PROFILE[@]}"; do
   if [[ "${LIGHT_DIAG:-0}" == 1 ]]; then
     sim_args+=(+LIGHT_DIAG)
   fi
-  verilator-sim-safe -- "$OUT/model/tb_ssv_frame_crc" "${sim_args[@]}" \
+  verilator-sim-safe -- "$model_bin" "${sim_args[@]}" \
     | tee "$log"
   grep -q "PASS tb_ssv_frame_crc" "$log"
   [[ -s "$shot_ppm" ]] || { echo "missing/empty Verilator screenshot: $shot_ppm" >&2; exit 1; }

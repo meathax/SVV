@@ -1,0 +1,50 @@
+{
+  "schema_version": 4,
+  "raw_event_schema": "mister-raw-trace-v4",
+  "canonical_event_schema": "mister-canonical-trace-v4",
+  "rules": {
+    "missing_is_not_zero": true,
+    "strict_no_resync": true,
+    "raw_cycles_for_cross_side_inputs_forbidden": true,
+    "mixed_clock_global_order_forbidden_without_proof": true,
+    "unknown_fields_fail_when_selected": true
+    ,"require_complete_receipt": true
+  },
+  "domains": {
+    "mainbus": {
+      "strict": false,
+      "meaning": "AUTO: define the exact accepted or completed main CPU bus event.",
+      "ordering": "domain_seq",
+      "global_order_proven": false,
+      "canonical": {
+        "width_bits": 16,
+        "phase": "completed"
+      },
+      "mame": {
+        "address_unit_bytes": 1,
+        "width_bits": 16,
+        "data_encoding": "lane_numeric",
+        "lane_to_canonical": [
+          0,
+          1
+        ],
+        "byte_enable_polarity": "active_high",
+        "phase": "completed",
+        "evidence": "AUTO"
+      },
+      "rtl": {
+        "address_unit_bytes": 1,
+        "width_bits": 16,
+        "data_encoding": "lane_numeric",
+        "lane_to_canonical": [
+          0,
+          1
+        ],
+        "byte_enable_polarity": "active_high",
+        "phase": "completed",
+        "evidence": "AUTO"
+      },
+      "comparable_optional_fields": []
+    }
+  }
+}

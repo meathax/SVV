@@ -172,6 +172,15 @@ task automatic prove_deadline_abort(
 endtask
 
 initial begin
+    // Exercise this renderer's own consumer independently of the background
+    // path. Cair Blade preserves nibble d; ordinary SSV reverses it to b.
+    cfg.tile_code_identity = 1'b0;
+    if (dut.expand_code(cfg, 16'h1234, 16'h3400) !== 20'hb1234)
+        $fatal(1, "cached-sprite scrambled tile-code expansion mismatch");
+    cfg.tile_code_identity = 1'b1;
+    if (dut.expand_code(cfg, 16'h1234, 16'h3400) !== 20'hd1234)
+        $fatal(1, "cached-sprite Cair Blade identity tile-code expansion mismatch");
+    cfg = ssv_pkg::cfg_dynagear();
     for (i = 0; i < 131072; i = i + 1)
         sprite_mem[i] = 16'd0;
 
@@ -246,8 +255,9 @@ initial begin
         $fatal(1, "empty line produced pixels count=%0d", plots);
 
     // Prove the paired global read preserves distinct words 2 and 3. These
-    // offsets cancel in Y and move X by five pixels, while the cached snapshot
-    // exposes the exact four-word ordering independently of rendered output.
+    // offsets cancel in Y and move X by five pixels. The cache now stores the
+    // compact visual descriptor (88 bits), so check its encoded coordinates
+    // rather than the removed raw-word snapshot above bit 87.
     sprite_mem[2] = 16'h0005;
     sprite_mem[3] = 16'h0002;
     sprite_mem[16'h1002] = 16'd10;
@@ -262,11 +272,13 @@ initial begin
     wait (cache_busy);
     wait (cache_ready);
     if (cache_overflow || dut.cache_count != 1 ||
-        dut.descriptor_cache[0][95:64] != 32'h0005_0002)
+        $signed(dut.descriptor_cache[0][86:70]) != 17'sd15 ||
+        $signed(dut.descriptor_cache[0][69:53]) != 17'sd20)
         $fatal(1,
-               "paired global word order mismatch overflow=%0b count=%0d words=%h",
+               "paired global word order mismatch overflow=%0b count=%0d sx=%0d sy=%0d",
                cache_overflow, dut.cache_count,
-               dut.descriptor_cache[0][95:64]);
+               $signed(dut.descriptor_cache[0][86:70]),
+               $signed(dut.descriptor_cache[0][69:53]));
 
     @(negedge clk);
     start = 1'b1;

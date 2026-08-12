@@ -566,24 +566,8 @@ wire [31:0] joy_p2 = joystick_1;
 wire [31:0] joy_p3 = joystick_2;
 wire [31:0] joy_p4 = joystick_3;
 
-// MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START.
-// P1/P2 port bits: U D L R B1 B2 B3 START, active low. B3 is a real
-// button now rather than a tied constant -- SSV's port always had it, and
-// Dyna Gear simply never presses it.
-function automatic [15:0] player_port(input [31:0] joy);
-    player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
-                              joy[4], joy[5], joy[6], joy[12]}};
-endfunction
-
-function automatic [15:0] quiz_port(input [31:0] joy);
-    quiz_port = {8'hff, ~{joy[4], joy[5], joy[6], joy[7],
-                            3'b000, joy[12]}};
-endfunction
-
-wire [15:0] p1_input_port = (game_cfg.input_layout == 4'd2)
-                          ? quiz_port(joy_p1) : player_port(joy_p1);
-wire [15:0] p2_input_port = (game_cfg.input_layout == 4'd2)
-                          ? quiz_port(joy_p2) : player_port(joy_p2);
+wire [15:0] p1_input_port;
+wire [15:0] p2_input_port;
 wire [23:0] mahjong_rows = {~joy_p4[9:4], ~joy_p3[9:4],
                             ~joy_p2[9:4], ~joy_p1[9:4]};
 wire signed [7:0] analog_x = joystick_l_analog_0[7:0];
@@ -592,38 +576,23 @@ wire [11:0] optional_coord_x = 12'h800 + (12'($signed(analog_x)) <<< 3);
 wire [11:0] optional_coord_y = 12'h800 + (12'($signed(analog_y)) <<< 3);
 wire [7:0] optional_paddle = 8'h80 + 8'($signed(analog_x));
 
-// MAME ADD_BUTTONS ($500008): P1 B4-B6 on bits 0-2, P2 B4-B6 on bits 4-6,
-// active low, and ONLY survarts_map decodes the window. Gate it on the config
-// so every other title reads the idle 16'hffff it read before -- an ungated
-// port would change what those games see at an address their program may still
-// probe.
-function automatic [15:0] extra_port(input [31:0] j1, input [31:0] j2);
-    extra_port = {8'hff, ~{1'b0, j2[9], j2[8], j2[7],
-                           1'b0, j1[9], j1[8], j1[7]}};
-endfunction
-
 wire test_button = status[6] | joy_p1[10] | joy_p2[10];
 wire service_button = joy_p1[11] | joy_p2[11];
 wire coin1_button = joy_p1[13];
 wire coin2_button = joy_p2[13];
-// MAME SYSTEM ($21000c): COIN1, COIN2, SERVICE1, TILT, TEST
-wire [15:0] system_port_live = {8'hff,
-    ~{3'b000, test_button, 1'b0, service_button,
-      coin2_button, coin1_button}};
-// Vasara/Vasara 2 replace SYSTEM bits 3 (Tilt) and 4 (Test) with
-// IP_ACTIVE_LOW IPT_UNKNOWN in MAME. Their released/fixed level is therefore
-// high regardless of the cabinet Test chord; other descriptors retain the
-// live normal SYSTEM port.
-wire [15:0] system_port = game_cfg.system_input_mode
-                        ? (system_port_live | 16'h0018)
-                        : system_port_live;
+wire [15:0] system_port;
+wire [15:0] extra_input_port;
 
-// Descriptor modes distinguish the decoded-but-unpopulated Dyna Gear window
-// from Survival Arts' real six-button wiring. A non-decoded or idle window is
-// driven released; the core separately gates the address decode for mode 0.
-wire [15:0] extra_input_port = (game_cfg.extra_input_mode == 2'd2)
-                             ? extra_port(joy_p1, joy_p2)
-                             : 16'hffff;
+ssv_input_ports input_ports (
+    .joy_p1(joy_p1), .joy_p2(joy_p2),
+    .input_layout(game_cfg.input_layout),
+    .system_input_mode(game_cfg.system_input_mode),
+    .extra_input_mode(game_cfg.extra_input_mode),
+    .test_button(test_button), .service_button(service_button),
+    .coin1_button(coin1_button), .coin2_button(coin2_button),
+    .p1_port(p1_input_port), .p2_port(p2_input_port),
+    .system_port(system_port), .extra_port(extra_input_port)
+);
 
 // ---------------------------------------------------------------------------
 // DIP switches, from the MRA.

@@ -56,7 +56,10 @@ for tb in $ORDER; do
   [ -f "$src" ] || { echo "SKIP  $tb (no file)"; continue; }
   bdir="$OUTDIR/$tb"; mkdir -p "$bdir"
   if is_icarus "$tb"; then
-    if ! iverilog -g2012 -Wno-timescale -o "$bdir/$tb.vvp" -s "$tb" $CPU "$src" > "$bdir.log" 2>&1; then
+    # Keep the Icarus-only lane on the same model interface as the Verilator
+    # lane. Without SIMULATION the debug ports disappear and every one of
+    # these tests fails during elaboration before exercising CPU behavior.
+    if ! iverilog -g2012 -DSIMULATION -Wno-timescale -o "$bdir/$tb.vvp" -s "$tb" $CPU "$src" > "$bdir.log" 2>&1; then
       echo "BUILDFAIL $tb (icarus)  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
     fi
     out="$(cd "$bdir" && timeout 300 vvp "$tb.vvp" 2>&1)"

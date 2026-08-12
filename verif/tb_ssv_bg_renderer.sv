@@ -155,6 +155,15 @@ end
 integer i;
 initial begin
     cfg = ssv_pkg::cfg_dynagear();
+    // Exercise this renderer's actual consumer. Nibble d is asymmetric under
+    // reversal: ordinary SSV expands it to b; Cair Blade preserves d.
+    cfg.tile_code_identity = 1'b0;
+    if (dut.expand_code(cfg, 16'h1234, 16'h3400) !== 20'hb1234)
+        $fatal(1, "background scrambled tile-code expansion mismatch");
+    cfg.tile_code_identity = 1'b1;
+    if (dut.expand_code(cfg, 16'h1234, 16'h3400) !== 20'hd1234)
+        $fatal(1, "background Cair Blade identity tile-code expansion mismatch");
+    cfg = ssv_pkg::cfg_dynagear();
     for (i = 0; i < 131072; i = i + 1)
         sprite_mem[i] = 16'd0;
     // Each column's descriptor is 64 words apart for a 512-pixel map.

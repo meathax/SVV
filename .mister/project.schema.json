@@ -1,0 +1,664 @@
+{
+  "$defs": {
+    "cache": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "inputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "inputs",
+        "outputs"
+      ],
+      "type": "object"
+    },
+    "quartusGates": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_unconstrained_paths": {
+          "type": "boolean"
+        },
+        "max_critical_warnings": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_errors": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_hold_slack_ns": {
+          "type": "number"
+        },
+        "min_setup_slack_ns": {
+          "type": "number"
+        },
+        "require_fresh_reports": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "require_fresh_reports",
+        "max_errors",
+        "max_critical_warnings",
+        "min_setup_slack_ns",
+        "min_hold_slack_ns",
+        "allow_unconstrained_paths"
+      ],
+      "type": "object"
+    },
+    "scenario": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_count": {
+          "maximum": 16,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "input_file": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "mame_cache": {
+          "type": "boolean"
+        },
+        "release": {
+          "type": "boolean"
+        },
+        "seed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stop": {
+          "$ref": "#/$defs/stop"
+        }
+      },
+      "required": [
+        "enabled",
+        "description",
+        "input_file",
+        "domains",
+        "seed",
+        "capture_count",
+        "stop",
+        "mame_cache",
+        "release"
+      ],
+      "type": "object"
+    },
+    "stop": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "canonical_event_count",
+            "frame_count",
+            "checkpoint",
+            "adapter_defined"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "type": "object"
+    },
+    "task": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cache": {
+          "$ref": "#/$defs/cache"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "heavy": {
+          "type": "boolean"
+        },
+        "timeout_s": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "argv",
+        "cwd",
+        "timeout_s",
+        "heavy"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://local.mister-fpga.invalid/schema/project-v4.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capture": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_schema": {
+          "const": "mister-canonical-trace-v4"
+        },
+        "context_events": {
+          "maximum": 256,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diagnostic_resync_window": {
+          "maximum": 4096,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_raw_trace_bytes": {
+          "minimum": 1024,
+          "type": "integer"
+        },
+        "raw_schema": {
+          "const": "mister-raw-trace-v4"
+        },
+        "retain_failed_runs": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "retain_successful_runs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "write_sha256_sidecars": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "raw_schema",
+        "canonical_schema",
+        "context_events",
+        "diagnostic_resync_window",
+        "max_raw_trace_bytes",
+        "retain_successful_runs",
+        "retain_failed_runs",
+        "write_sha256_sidecars"
+      ],
+      "type": "object"
+    },
+    "donors": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "hardware": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_task": {
+          "type": "string"
+        },
+        "hardware_required_for_release": {
+          "type": "boolean"
+        },
+        "mister_host": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mister_host",
+        "deployment_task",
+        "hardware_required_for_release"
+      ],
+      "type": "object"
+    },
+    "mame": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_task": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "driver_source": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reference_mutation_forbidden": {
+          "type": "boolean"
+        },
+        "rom_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "shortname": {
+          "type": "string"
+        },
+        "source_inputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "supported_setnames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "version_expected": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "shortname",
+        "driver_source",
+        "machine",
+        "rom_files",
+        "capture_task",
+        "source_inputs",
+        "supported_setnames",
+        "version_expected",
+        "reference_mutation_forbidden"
+      ],
+      "type": "object"
+    },
+    "mister": {
+      "additionalProperties": false,
+      "properties": {
+        "mra_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "rbf_name": {
+          "type": "string"
+        },
+        "require_mra_for_release": {
+          "type": "boolean"
+        },
+        "require_rom_mapping": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mra_files",
+        "rbf_name",
+        "require_mra_for_release",
+        "require_rom_mapping"
+      ],
+      "type": "object"
+    },
+    "paths": {
+      "additionalProperties": false,
+      "properties": {
+        "mame_exe": {
+          "type": "string"
+        },
+        "mame_mcp_root": {
+          "type": "string"
+        },
+        "mame_roms": {
+          "type": "string"
+        },
+        "mame_source": {
+          "type": "string"
+        },
+        "modelsim_root": {
+          "type": "string"
+        },
+        "quartus_root": {
+          "type": "string"
+        },
+        "verilator": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mame_exe",
+        "mame_source",
+        "mame_roms",
+        "mame_mcp_root",
+        "verilator",
+        "quartus_root",
+        "modelsim_root"
+      ],
+      "type": "object"
+    },
+    "project": {
+      "additionalProperties": false,
+      "properties": {
+        "board": {
+          "type": "string"
+        },
+        "game": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "game",
+        "board",
+        "status"
+      ],
+      "type": "object"
+    },
+    "quartus": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_task": {
+          "type": "string"
+        },
+        "full_task": {
+          "type": "string"
+        },
+        "gates": {
+          "$ref": "#/$defs/quartusGates"
+        },
+        "output_rbf": {
+          "type": "string"
+        },
+        "qpf": {
+          "type": "string"
+        },
+        "report_dir": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "sdc_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "top": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "qpf",
+        "revision",
+        "top",
+        "sdc_files",
+        "analysis_task",
+        "full_task",
+        "output_rbf",
+        "report_dir",
+        "gates"
+      ],
+      "type": "object"
+    },
+    "release": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_hardware_pending": {
+          "type": "boolean"
+        },
+        "require_clean_observability": {
+          "type": "boolean"
+        },
+        "require_fresh_rbf": {
+          "type": "boolean"
+        },
+        "require_provenance": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "require_provenance",
+        "require_fresh_rbf",
+        "require_clean_observability",
+        "allow_hardware_pending"
+      ],
+      "type": "object"
+    },
+    "resources": {
+      "additionalProperties": false,
+      "properties": {
+        "global_lock_timeout_s": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "job_cap": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "job_count": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "minimum": 1,
+              "type": "integer"
+            }
+          ]
+        },
+        "max_heavy_jobs": {
+          "maximum": 8,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "reserve_logical_cpus": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_heavy_jobs",
+        "job_count",
+        "reserve_logical_cpus",
+        "job_cap",
+        "global_lock_timeout_s"
+      ],
+      "type": "object"
+    },
+    "rtl": {
+      "additionalProperties": false,
+      "properties": {
+        "build_task": {
+          "type": "string"
+        },
+        "capture_task": {
+          "type": "string"
+        },
+        "lint_task": {
+          "type": "string"
+        },
+        "regression_task": {
+          "type": "string"
+        },
+        "simulation_top": {
+          "type": "string"
+        },
+        "source_globs": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "top": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "top",
+        "simulation_top",
+        "source_globs",
+        "lint_task",
+        "build_task",
+        "capture_task",
+        "regression_task"
+      ],
+      "type": "object"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "managed_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "minimum_version": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "managed_version",
+        "minimum_version"
+      ],
+      "type": "object"
+    },
+    "scenarios": {
+      "additionalProperties": {
+        "$ref": "#/$defs/scenario"
+      },
+      "minProperties": 1,
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 4
+    },
+    "tasks": {
+      "additionalProperties": {
+        "$ref": "#/$defs/task"
+      },
+      "minProperties": 1,
+      "type": "object"
+    },
+    "workflow": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_fix": {
+          "type": "boolean"
+        },
+        "checkpoint_bisection": {
+          "type": "boolean"
+        },
+        "default_scenario": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "max_iterations_per_session": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "release_scenarios": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "require_clean_observability": {
+          "type": "boolean"
+        },
+        "stop_on_evidence_gap": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "default_scenario",
+        "auto_fix",
+        "max_iterations_per_session",
+        "checkpoint_bisection",
+        "require_clean_observability",
+        "release_scenarios",
+        "stop_on_evidence_gap"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "runtime",
+    "project",
+    "paths",
+    "mame",
+    "rtl",
+    "quartus",
+    "capture",
+    "resources",
+    "tasks",
+    "scenarios",
+    "workflow",
+    "donors",
+    "hardware",
+    "mister",
+    "release"
+  ],
+  "title": "MiSTer FPGA Ultimate Autopilot project configuration v4",
+  "type": "object"
+}

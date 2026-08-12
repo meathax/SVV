@@ -16,6 +16,7 @@ VFLAGS="--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -Wno-CASEINCOMPLETE -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED
         -Wno-WIDTH -Wno-TIMESCALEMOD -Wno-MULTIDRIVEN -Wno-BLKANDNBLK
         --x-assign unique --x-initial unique
+        -CFLAGS -D_GLIBCXX_USE_CXX11_ABI=0
         +define+SIMULATION -Iverif/upd96050"
 
 SIMARGS="+verilator+seed+1 +verilator+rand+reset+2"
@@ -44,8 +45,10 @@ for tb in $ORDER; do
         -o "$tb" $RTL "$src" > "$bdir.log" 2>&1; then
     echo "BUILDFAIL $tb  (see $bdir.log)"; fail=$((fail+1)); failed="$failed $tb"; continue
   fi
+  bin="$bdir/$tb"
+  [ -f "$bin.exe" ] && bin="$bin.exe"
   verilator-safe status
-  out="$(verilator-sim-safe -- "$bdir/$tb" $SIMARGS 2>&1)"
+  out="$(verilator-sim-safe -- "$bin" $SIMARGS 2>&1)"
   if echo "$out" | grep -qF "${TB[$tb]}"; then
     echo "PASS  $tb   $(echo "$out" | grep -E '[0-9]+ passed' | head -1)"
     pass=$((pass+1))
@@ -57,9 +60,11 @@ for tb in $ORDER; do
 done
 
 # Re-run the ISA suite with a stalled fetch port, reusing the built binary.
-if [ -x "$OUTDIR/tb_upd96050_isa/tb_upd96050_isa" ]; then
+isa_bin="$OUTDIR/tb_upd96050_isa/tb_upd96050_isa"
+[ -f "$isa_bin.exe" ] && isa_bin="$isa_bin.exe"
+if [ -f "$isa_bin" ]; then
   verilator-safe status
-  out="$(verilator-sim-safe -- "$OUTDIR/tb_upd96050_isa/tb_upd96050_isa" $SIMARGS \
+  out="$(verilator-sim-safe -- "$isa_bin" $SIMARGS \
          +PRGLAT=$EXTRA_ISA_LAT 2>&1)"
   if echo "$out" | grep -qF "UPD96050 ISA PASS"; then
     echo "PASS  tb_upd96050_isa(PRGLAT=$EXTRA_ISA_LAT)   $(echo "$out" | grep -E '[0-9]+ passed' | head -1)"

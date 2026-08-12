@@ -274,6 +274,7 @@ logic signed [15:0] audio_l, audio_r;
 logic [31:0] debug_pc;
 logic [23:0] debug_status;
 integer visual_width, visual_height, visual_expected_pixels;
+longint unsigned visual_loop_trace_start;
 
 `ifdef SSV_VISUAL
 bit [31:0] visual_pixels [0:84479];
@@ -298,7 +299,6 @@ integer visual_cache_store_logs;
 integer visual_boot_trace_count;
 logic [31:0] visual_boot_trace_pc;
 integer visual_loop_trace_count;
-longint unsigned visual_loop_trace_start;
 longint unsigned visual_sample_fetches, visual_nonzero_sample_fetches;
 integer visual_sample_fetch_logs;
 logic [15:0] visual_sample_word;
@@ -623,7 +623,8 @@ integer occ_max, occ_max_frame, occ_at_cap, occ_lines_sampled;
 integer occ_i, occ_v;
 logic   obj_cache_busy_d;
 
-// occ_hist above reads line_counts, which SATURATES at LINE_SLOTS, so it can
+// occ_hist reads the compact line_meta count field, which saturates at
+// LINE_SLOTS, so it can
 // only report "this line hit the cap" and never how far past it the scene
 // went. That is enough to justify raising LINE_SLOTS but not to choose a new
 // value. dut.sprite_renderer.sim_line_demand is the uncapped shadow count of
@@ -671,7 +672,8 @@ always_ff @(posedge clk_sys) begin
         // C3 -- the build has just completed; the bucket table is final.
         if (obj_cache_busy_d && !dut.obj_cache_busy) begin
             for (occ_i = 0; occ_i < 240; occ_i = occ_i + 1) begin
-                occ_v = int'(dut.sprite_renderer.line_counts[occ_i]);
+                occ_v = int'(dut.sprite_renderer.line_meta[occ_i][
+                    dut.sprite_renderer.LINE_COUNT_WIDTH-1:0]);
                 if (occ_v >= 0 && occ_v < OCC_BINS)
                     occ_hist[occ_v] = occ_hist[occ_v] + 1;
                 occ_lines_sampled = occ_lines_sampled + 1;
@@ -2204,20 +2206,18 @@ always_ff @(posedge clk_sys) begin
                         dut.sprite_renderer.line_page_q,
                         overflow_i),
                     dut.sprite_renderer.line_entries[
-                        dut.sprite_renderer.line_bases[
-                            dut.sprite_renderer.bucket_y] + overflow_i]
+                        dut.sprite_renderer.line_meta[
+                            dut.sprite_renderer.bucket_y][
+                                dut.sprite_renderer.LINE_META_WIDTH-1:
+                                dut.sprite_renderer.LINE_COUNT_WIDTH] +
+                        overflow_i]
                 };
                 overflow_desc =
                     dut.sprite_renderer.descriptor_cache[overflow_entry];
-                if ((overflow_desc[63:48] <= 16'd7) &&
-                    (overflow_desc[47:32] == 16'd0) &&
-                    ((dut.scroll[59][14] ? overflow_desc[27:26] :
-                                           overflow_desc[107:106]) == 2'd0) &&
-                    ((dut.scroll[59][14] ? overflow_desc[11:10] :
-                                           overflow_desc[109:108]) == 2'd3)) begin
+                if (overflow_desc[87]) begin
                     overflow_tile_desc = overflow_tile_desc + 1;
-                    overflow_tile_groups[overflow_desc[50:48]] =
-                        overflow_tile_groups[overflow_desc[50:48]] + 1;
+                    overflow_tile_groups[overflow_desc[2:0]] =
+                        overflow_tile_groups[overflow_desc[2:0]] + 1;
                 end
                 else begin
                     overflow_sprite_desc = overflow_sprite_desc + 1;

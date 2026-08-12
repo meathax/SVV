@@ -114,7 +114,6 @@ wire        psw_is = psw_rest[28];
 reg halted;
 `ifdef SIMULATION
 assign dbg_halted = halted;
-assign dbg_retire = ce && (st == S_DECODE) && !halted;
 `endif
 
 // ---------------------------------------------------------------------------
@@ -360,6 +359,9 @@ typedef enum logic [6:0] {
 } st_t;
 
 st_t st, st_after_ea, st_after_fill;
+`ifdef SIMULATION
+assign dbg_retire = ce && (st == S_DECODE) && !halted;
+`endif
 
 // A control-flow decode may replace the active fetch window with the retained
 // loop window below. A fast-fetch response can be visible in this same clock;
@@ -1345,12 +1347,14 @@ else if (ce) begin
                 d1t = disp_of(ea_ofs+1, modtop[1:0]);
                 ea_addr <= rf_rdata_a + d1t;
                 ea_len  <= 5'd1 + disp_len(modtop[1:0]);
-                st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd3: begin             // Register Indirect
                 ea_addr <= rf_rdata_a;
                 ea_len  <= 5'd1;
-                st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd4, 3'd5, 3'd6: begin // Displacement Indirect (deferred)
                 d1t = disp_of(ea_ofs+1, modtop - 3'd4);
@@ -1372,13 +1376,15 @@ else if (ce) begin
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
                     ea_addr <= pc + d1t;
                     ea_len  <= 5'd1 + disp_len(modreg[1:0]);
-                    st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 5'h13: begin        // direct address
                     d1t = fb32(ea_ofs+1);
                     ea_addr <= d1t;
                     ea_len  <= 5'd5;
-                    st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 5'h14: begin        // immediate full
                     d1t = fb32(ea_ofs+1);
@@ -1446,13 +1452,15 @@ else if (ce) begin
                 ea_addr <= rf_rdata_a;
                 queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd5: begin             // Autodecrement
                 ea_addr <= rf_rdata_a - dim_step(ea_dim);
                 queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd6: begin             // Group 6: indexed, second mode byte
                 case (modval2[7:5])
@@ -1460,12 +1468,14 @@ else if (ce) begin
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
                     ea_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
-                    st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 3'd3: begin            // Register indirect indexed
                     ea_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2;
-                    st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 3'd4, 3'd5, 3'd6: begin // Displacement indirect indexed
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
@@ -1484,13 +1494,15 @@ else if (ce) begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
                         ea_addr <= pc + d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
-                        st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                        if (ea_want_addr) st <= S_EA_DONE;
+                        else              st <= S_EA_VAL;
                     end
                     4'h3: begin
                         d1t = fb32(ea_ofs+2);
                         ea_addr <= d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd6;
-                        st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+                        if (ea_want_addr) st <= S_EA_DONE;
+                        else              st <= S_EA_VAL;
                     end
                     4'h8, 4'h9, 4'ha: begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
@@ -1526,13 +1538,15 @@ else if (ce) begin
     S_EA_IND: if (dack) begin
         dbus_req <= 0;
         ea_addr <= bus_rdata;
-        st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+        if (ea_want_addr) st <= S_EA_DONE;
+        else              st <= S_EA_VAL;
     end
     // deferred pointer fetched -> address = pointer + saved offset (double disp / indexed deferred)
     S_EA_IND2: if (dack) begin
         dbus_req <= 0;
         ea_addr <= bus_rdata + ea_addr;
-        st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
+        if (ea_want_addr) st <= S_EA_DONE;
+        else              st <= S_EA_VAL;
     end
     // load value at ea_addr
     S_EA_VAL: begin
@@ -3051,8 +3065,9 @@ else if (ce) begin
         write_psw(newpsw);
         // BRKV has a leading fault-PC word; ordinary trap-class frames begin
         // with code+size, while IRQ/NMI frames begin with old PSW.
-        st <= exc_has_extra ? S_EXC_EXTRA
-                            : exc_has_code ? S_EXC_CODE : S_EXC_PUSH2;
+        if (exc_has_extra) st <= S_EXC_EXTRA;
+        else if (exc_has_code) st <= S_EXC_CODE;
+        else st <= S_EXC_PUSH2;
     end
     S_EXC_EXTRA: begin
         if (!dbus_req) begin

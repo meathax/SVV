@@ -116,7 +116,18 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
     cfg_decode.gfx_code_mul3      = cfg_raw[5][0];
         // Derived here, ONCE, rather than in the wrap. As a variable shift in
         // the wrap it cost -12.7 ns on the path to the SDRAM address.
-    cfg_decode.gfx_code_mask      = (20'd1 << cfg_raw[4][4:0]) - 20'd1;
+    // Validation permits only these six geometry-bound exponents.  Spell out
+    // their exact masks so the descriptor commit does not build a 20-bit
+    // variable barrel shifter; invalid/unqualified payloads decode safely.
+    unique case (cfg_raw[4][4:0])
+        5'd14: cfg_decode.gfx_code_mask = 20'h03fff;
+        5'd15: cfg_decode.gfx_code_mask = 20'h07fff;
+        5'd16: cfg_decode.gfx_code_mask = 20'h0ffff;
+        5'd17: cfg_decode.gfx_code_mask = 20'h1ffff;
+        5'd18: cfg_decode.gfx_code_mask = 20'h3ffff;
+        5'd19: cfg_decode.gfx_code_mask = 20'h7ffff;
+        default: cfg_decode.gfx_code_mask = 20'h00000;
+    endcase
     cfg_decode.gfx_quarters       = cfg_raw[6][2:0];
     cfg_decode.bank_map           = cfg_raw[7];
     cfg_decode.bank_valid         = cfg_raw[8][3:0];
@@ -438,8 +449,13 @@ always_ff @(posedge clk) begin
             cfg_commit_pending <= 1'b0;
             cfg_received <= '0;
             cfg_valid <= cfg_accept;
+            // Decode the settled transaction independently of validation.
+            // cfg_valid is the ownership qualifier: malformed descriptors
+            // remain unusable and cannot load index 0.  Keeping cfg_accept
+            // out of cfg's register-enable cone avoids putting the checksum
+            // and domain-validation chain in front of every payload bit.
+            cfg <= cfg_decode();
             if (cfg_accept) begin
-                cfg <= cfg_decode();
                 cfg_commit <= 1'b1;
             end
         end

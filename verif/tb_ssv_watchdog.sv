@@ -428,9 +428,9 @@ initial begin : watchdog_test
     write_lockout(8'h0c);              // video off, both slots locked
     bus_write_word(24'h230030, 16'h0006); // IRQ level-3 vector
     bus_write_word(24'h260000, 16'h0008); // enable level 3
-    force dut.vblank_pulse = 1'b1;
+    force dut.irq3_pulse = 1'b1;
     @(posedge clk_sys); #1;
-    release dut.vblank_pulse;
+    release dut.irq3_pulse;
     if (dut.video_enable !== 1'b0 || dut.scroll[49] !== 16'd1 ||
         dut.irq_enabled !== 8'h08 || dut.irqs.vectors[3] !== 3'd6 ||
         dut.irq_requested !== 8'h08 || coin_lockout !== 2'b11)

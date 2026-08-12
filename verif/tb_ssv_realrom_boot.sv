@@ -37,6 +37,10 @@ string samples_path;
 integer samples_fd, samples_count;
 logic require_audio;
 integer audio_peak;
+integer audio_host_writes, audio_commits, audio_sample_reqs;
+integer audio_sample_acks, audio_ticks, audio_underruns;
+integer audio_nonzero_words, audio_active_cycles, audio_nonzero_filter_cycles;
+logic [SDR_AW:0] audio_min_byte_addr, audio_max_byte_addr;
 string trace_path;
 string irq_schedule_path;
 string write_trace_path;
@@ -162,7 +166,7 @@ always_ff @(posedge clk_sys) begin
             // ES5506 samples live at SDR_SAMPLES_BASE in the download image.
             p0_byte_addr = {sdr_p4_addr, 1'b0};
             if (p0_byte_addr >= SDR_SAMPLES_BASE &&
-                p0_byte_addr < 25'h1560000)
+                p0_byte_addr < SDR_SAMPLES_BASE + 27'h0400000)
                 sdr_p4_dout <= {
                     sample_bytes[p0_byte_addr - SDR_SAMPLES_BASE + 1],
                     sample_bytes[p0_byte_addr - SDR_SAMPLES_BASE]
@@ -305,6 +309,17 @@ initial begin
     require_audio = $test$plusargs("REQUIRE_AUDIO");
     ve_seen = 1'b0;
     audio_peak = 0;
+    audio_host_writes = 0;
+    audio_commits = 0;
+    audio_sample_reqs = 0;
+    audio_sample_acks = 0;
+    audio_ticks = 0;
+    audio_underruns = 0;
+    audio_nonzero_words = 0;
+    audio_active_cycles = 0;
+    audio_nonzero_filter_cycles = 0;
+    audio_min_byte_addr = {SDR_AW+1{1'b1}};
+    audio_max_byte_addr = '0;
     if (!$value$plusargs("TRACE_CYCLES=%d", trace_cycles))
         trace_cycles = 0;
 
@@ -319,6 +334,24 @@ initial begin
             @(posedge clk_sys);
             if (debug_status[22])
                 ve_seen = 1'b1;
+            if (dut.sound_host_we) audio_host_writes = audio_host_writes + 1;
+            if (dut.sound_commit) audio_commits = audio_commits + 1;
+            if (sdr_p4_req && !p4_seen) audio_sample_reqs = audio_sample_reqs + 1;
+            if (sdr_p4_req && !p4_seen) begin
+                if ({sdr_p4_addr, 1'b0} < audio_min_byte_addr)
+                    audio_min_byte_addr = {sdr_p4_addr, 1'b0};
+                if ({sdr_p4_addr, 1'b0} > audio_max_byte_addr)
+                    audio_max_byte_addr = {sdr_p4_addr, 1'b0};
+            end
+            if (sdr_p4_ack) audio_sample_acks = audio_sample_acks + 1;
+            if (sdr_p4_ack && sdr_p4_dout != 16'd0)
+                audio_nonzero_words = audio_nonzero_words + 1;
+            if (dut.sound_sample_tick) audio_ticks = audio_ticks + 1;
+            if (dut.sound_underrun) audio_underruns = audio_underruns + 1;
+            if (dut.sound_voices.proc_active)
+                audio_active_cycles = audio_active_cycles + 1;
+            if (dut.sound_voices.proc_p4 != 18'd0)
+                audio_nonzero_filter_cycles = audio_nonzero_filter_cycles + 1;
             if (audio_l < 0) begin
                 if (-audio_l > audio_peak) audio_peak = -audio_l;
             end else if (audio_l > audio_peak)
@@ -333,6 +366,14 @@ initial begin
         if (require_ve && !ve_seen)
             $fatal(1, "REQUIRE_VE: video_enable never rose pc=%08x cycles=%0d",
                    debug_pc, trace_cycles);
+        $display("AUDIO_DIAG host_writes=%0d commits=%0d active=%0d sample_reqs=%0d sample_acks=%0d nonzero_words=%0d min_addr=%07x max_addr=%07x ticks=%0d underruns=%0d proc_active_cycles=%0d nonzero_filter_cycles=%0d cr=%04x lvol=%04x rvol=%04x k1=%04x k2=%04x",
+                 audio_host_writes, audio_commits, dut.sound_active_voices,
+                 audio_sample_reqs, audio_sample_acks, audio_nonzero_words,
+                 audio_min_byte_addr, audio_max_byte_addr,
+                 audio_ticks, audio_underruns, audio_active_cycles,
+                 audio_nonzero_filter_cycles, dut.sound_voices.cr,
+                 dut.sound_voices.lvol, dut.sound_voices.rvol,
+                 dut.sound_voices.k1, dut.sound_voices.k2);
         if (require_audio && audio_peak < 32)
             $fatal(1, "REQUIRE_AUDIO: peak=%0d pc=%08x ve=%b",
                    audio_peak, debug_pc, ve_seen);

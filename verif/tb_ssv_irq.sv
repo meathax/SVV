@@ -87,6 +87,39 @@ initial begin
     if (requested !== 8'h00 || irq_n !== 1'b1)
         $fatal(1, "event-refreshed IRQ acknowledge mismatch");
 
+    // Ultra X and Twin Eagle II select the scanline-0 level-1 source in their
+    // runtime descriptor.  The same raster pulse must be inert for every
+    // ordinary SSV descriptor, then use the programmed level-1 vector and
+    // acknowledge path when the descriptor enables it.
+    enable_we = 1; enable_be = 2'b01; enable_data = 16'h0002; tick();
+    enable_we = 0;
+    line0_pulse = 1; tick(); line0_pulse = 0; tick();
+    if (requested !== 8'h00 || irq_n !== 1'b1)
+        $fatal(1, "disabled line-0 source requested IRQ1");
+    irq_level1_line0 = 1;
+    vector_we = 1; vector_level = 1; vector_data = 16'h0005; tick();
+    vector_we = 0; line0_pulse = 1; tick(); line0_pulse = 0; tick();
+    if (requested !== 8'h02 || irq_n !== 1'b0 || irq_vector !== 8'h05)
+        $fatal(1, "enabled line-0 IRQ1 mismatch");
+    ack_we = 1; ack_level = 1; tick(); ack_we = 0; tick();
+    if (requested !== 8'h00 || irq_n !== 1'b1)
+        $fatal(1, "line-0 IRQ1 acknowledge mismatch");
+
+    // Both causes latch at scanline zero. The lower numbered cause supplies
+    // the vector; acknowledging it exposes the still-pending IRQ3.
+    enable_we = 1; enable_data = 16'h000a; tick(); enable_we = 0;
+    line0_pulse = 1; vblank_pulse = 1; tick();
+    line0_pulse = 0; vblank_pulse = 0; tick();
+    if (requested !== 8'h0a || irq_n !== 1'b0 || irq_vector !== 8'h05)
+        $fatal(1, "simultaneous IRQ1/IRQ3 priority mismatch");
+    ack_we = 1; ack_level = 1; tick(); ack_we = 0; tick();
+    if (requested !== 8'h08 || irq_n !== 1'b0 || irq_vector !== 8'h06)
+        $fatal(1, "IRQ1 ack did not leave pending IRQ3 asserted");
+    ack_we = 1; ack_level = 3; tick(); ack_we = 0; tick();
+    if (requested !== 8'h00 || irq_n !== 1'b1)
+        $fatal(1, "simultaneous IRQ1/IRQ3 final clear mismatch");
+    irq_level1_line0 = 0;
+
     // Descriptor-v3 raster class requests level 2 only when enabled.
     enable_we = 1; enable_be = 2'b01; enable_data = 16'h0004; tick();
     enable_we = 0;

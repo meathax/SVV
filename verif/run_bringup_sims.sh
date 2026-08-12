@@ -134,8 +134,11 @@ run_one tb_ssv_host_guard \
 run_one tb_ssv_video_mode_guard \
   rtl/ssv_video_mode_guard.sv verif/tb_ssv_video_mode_guard.sv
 
+run_one tb_ssv_screen_rotate_ddram \
+  sys/arcade_video.v verif/tb_ssv_screen_rotate_ddram.sv
+
 run_one tb_ssv_input_matrix \
-  verif/tb_ssv_input_matrix.sv
+  rtl/io/ssv_input_ports.sv verif/tb_ssv_input_matrix.sv
 
 run_one tb_ssv_nvram_bridge \
   rtl/mem/ssv_nvram_bridge.sv verif/tb_ssv_nvram_bridge.sv
@@ -182,6 +185,10 @@ run_one tb_ssv_sdram_module_contract \
   rtl/mem/sdram.sv verif/ssv_sdram_module.sv \
   verif/tb_ssv_sdram_module_contract.sv
 
+run_one tb_ssv_sdram_fairness \
+  rtl/mem/sdram.sv verif/ssv_sdram_chip.sv \
+  verif/tb_ssv_sdram_fairness.sv
+
 run_one tb_ssv_loader_image \
   rtl/ssv_pkg.sv rtl/mem/ssv_rom_loader.sv rtl/mem/sdram.sv \
   verif/ssv_sdram_module.sv verif/ssv_sdram_harness.sv \
@@ -199,6 +206,9 @@ run_one tb_ssv_loader_core_boot \
 
 run_one tb_ssv_rom_write_ack \
   "${SSV_CORE_FILES[@]}" verif/tb_ssv_rom_write_ack.sv
+
+run_one tb_ssv_core_memory_windows \
+  "${SSV_CORE_FILES[@]}" verif/tb_ssv_core_memory_windows.sv
 
 run_one tb_ssv_watchdog \
   "${SSV_CORE_FILES[@]}" verif/tb_ssv_watchdog.sv
