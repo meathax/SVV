@@ -1,5 +1,20 @@
 # Pre-RBF optimization notes
 
+## Descriptor checksum reduction (12 Aug 2026, no Quartus/RBF)
+
+The retained timing report showed the descriptor validator's modulo-256
+checksum as a serial 23-byte adder chain, with about 23.4 ns of data delay on
+the `clk_sys` loader path. The checksum is associative modulo 256, so the
+validator now reduces the same v2/v3-selected bytes through a balanced adder
+tree. This changes only combinational structure; byte selection and the
+accepted checksum value are unchanged.
+
+The targeted `tb_ssv_rom_loader` run passes with a byte-for-byte identical
+normalized log to the pre-change baseline, Slang reports zero errors/warnings,
+and `tb_ssv_loader_image` transfers 4,098 words with zero errors. A fresh
+Quartus map/fit is still required to measure placement, timing, and resource
+effect; no Quartus stage or RBF build was run.
+
 ## ES5506 snapshot load-enable inference (12 Aug 2026, no Quartus/RBF)
 
 The last uncontaminated map report identified a 361-bit registered 3:1 mux

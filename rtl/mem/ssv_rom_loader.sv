@@ -83,6 +83,11 @@ localparam int CFG_BYTES = 24;
 logic [7:0] cfg_raw [0:CFG_BYTES-1];
 logic [7:0] cfg_sum;
 logic       cfg_accept;
+logic [7:0] cfg_sum_byte [0:CFG_BYTES-2];
+logic [7:0] cfg_sum_pair [0:11];
+logic [7:0] cfg_sum_quad [0:5];
+logic [7:0] cfg_sum_octet [0:2];
+integer    cfg_sum_i;
 logic [CFG_BYTES-1:0] cfg_received;
 logic                 cfg_commit_pending;
 logic [CFG_BYTES-1:0] cfg_received_after_write;
@@ -278,11 +283,41 @@ endfunction
 // One shared validation cone, sampled only on cfg_commit_pending. Keeping it
 // outside the sequential block avoids both duplicated compares and a needless
 // validity register in the placement-critical loader neighborhood.
+// The checksum is modulo 256, so addition is associative. Reduce the 23
+// possible payload bytes as a balanced tree rather than a serial accumulator;
+// this preserves the exact v2/v3 byte-selection contract while shortening the
+// carry chain that otherwise dominated the loader's clk_sys placement path.
 always_comb begin
-    cfg_sum = 8'd0;
-    for (int cfg_i = 0; cfg_i < CFG_BYTES - 1; cfg_i++)
-        if ((cfg_raw[1] == 8'd3) || (cfg_i < CFG_V2_BYTES-1))
-            cfg_sum = cfg_sum + cfg_raw[cfg_i];
+    for (cfg_sum_i = 0; cfg_sum_i < CFG_BYTES - 1; cfg_sum_i++)
+        cfg_sum_byte[cfg_sum_i] =
+            ((cfg_raw[1] == 8'd3) || (cfg_sum_i < CFG_V2_BYTES-1))
+                ? cfg_raw[cfg_sum_i] : 8'd0;
+
+    cfg_sum_pair[0]  = cfg_sum_byte[0]  + cfg_sum_byte[1];
+    cfg_sum_pair[1]  = cfg_sum_byte[2]  + cfg_sum_byte[3];
+    cfg_sum_pair[2]  = cfg_sum_byte[4]  + cfg_sum_byte[5];
+    cfg_sum_pair[3]  = cfg_sum_byte[6]  + cfg_sum_byte[7];
+    cfg_sum_pair[4]  = cfg_sum_byte[8]  + cfg_sum_byte[9];
+    cfg_sum_pair[5]  = cfg_sum_byte[10] + cfg_sum_byte[11];
+    cfg_sum_pair[6]  = cfg_sum_byte[12] + cfg_sum_byte[13];
+    cfg_sum_pair[7]  = cfg_sum_byte[14] + cfg_sum_byte[15];
+    cfg_sum_pair[8]  = cfg_sum_byte[16] + cfg_sum_byte[17];
+    cfg_sum_pair[9]  = cfg_sum_byte[18] + cfg_sum_byte[19];
+    cfg_sum_pair[10] = cfg_sum_byte[20] + cfg_sum_byte[21];
+    cfg_sum_pair[11] = cfg_sum_byte[22];
+
+    cfg_sum_quad[0] = cfg_sum_pair[0] + cfg_sum_pair[1];
+    cfg_sum_quad[1] = cfg_sum_pair[2] + cfg_sum_pair[3];
+    cfg_sum_quad[2] = cfg_sum_pair[4] + cfg_sum_pair[5];
+    cfg_sum_quad[3] = cfg_sum_pair[6] + cfg_sum_pair[7];
+    cfg_sum_quad[4] = cfg_sum_pair[8] + cfg_sum_pair[9];
+    cfg_sum_quad[5] = cfg_sum_pair[10] + cfg_sum_pair[11];
+
+    cfg_sum_octet[0] = cfg_sum_quad[0] + cfg_sum_quad[1];
+    cfg_sum_octet[1] = cfg_sum_quad[2] + cfg_sum_quad[3];
+    cfg_sum_octet[2] = cfg_sum_quad[4] + cfg_sum_quad[5];
+
+    cfg_sum = (cfg_sum_octet[0] + cfg_sum_octet[1]) + cfg_sum_octet[2];
     cfg_accept = (cfg_raw[0] == 8'h53) &&
                  ((cfg_raw[1] == 8'd2) || (cfg_raw[1] == 8'd3)) &&
                  ((cfg_raw[1] == 8'd3) ?
