@@ -72,6 +72,11 @@ module ssv_core #(
     input       [15:0] in_p2,
     input       [15:0] in_system,
     input       [15:0] in_extra,
+    input       [23:0] in_mahjong_rows,
+    input       [11:0] in_coord_x,
+    input       [11:0] in_coord_y,
+    input        [7:0] in_paddle,
+    input              in_ball_switch,
 
     // High score save/load. MAME maps SSV main RAM at $000000-$00ffff
     // (ssv.cpp: map(0x000000, 0x00ffff).ram().share(m_mainram)), which is this
@@ -100,6 +105,7 @@ module ssv_core #(
     // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
     output logic [1:0] coin_lockout
+    ,output logic       motor_output
 `ifdef SIMULATION
     , output logic [31:0] debug_pc
     , output logic [23:0] debug_status
@@ -124,6 +130,7 @@ logic        c_req, c_we, c_ack;
 logic [31:0] c_addr, c_wdata, c_rdata;
 logic  [1:0] c_size;
 logic        m_req, m_we, m_ack;
+logic        ack_r, ack_r_d;
 logic [23:1] m_addr;
 logic [15:0] m_wdata, m_rdata;
 logic  [1:0] m_be;
@@ -172,7 +179,9 @@ s32_v60_bus bus_adapter (
 );
 
 wire [23:0] a = {m_addr, 1'b0};
-wire sel_wram    = (a <= 24'h00ffff);
+wire sel_mainram_mirror = cfg.mainram_mirror_010000 &&
+                          (a >= 24'h010000) && (a <= 24'h01ffff);
+wire sel_wram    = (a <= 24'h00ffff) || sel_mainram_mirror;
 wire sel_sprram  = (a >= 24'h100000) && (a <= 24'h13ffff);
 wire sel_palette = (a >= 24'h140000) && (a <= 24'h15ffff);
 wire sel_xram    = (a >= 24'h160000) && (a <= 24'h17ffff);
@@ -188,11 +197,22 @@ wire sel_cpuram  = (cfg.extra_ram_mode == 2'd1) &&
                    (a >= 24'h400000) && (a <= 24'h43ffff);
 wire sel_extra_wram = (cfg.extra_ram_mode == 2'd2) &&
                       (a >= 24'h010000) && (a <= 24'h03ffff);
+wire sel_srmp7_wram = (cfg.extra_ram_mode == 2'd3) &&
+                      (a >= 24'h010000) && (a <= 24'h050faf);
 wire [16:0] nvram_last_offset = (cfg.nvram_mode == 2'd1) ?
                                  17'h007ff : 17'h0ffff;
 wire sel_nvram   = cfg.has_nvram && (cfg.nvram_mode != 2'd0) &&
-                   (a >= 24'h580000) &&
-                   (a <= (24'h580000 + {7'd0, nvram_last_offset}));
+                   (((cfg.optional_io_mode == 2'd1) &&
+                     (a >= 24'hc00000) && (a <= 24'hc007ff)) ||
+                    ((cfg.optional_io_mode != 2'd1) &&
+                     (a >= 24'h580000) &&
+                     (a <= (24'h580000 + {7'd0, nvram_last_offset}))));
+wire sel_eagl_ram = (cfg.optional_io_mode == 2'd1) &&
+                    (a >= 24'h180000) && (a <= 24'h1bffff);
+wire sel_eagl_rom = (cfg.optional_io_mode == 2'd1) &&
+                    (a >= 24'ha00000) && (a <= 24'hbfffff);
+wire sel_gdfs_regs = (cfg.optional_io_mode == 2'd3) &&
+                     (a >= 24'h8c0000) && (a <= 24'h8c00ff);
 // $500008-$500009. The SAM-5127 cartridge carries 3P and 4P connectors with a
 // dedicated I/O-FILTER stage at U30/U31, and this is the only decoded input
 // window unaccounted for -- so this is the prime candidate for where the third
@@ -200,6 +220,61 @@ wire sel_nvram   = cfg.has_nvram && (cfg.nvram_mode != 2'd0) &&
 // `in_extra` is tied high by the wrapper, which is correct for any game that
 // does not read it. See docs/hardware/SSV_PCB_FINDINGS_ACTION_PLAN.md item 1.
 wire sel_extra   = extra_input_window_cfg(cfg, a);
+wire mahjong_selected;
+wire [15:0] mahjong_rdata;
+ssv_mahjong_matrix mahjong_matrix (
+    .clk(clk_sys), .rst(rst), .mode(cfg.mahjong_mode),
+    .req(m_req), .we(m_we), .addr(a), .wdata(m_wdata), .be(m_be),
+    .rows(in_mahjong_rows), .selected(mahjong_selected), .rdata(mahjong_rdata)
+);
+logic [2:0] eagl_gfx_bank;
+logic [7:0] upd4701_data;
+logic upd7001_serial;
+logic [7:0] gdfs_adc_data;
+logic gdfs_adc_eoc, gdfs_adc_busy, gdfs_eeprom_do;
+logic [14:8] gdfs_control;
+wire gdfs_control_we = cfg.optional_io_mode == 2'd3 && m_req && m_we &&
+                       a == 24'h500000 && m_be[1] && !ack_r;
+wire eagl_control_we = cfg.optional_io_mode == 2'd1 && m_req && m_we &&
+                       a == 24'h900000 && m_be[0] && !ack_r;
+wire sexy_control_we = cfg.optional_io_mode == 2'd2 && m_req && m_we &&
+                       a == 24'h520000 && m_be[0] && !ack_r;
+ssv_upd4701 optional_upd4701 (
+    .clk(clk_sys), .rst(rst), .coord_x(in_coord_x), .coord_y(in_coord_y),
+    .control_we(eagl_control_we), .control(m_wdata[7:0]), .data(upd4701_data)
+);
+ssv_upd7001 optional_upd7001 (
+    .clk(clk_sys), .rst(rst), .analog(in_paddle),
+    .cycles(cfg.adc_conversion_cycles), .control_we(sexy_control_we),
+    .cs_in(m_wdata[5]), .sck_in(m_wdata[6]), .eoc_so(upd7001_serial)
+);
+ssv_adc0809 optional_gdfs_adc (
+    .clk(clk_sys), .rst(rst), .conversion_cycles(cfg.adc_conversion_cycles),
+    .channel(gdfs_control[10:8]), .start(gdfs_control[11]),
+    .ch0(in_coord_x[7:0]), .ch1(in_coord_y[7:0]),
+    // The wrapper currently exposes one analog pair; unconnected gun 2 is
+    // active-high/open, matching the safe MiSTer input state.
+    .ch2(8'hff), .ch3(8'hff), .data(gdfs_adc_data),
+    .eoc_pulse(gdfs_adc_eoc), .busy(gdfs_adc_busy)
+);
+ssv_93c46_16 optional_gdfs_eeprom (
+    .clk(clk_sys), .rst(cold_rst),
+    .cs(gdfs_control[12]), .sk(gdfs_control[13]),
+    .di(gdfs_control[14]), .dout(gdfs_eeprom_do)
+);
+logic [15:0] st0020_reg_rdata;
+logic [1:0] st0020_gfx_bank;
+logic st0020_blit_start, st0020_blit_valid;
+logic [31:0] st0020_blit_src, st0020_blit_dst, st0020_blit_len;
+ssv_st0020_ctrl optional_st0020_ctrl (
+    .clk(clk_sys), .rst(rst),
+    .reg_we(sel_gdfs_regs && m_req && m_we && !ack_r),
+    .reg_addr(a[7:1]), .reg_wdata(m_wdata), .reg_be(m_be),
+    .reg_rdata(st0020_reg_rdata), .gfx_bank(st0020_gfx_bank),
+    .blit_start(st0020_blit_start), .blit_src(st0020_blit_src),
+    .blit_dst(st0020_blit_dst), .blit_len(st0020_blit_len),
+    .blit_valid(st0020_blit_valid)
+);
 // MAME maps the program ROM as `ssv_map(map, rom)` with rom..0xffffff, and in
 // every SSV set rom == 0x1000000 - program_size: $f00000 for a 1 MB program
 // (dynagear, survarts), $e00000 for 2 MB (cairblad, twineag2, ultrax),
@@ -210,7 +285,8 @@ wire sel_extra   = extra_input_window_cfg(cfg, a);
 // 0xF00000 / 0xE00000 / 0xC00000 for 1 / 2 / 4 MB -- MAME's values.
 wire [23:0] rom_window_base = -(24'(cfg.prog_mb) << 20);
 wire sel_rom     = (a >= rom_window_base);
-wire sel_extmem  = sel_xram | sel_cpuram | sel_extra_wram | sel_nvram;
+wire sel_extmem  = sel_xram | sel_cpuram | sel_extra_wram |
+                   sel_srmp7_wram | sel_nvram | sel_eagl_ram | sel_eagl_rom;
 
 // ---------------------------------------------------------------------------
 // ST010 daughterboard, $480000 and $482000-$482fff.
@@ -551,6 +627,9 @@ ssv_irq irqs (
     // Scanline 0 of the visible frame; gated per game by the config.
     .line0_pulse(ce_pixel && (hcnt == 9'd0) && (vcnt == 9'd0)),
     .irq_level1_line0(cfg.irq_level1_line0),
+    .line120_pulse(ce_pixel && (hcnt == 9'd0) && (vcnt == 9'd120)),
+    .irq_level2_line120(cfg.irq_level2_line120),
+    .adc_eoc_pulse((cfg.optional_io_mode == 2'd3) && gdfs_adc_eoc),
     .clk(clk_sys), .rst(rst), .cold_rst(cold_rst),
     .vblank_pulse(irq3_pulse),
     .vector_we(vector_we), .vector_level(irq_reg_level),
@@ -614,10 +693,22 @@ wire [23:0] core_pixel =
 assign rgb = core_pixel;
 
 function automatic [SDR_AW:0] external_byte_addr(input [23:0] cpu_addr);
-    if (cpu_addr >= 24'h580000)
+    if ((cfg.optional_io_mode == 2'd1) && cpu_addr >= 24'hc00000)
+        external_byte_addr = SDR_NVRAM_BASE + (cpu_addr - 24'hc00000);
+    else if ((cfg.optional_io_mode == 2'd1) && cpu_addr >= 24'ha00000)
+        external_byte_addr = SDR_GFX_BASE +
+            (27'(eagl_gfx_bank) << 21) + (cpu_addr - 24'ha00000);
+    else if ((cfg.optional_io_mode == 2'd1) &&
+             cpu_addr >= 24'h180000 && cpu_addr <= 24'h1bffff)
+        external_byte_addr = SDR_EAGL_RAM_BASE +
+            (27'(scroll[59][3:0]) << 18) + (cpu_addr - 24'h180000);
+    else if (cpu_addr >= 24'h580000)
         external_byte_addr = SDR_NVRAM_BASE + (cpu_addr - 24'h580000);
     else if ((cfg.extra_ram_mode == 2'd2) &&
              (cpu_addr >= 24'h010000) && (cpu_addr <= 24'h03ffff))
+        external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h010000);
+    else if ((cfg.extra_ram_mode == 2'd3) &&
+             (cpu_addr >= 24'h010000) && (cpu_addr <= 24'h050faf))
         external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h010000);
     else if ((cfg.extra_ram_mode == 2'd1) &&
              (cpu_addr >= 24'h400000) && (cpu_addr <= 24'h43ffff))
@@ -636,8 +727,6 @@ logic [SDR_AW:1] ext_p0_addr_r;
 
 // Forward-declared: icache lookup suppresses re-arming a completed ROM read
 // while the V60 bus still holds m_req (ack_r driven in the read-mux block).
-logic        ack_r;
-logic        ack_r_d;
 logic [15:0] read_mux;
 logic        read_wait;
 // MAME's drifto94_unknown_r() returns machine().rand(). A tiny deterministic
@@ -1024,8 +1113,15 @@ ssv_es5506_regs sound_registers (
     .eng_k1_w(eng_k1_w), .eng_k2_w(eng_k2_w), .eng_ecount_w(eng_ecount_w)
 );
 
+logic srmp7_bank;
+wire srmp7_bank_write;
+ssv_srmp7_bank srmp7_bank_latch (
+    .clk(clk_sys), .cold_rst(cold_rst), .write(srmp7_bank_write),
+    .data(m_wdata[0]), .bank(srmp7_bank)
+);
 ssv_es5506_voice sound_voices (
     .cfg(cfg),
+    .srmp7_bank(srmp7_bank),
     .clk(clk_sys), .rst(rst), .ce(ce_snd),
     .active_voices(sound_active_voices),
     .eng_voice(eng_voice),
@@ -1103,6 +1199,8 @@ end
 // low-to-high transitions rather than every write that leaves a bit asserted.
 wire lockout_write = m_req && m_we && (a == 24'h21000e) && m_be[0] &&
                      ack_r && !ack_r_d;
+assign srmp7_bank_write = cfg.srmp7_sample_half_bank && m_req && m_we &&
+                          (a == 24'h580000) && m_be[0] && ack_r && !ack_r_d;
 wire [15:0] in_system_gated = in_system |
     {14'd0, coin_lockout[1], coin_lockout[0]};
 
@@ -1112,9 +1210,28 @@ always_ff @(posedge clk_sys) begin
     if (cold_rst) begin
         coin_lockout <= 2'b00; // cabinet starts unlocked
     end
-    else if (lockout_write) begin
-        coin_lockout[0] <= cfg.lockout_inverted ?  m_wdata[1] : ~m_wdata[1];
-        coin_lockout[1] <= cfg.lockout_inverted ?  m_wdata[0] : ~m_wdata[0];
+    else begin
+        if (lockout_write) begin
+            coin_lockout[0] <= cfg.lockout_inverted ?  m_wdata[1] : ~m_wdata[1];
+            coin_lockout[1] <= cfg.lockout_inverted ?  m_wdata[0] : ~m_wdata[0];
+        end
+    end
+end
+
+always_ff @(posedge clk_sys) begin
+    if (cold_rst) begin
+        eagl_gfx_bank <= 3'd0;
+        motor_output <= 1'b0;
+        gdfs_control <= 7'd0;
+    end else begin
+        if (cfg.optional_io_mode == 2'd1 && m_req && m_we &&
+            a == 24'h800000 && m_be[0] && !ack_r)
+            eagl_gfx_bank <= (m_wdata[7:0] < 8'd6) ? m_wdata[2:0] : 3'd6;
+        if (cfg.optional_io_mode == 2'd2 && m_req && m_we &&
+            a == 24'h500004 && m_be[0] && !ack_r)
+            motor_output <= m_wdata[3];
+        if (gdfs_control_we)
+            gdfs_control <= m_wdata[14:8];
     end
 end
 
@@ -1176,6 +1293,34 @@ always_ff @(posedge clk_sys) begin
                 ack_r    <= 1'b1;
             end
         end
+        else if (mahjong_selected && !m_we) begin
+            ack_r <= 1'b1;
+            read_mux <= mahjong_rdata;
+        end
+        else if (!m_we && cfg.optional_io_mode == 2'd1 &&
+                 a == 24'hd00000) begin
+            ack_r <= 1'b1;
+            read_mux <= {8'h00, upd4701_data};
+        end
+        else if (!m_we && cfg.optional_io_mode == 2'd2 &&
+                 a == 24'h500002) begin
+            ack_r <= 1'b1;
+            read_mux <= {15'd0, in_ball_switch};
+        end
+        else if (!m_we && cfg.optional_io_mode == 2'd2 &&
+                 a == 24'h500004) begin
+            ack_r <= 1'b1;
+            read_mux <= upd7001_serial ? 16'h0080 : 16'h0000;
+        end
+        else if (!m_we && cfg.optional_io_mode == 2'd3 &&
+                 a == 24'h540000) begin
+            ack_r <= 1'b1;
+            read_mux <= {7'd0, gdfs_eeprom_do, gdfs_adc_data};
+        end
+        else if (!m_we && sel_gdfs_regs) begin
+            ack_r <= 1'b1;
+            read_mux <= st0020_reg_rdata;
+        end
         else if (m_we) begin
             ack_r <= 1'b1;
         end
@@ -1191,6 +1336,13 @@ always_ff @(posedge clk_sys) begin
                 ack_r        <= 1'b1;
                 read_mux     <= st010_rdata;
             end
+        end
+        else if (sel_sound && cfg.srmp7_irqv_mame && (a == 24'h300076)) begin
+            // MAME 0.289 compatibility assumption.  The reference driver
+            // synthesizes IRQV=0x80 because the physical ES5506 level-5 path
+            // is unresolved; this does not invent an IRQ source.
+            ack_r <= 1'b1;
+            read_mux <= 16'h0080;
         end
         else if (sel_sound) begin
             if (sound_rd_cnt < 2'd2)

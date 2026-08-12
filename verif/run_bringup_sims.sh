@@ -20,16 +20,21 @@ CORE_FILES=(
   rtl/mem/ssv_rom_loader.sv
   rtl/ssv_irq.sv
   rtl/ssv_video_timing.sv
+  rtl/io/ssv_mahjong_matrix.sv
+  rtl/io/ssv_upd4701.sv rtl/io/ssv_upd7001.sv
+  rtl/io/ssv_adc0809.sv rtl/io/ssv_93c46_16.sv
   rtl/common/s32_big_dpram.sv
   rtl/video/ssv_palette_ram.sv
   rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv
   rtl/video/ssv_gfx_row_decode.sv
+  rtl/video/ssv_st0020_ctrl.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_mlab240_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
  
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_srmp7_bank.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
@@ -45,16 +50,21 @@ SSV_CORE_FILES=(
   rtl/ssv_pkg.sv
   rtl/ssv_irq.sv
   rtl/ssv_video_timing.sv
+  rtl/io/ssv_mahjong_matrix.sv
+  rtl/io/ssv_upd4701.sv rtl/io/ssv_upd7001.sv
+  rtl/io/ssv_adc0809.sv rtl/io/ssv_93c46_16.sv
   rtl/common/s32_big_dpram.sv
   rtl/video/ssv_palette_ram.sv
   rtl/video/ssv_line_buffer4.sv
   rtl/video/ssv_gfx_row_fetch.sv
   rtl/video/ssv_gfx_row_decode.sv
+  rtl/video/ssv_st0020_ctrl.sv
   rtl/video/ssv_bg_renderer.sv
   rtl/video/ssv_mlab240_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
  
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
+  rtl/audio/ssv_srmp7_bank.sv
   rtl/audio/ssv_es5506_voice.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
@@ -92,6 +102,17 @@ run_one tb_ssv_rom_loader \
 
 run_one tb_ssv_cfg \
   rtl/ssv_pkg.sv verif/tb_ssv_cfg.sv
+run_one tb_ssv_family_cfg \
+  rtl/ssv_pkg.sv verif/tb_ssv_family_cfg.sv
+run_one tb_ssv_srmp7_bank \
+  rtl/audio/ssv_srmp7_bank.sv verif/tb_ssv_srmp7_bank.sv
+run_one tb_ssv_mahjong_matrix \
+  rtl/io/ssv_mahjong_matrix.sv verif/tb_ssv_mahjong_matrix.sv
+run_one tb_ssv_optional_io \
+  rtl/io/ssv_upd4701.sv rtl/io/ssv_upd7001.sv verif/tb_ssv_optional_io.sv
+run_one tb_ssv_gdfs_devices \
+  rtl/io/ssv_adc0809.sv rtl/io/ssv_93c46_16.sv \
+  rtl/video/ssv_st0020_ctrl.sv verif/tb_ssv_gdfs_devices.sv
 
 run_one tb_ssv_irq \
   rtl/ssv_irq.sv verif/tb_ssv_irq.sv

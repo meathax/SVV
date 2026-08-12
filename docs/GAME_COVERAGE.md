@@ -2,7 +2,7 @@
 
 The project has one Quartus revision (`Arcade-SSV`) and produces one runtime
 core, `Arcade-SSV.rbf`. There are no per-game RBF variants. Every qualified MRA loads
-a 16-byte index-1 descriptor before index-0 ROM data; that descriptor selects
+a 24-byte version-3 index-1 descriptor before index-0 ROM data; that descriptor selects
 the ROM geometry and optional board paths at runtime.
 
 `tools/ssv_supported_sets.py` is the authoritative release list. It currently

@@ -71,7 +71,7 @@ function automatic logic [127:0] encode_cfg(input ssv_cfg_t c);
     int i;
     begin
         b[0]=8'h53; b[1]=8'd2; b[2]={5'd0,c.prog_mb};
-        b[3]={2'd0,c.gfx_mb}; b[4]={3'd0,c.gfx_code_k};
+        b[3]={1'd0,c.gfx_mb}; b[4]={3'd0,c.gfx_code_k};
         b[5]={7'd0,c.gfx_code_mul3}; b[6]={5'd0,c.gfx_quarters};
         b[7]=c.bank_map; b[8]={4'd0,c.bank_valid};
         b[9]={c.extra_input_mode,c.lockout_inverted,
@@ -91,6 +91,33 @@ function automatic logic [127:0] encode_cfg(input ssv_cfg_t c);
     end
 endfunction
 
+function automatic logic [191:0] encode_cfg_v3(input ssv_cfg_t c);
+    logic [7:0] b [0:23];
+    logic [7:0] sum;
+    logic [127:0] base;
+    int i;
+    begin
+        base = encode_cfg(c);
+        for (i = 0; i < 24; i = i + 1) b[i] = 8'd0;
+        for (i = 0; i < 15; i = i + 1) b[i] = base[i * 8 +: 8];
+        b[1] = 8'd3;
+        b[15] = {7'd0, c.mainram_mirror_010000};
+        b[16] = {4'd0, c.input_layout};
+        b[17] = {5'd0, c.mahjong_mode};
+        b[18] = {7'd0, c.irq_level2_line120};
+        b[19] = {5'd0, c.custom_output_mode};
+        b[20] = {6'd0, c.srmp7_irqv_mame, c.srmp7_sample_half_bank};
+        b[21] = {6'd0, c.optional_io_mode};
+        b[22] = c.adc_conversion_cycles;
+        sum = 8'd0;
+        for (i = 0; i < 23; i = i + 1) sum = sum + b[i];
+        b[23] = -sum;
+        encode_cfg_v3 = '0;
+        for (i = 0; i < 24; i = i + 1)
+            encode_cfg_v3[i * 8 +: 8] = b[i];
+    end
+endfunction
+
 task send_cfg_image(input logic [127:0] image);
     int i;
     begin
@@ -105,6 +132,40 @@ task send_cfg_image(input logic [127:0] image);
         end
         ioctl_index = 8'd0;
         tick();
+    end
+endtask
+
+task send_cfg_v3_image(input logic [191:0] image);
+    int i;
+    begin
+        ioctl_index = 8'd1;
+        for (i = 0; i < 24; i = i + 1) begin
+            ioctl_addr = 27'(i);
+            ioctl_dout = image[i * 8 +: 8];
+            ioctl_wr = 1'b1; tick();
+            ioctl_wr = 1'b0; tick();
+            if (i == 15 && (cfg_valid || cfg_commit))
+                $fatal(1, "version 3 committed at legacy version-2 boundary");
+        end
+        ioctl_index = 8'd0;
+        tick();
+    end
+endtask
+
+// Version is deliberately the final missing byte. Completion must use the
+// accepted byte, not stale cfg_raw[1] from the preceding transaction.
+task send_cfg_v3_version_last(input logic [191:0] image);
+    int i;
+    begin
+        ioctl_index = 8'd1;
+        ioctl_addr = 27'd0; ioctl_dout = image[7:0]; ioctl_wr = 1'b1; tick();
+        ioctl_wr = 1'b0; tick();
+        for (i = 2; i < 24; i = i + 1) begin
+            ioctl_addr = 27'(i); ioctl_dout = image[i * 8 +: 8];
+            ioctl_wr = 1'b1; tick(); ioctl_wr = 1'b0; tick();
+        end
+        ioctl_addr = 27'd1; ioctl_dout = image[15:8]; ioctl_wr = 1'b1; tick();
+        ioctl_wr = 1'b0; tick(); ioctl_index = 8'd0; tick();
     end
 endtask
 
@@ -172,6 +233,7 @@ initial begin
     ssv_cfg_t ultrax_cfg;
     logic [26:0] st010_start;
     logic [127:0] malformed_cfg;
+    logic [191:0] v3_image;
     logic [7:0] malformed_sum;
 
     rst = 1; mem_ready = 0; ioctl_download = 0; ioctl_index = 0;
@@ -267,6 +329,83 @@ initial begin
     if (!cfg_valid || !cfg.has_nvram || cfg.extra_ram_mode !== 2'd0 ||
         cfg.nvram_mode !== 2'd2)
         $fatal(1, "Cairblad NVRAM configuration flag was rejected");
+
+    // Version 3 commits only after all 24 bytes and decodes its extension
+    // atomically. Sending version last also covers the nonblocking old-byte
+    // hazard in the receive-mask completion decision.
+    cairblad_cfg.mainram_mirror_010000 = 1'b1;
+    cairblad_cfg.input_layout = 4'd2;
+    cairblad_cfg.irq_level2_line120 = 1'b1;
+    v3_image = encode_cfg_v3(cairblad_cfg);
+    send_cfg_v3_version_last(v3_image);
+    if (!cfg_valid || !cfg.mainram_mirror_010000 ||
+        cfg.input_layout !== 4'd2 || !cfg.irq_level2_line120)
+        $fatal(1, "version-3 extension did not commit atomically");
+
+    // A complete checksum-valid image with an unsupported enum fails closed.
+    v3_image = encode_cfg_v3(cairblad_cfg);
+    v3_image[19 * 8 +: 8] = 8'd1;
+    malformed_sum = 8'd0;
+    for (int v3_i = 0; v3_i < 23; v3_i++)
+        malformed_sum = malformed_sum + v3_image[v3_i * 8 +: 8];
+    v3_image[23 * 8 +: 8] = -malformed_sum;
+    send_cfg_v3_image(v3_image);
+    if (cfg_valid || cfg_commit)
+        $fatal(1, "unsupported version-3 custom-output enum was accepted");
+
+    v3_image = encode_cfg_v3(cairblad_cfg);
+    v3_image[23 * 8 +: 8] = v3_image[23 * 8 +: 8] ^ 8'h01;
+    send_cfg_v3_image(v3_image);
+    if (cfg_valid || cfg_commit)
+        $fatal(1, "bad version-3 23-byte checksum was accepted");
+
+    // A following v2 transaction must not inherit any v3 high bytes.
+    cairblad_cfg = cfg_cairblad();
+    send_cfg(cairblad_cfg);
+    if (!cfg_valid || cfg.mainram_mirror_010000 ||
+        cfg.input_layout !== 4'd0 || cfg.irq_level2_line120)
+        $fatal(1, "version-2 compatibility inherited stale version-3 fields");
+
+    // Full SRMP7 family geometry: 64 MiB graphics, 24 MiB samples, expanded
+    // RAM and matrix/bank classes must remain one validated shared profile.
+    cairblad_cfg = cfg_vasara();
+    cairblad_cfg.gfx_mb = 7'd64;
+    cairblad_cfg.gfx_code_k = 5'd19;
+    cairblad_cfg.gfx_code_mask = 20'h7ffff;
+    cairblad_cfg.bank_valid = 4'hf;
+    cairblad_cfg.sample_mb = 6'd24;
+    cairblad_cfg.extra_ram_mode = 2'd3;
+    cairblad_cfg.lockout_inverted = 1'b1;
+    cairblad_cfg.input_layout = 4'd1;
+    cairblad_cfg.mahjong_mode = 3'd5;
+    cairblad_cfg.srmp7_sample_half_bank = 1'b1;
+    cairblad_cfg.srmp7_irqv_mame = 1'b1;
+    send_cfg_v3_image(encode_cfg_v3(cairblad_cfg));
+    if (!cfg_valid || cfg.gfx_mb !== 7'd64 || cfg.sample_mb !== 6'd24 ||
+        cfg.extra_ram_mode !== 2'd3 || cfg.mahjong_mode !== 3'd5)
+        $fatal(1, "SRMP7 family descriptor was rejected");
+
+    cairblad_cfg = cfg_dynagear();
+    cairblad_cfg.gfx_mb = 7'd14;
+    cairblad_cfg.gfx_code_k = 5'd14;
+    cairblad_cfg.gfx_code_mask = 20'h03fff;
+    cairblad_cfg.gfx_quarters = 3'd4;
+    cairblad_cfg.optional_io_mode = 2'd1;
+    cairblad_cfg.has_nvram = 1'b1;
+    cairblad_cfg.nvram_mode = 2'd1;
+    cairblad_cfg.lockout_inverted = 1'b1;
+    cairblad_cfg.wdog_mode = 2'd0;
+    send_cfg_v3_image(encode_cfg_v3(cairblad_cfg));
+    if (!cfg_valid || cfg.optional_io_mode !== 2'd1 || cfg.gfx_mb !== 7'd14)
+        $fatal(1, "Eagle Shot optional-device descriptor was rejected");
+
+    cairblad_cfg = cfg_cairblad();
+    cairblad_cfg.optional_io_mode = 2'd2;
+    cairblad_cfg.adc_conversion_cycles = 8'd56;
+    send_cfg_v3_image(encode_cfg_v3(cairblad_cfg));
+    if (!cfg_valid || cfg.optional_io_mode !== 2'd2 ||
+        cfg.adc_conversion_cycles !== 8'd56)
+        $fatal(1, "Sexy Reaction optional-device descriptor was rejected");
 
     // A repaired checksum does not make a reserved descriptor bit legal.
     malformed_cfg = encode_cfg(cairblad_cfg);
@@ -387,11 +526,11 @@ initial begin
     // The whole region must sit in the bank-3 tail after samples and never touch
     // region, which the open-ended `>= STREAM_SAMPLES` branch would have
     // claimed had the st010 test not been put ahead of it.
-    if (st010_stream_dest_cfg(st010_cfg, st010_start)
-            [SDR_AW:SDR_AW-1] !== 2'd3 ||
-        st010_stream_dest_cfg(
-            st010_cfg, st010_start + STREAM_ST010_SIZE - 27'd1)
-            [SDR_AW:SDR_AW-1] !== 2'd3)
+    if (((st010_stream_dest_cfg(st010_cfg, st010_start) >>
+          (SDR_AW-1)) & 2'b11) !== 2'd3 ||
+        ((st010_stream_dest_cfg(
+            st010_cfg, st010_start + STREAM_ST010_SIZE - 27'd1) >>
+          (SDR_AW-1)) & 2'b11) !== 2'd3)
         $fatal(1, "st010 region left SDRAM bank 3");
 
     ioctl_download = 0;

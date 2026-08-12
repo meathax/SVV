@@ -47,12 +47,13 @@ logic       busy;
 logic       index0_seen;
 
 // ---------------------------------------------------------------------------
-// Per-game configuration, MRA <rom index="1">, 16 bytes little-endian.
+// Per-game configuration, MRA <rom index="1">. Generated media uses the
+// 24-byte v3 image below; legacy/private 16-byte v2 images remain accepted.
 //
 //   0  magic 'S' (0x53)      8  bank_valid
 //   1  version (2)           9  flags0: b0 tile_code_identity
 //   2  prog_mb                        b1 irq_level1_line0
-//   3  gfx_mb (6 bits)                b2 reserved (must remain zero)
+//   3  gfx_mb (7 bits)                b7 reserved (must remain zero)
 //                                     b3 has_st010, b4 drifto unknown reads
 //                                     b5 inverted lockout
 //                                     b7..b6 extra_input_mode
@@ -75,41 +76,73 @@ logic       index0_seen;
 // turns a packaging mistake into a corrupt-graphics bug hunt, which is exactly
 // the class of fake bug this core has spent effort avoiding elsewhere.
 // ---------------------------------------------------------------------------
-localparam int CFG_BYTES = 16;
+// v2 remains accepted for existing/private media.  v3 is a 24-byte atomic
+// block; its checksum is byte 23 and it cannot commit at the v2 boundary.
+localparam int CFG_V2_BYTES = 16;
+localparam int CFG_BYTES = 24;
 logic [7:0] cfg_raw [0:CFG_BYTES-1];
 logic [7:0] cfg_sum;
 logic       cfg_accept;
 logic [CFG_BYTES-1:0] cfg_received;
 logic                 cfg_commit_pending;
+logic [CFG_BYTES-1:0] cfg_received_after_write;
+logic [7:0]           cfg_version_after_write;
+logic [CFG_BYTES-1:0] cfg_required_after_write;
+
+// Completion is evaluated from the image including the byte accepted on this
+// edge.  In particular, version may itself be the final out-of-order byte;
+// reading cfg_raw[1] here would then use the previous transaction's version.
+always_comb begin
+    cfg_received_after_write = cfg_received;
+    cfg_version_after_write = cfg_raw[1];
+    if (ioctl_addr < CFG_BYTES) begin
+        if (ioctl_addr == 0)
+            cfg_received_after_write = '0;
+        cfg_received_after_write[ioctl_addr[4:0]] = 1'b1;
+        if (ioctl_addr == 1)
+            cfg_version_after_write = ioctl_dout;
+    end
+    cfg_required_after_write =
+        (cfg_version_after_write == 8'd3) ? {CFG_BYTES{1'b1}} :
+        {{(CFG_BYTES-CFG_V2_BYTES){1'b0}}, {CFG_V2_BYTES{1'b1}}};
+end
 
 function automatic ssv_pkg::ssv_cfg_t cfg_decode();
-    cfg_decode = '{
-        game_id:            cfg_raw[11][3:0],
-        prog_mb:            cfg_raw[2][2:0],
-        gfx_mb:             cfg_raw[3][5:0],
-        gfx_code_k:         cfg_raw[4][4:0],
-        gfx_code_mul3:      cfg_raw[5][0],
+    cfg_decode = '0;
+    cfg_decode.game_id            = cfg_raw[11][3:0];
+    cfg_decode.prog_mb            = cfg_raw[2][2:0];
+    cfg_decode.gfx_mb             = cfg_raw[3][6:0];
+    cfg_decode.gfx_code_k         = cfg_raw[4][4:0];
+    cfg_decode.gfx_code_mul3      = cfg_raw[5][0];
         // Derived here, ONCE, rather than in the wrap. As a variable shift in
         // the wrap it cost -12.7 ns on the path to the SDRAM address.
-        gfx_code_mask:      (20'd1 << cfg_raw[4][4:0]) - 20'd1,
-        gfx_quarters:       cfg_raw[6][2:0],
-        bank_map:           cfg_raw[7],
-        bank_valid:         cfg_raw[8][3:0],
-        tile_code_identity: cfg_raw[9][0],
-        irq_level1_line0:   cfg_raw[9][1],
-        extra_input_mode:   cfg_raw[9][7:6],
-        lockout_inverted:   cfg_raw[9][5],
-        has_nvram:          cfg_raw[10][2],
-        has_st010:          cfg_raw[9][3],
-        has_drifto_unknown: cfg_raw[9][4],
-        sample_mb:          cfg_raw[12][5:0],
-        wdog_mode:          cfg_raw[10][1:0],
-        extra_ram_mode:     cfg_raw[10][4:3],
-        nvram_mode:         cfg_raw[10][7:6],
-        system_input_mode:  cfg_raw[10][5],
-        visible_width_half: cfg_raw[13],
-        visible_height:     cfg_raw[14]
-    };
+    cfg_decode.gfx_code_mask      = (20'd1 << cfg_raw[4][4:0]) - 20'd1;
+    cfg_decode.gfx_quarters       = cfg_raw[6][2:0];
+    cfg_decode.bank_map           = cfg_raw[7];
+    cfg_decode.bank_valid         = cfg_raw[8][3:0];
+    cfg_decode.tile_code_identity = cfg_raw[9][0];
+    cfg_decode.irq_level1_line0   = cfg_raw[9][1];
+    cfg_decode.extra_input_mode   = cfg_raw[9][7:6];
+    cfg_decode.lockout_inverted   = cfg_raw[9][5];
+    cfg_decode.has_nvram          = cfg_raw[10][2];
+    cfg_decode.has_st010          = cfg_raw[9][3];
+    cfg_decode.has_drifto_unknown = cfg_raw[9][4];
+    cfg_decode.sample_mb          = cfg_raw[12][5:0];
+    cfg_decode.wdog_mode          = cfg_raw[10][1:0];
+    cfg_decode.extra_ram_mode     = cfg_raw[10][4:3];
+    cfg_decode.nvram_mode         = cfg_raw[10][7:6];
+    cfg_decode.system_input_mode  = cfg_raw[10][5];
+    cfg_decode.visible_width_half = cfg_raw[13];
+    cfg_decode.visible_height     = cfg_raw[14];
+    cfg_decode.irq_level2_line120 = (cfg_raw[1] == 8'd3) && cfg_raw[18][0];
+    cfg_decode.mainram_mirror_010000 = (cfg_raw[1] == 8'd3) && cfg_raw[15][0];
+    cfg_decode.input_layout       = (cfg_raw[1] == 8'd3) ? cfg_raw[16][3:0] : 4'd0;
+    cfg_decode.mahjong_mode       = (cfg_raw[1] == 8'd3) ? cfg_raw[17][2:0] : 3'd0;
+    cfg_decode.custom_output_mode = (cfg_raw[1] == 8'd3) ? cfg_raw[19][2:0] : 3'd0;
+    cfg_decode.srmp7_sample_half_bank = (cfg_raw[1] == 8'd3) && cfg_raw[20][0];
+    cfg_decode.srmp7_irqv_mame    = (cfg_raw[1] == 8'd3) && cfg_raw[20][1];
+    cfg_decode.optional_io_mode   = (cfg_raw[1] == 8'd3) ? cfg_raw[21][1:0] : 2'd0;
+    cfg_decode.adc_conversion_cycles = (cfg_raw[1] == 8'd3) ? cfg_raw[22] : 8'd0;
 endfunction
 
 // Keep malformed descriptors away from variable shifts, bank selectors and
@@ -121,7 +154,12 @@ function automatic logic cfg_domain_valid();
     logic bank_map_valid;
     logic geometry_valid;
     begin
-        unique case (cfg_raw[3][5:0])
+        unique case (cfg_raw[3][6:0])
+            7'd14: gfx_valid = (cfg_raw[1] == 8'd3) &&
+                                  (cfg_raw[21][1:0] == 2'd1) &&
+                                  (cfg_raw[4][4:0] == 5'd14) &&
+                                  !cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd4);
             6'd12: gfx_valid = (cfg_raw[4][4:0] == 5'd15) &&
                                    cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd3);
@@ -135,6 +173,9 @@ function automatic logic cfg_domain_valid();
                                   !cfg_raw[5][0] &&
                                   ((cfg_raw[6][2:0] == 3'd3) ||
                                    (cfg_raw[6][2:0] == 3'd4));
+            7'd64: gfx_valid = (cfg_raw[4][4:0] == 5'd19) &&
+                                  !cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd4);
             default: gfx_valid = 1'b0;
         endcase
 
@@ -157,6 +198,9 @@ function automatic logic cfg_domain_valid();
             if (cfg_raw[8][2]) bank_map_valid &= !cfg_raw[7][5];
             if (cfg_raw[8][3]) bank_map_valid &= !cfg_raw[7][7];
         end
+        if ((cfg_raw[1] == 8'd3) && cfg_raw[20][0])
+            bank_map_valid = (cfg_raw[12][5:0] == 6'd24) &&
+                             (cfg_raw[8][3:0] == 4'hf);
 
         geometry_valid =
             ((cfg_raw[13] == 8'd168) &&
@@ -169,21 +213,54 @@ function automatic logic cfg_domain_valid();
             ((cfg_raw[2][2:0] == 3'd1) ||
              (cfg_raw[2][2:0] == 3'd2) ||
              (cfg_raw[2][2:0] == 3'd4)) &&
-            (cfg_raw[3][7:6] == 2'd0) &&
+            !cfg_raw[3][7] &&
             (cfg_raw[4][7:5] == 3'd0) &&
             (cfg_raw[5][7:1] == 7'd0) &&
             (cfg_raw[6][7:3] == 5'd0) &&
             (cfg_raw[8][7:4] == 4'd0) && (cfg_raw[8][3:0] != 4'd0) &&
             !cfg_raw[9][2] && (cfg_raw[9][7:6] != 2'd3) &&
             (cfg_raw[10][1:0] != 2'd3) &&
-            (cfg_raw[10][4:3] != 2'd3) &&
             (cfg_raw[10][7:6] != 2'd3) &&
             (cfg_raw[10][2] == (cfg_raw[10][7:6] != 2'd0)) &&
             (cfg_raw[11][7:4] == 4'd0) && (cfg_raw[11][3:0] <= 4'd7) &&
             (cfg_raw[12][7:6] == 2'd0) &&
             ((cfg_raw[12][5:0] == 6'd4) ||
-             (cfg_raw[12][5:0] == 6'd8)) &&
-            gfx_valid && bank_map_valid && geometry_valid;
+             (cfg_raw[12][5:0] == 6'd8) ||
+             (cfg_raw[12][5:0] == 6'd24)) &&
+            gfx_valid && bank_map_valid && geometry_valid &&
+            (((cfg_raw[1] == 8'd2) && (cfg_raw[10][4:3] != 2'd3)) ||
+             ((cfg_raw[15][7:1] == 7'd0) &&
+              (cfg_raw[16][7:4] == 4'd0) &&
+              (cfg_raw[17][7:3] == 5'd0) &&
+              (cfg_raw[18][7:1] == 7'd0) &&
+              (cfg_raw[19][7:3] == 5'd0) &&
+              (cfg_raw[20][7:2] == 6'd0) &&
+              (cfg_raw[21][7:2] == 6'd0)));
+        if (cfg_raw[1] == 8'd3) begin
+            cfg_domain_valid &= (cfg_raw[16][3:0] <= 4'd3) &&
+                                (cfg_raw[17][2:0] <= 3'd5) &&
+                                (cfg_raw[19][2:0] == 3'd0);
+            // The implemented matrix modes use the matrix input layout, and
+            // SRMP7-only sample/IRQ behavior is valid only with SRMP7 mode.
+            cfg_domain_valid &= ((cfg_raw[17][2:0] == 3'd0) ==
+                                 (cfg_raw[16][3:0] != 4'd1));
+            cfg_domain_valid &= ((cfg_raw[20][1:0] == 2'd0) ||
+                                 (cfg_raw[17][2:0] == 3'd5));
+            cfg_domain_valid &= ((cfg_raw[10][4:3] != 2'd3) ||
+                                 (cfg_raw[17][2:0] == 3'd5));
+            cfg_domain_valid &=
+                (((cfg_raw[21][1:0] == 2'd2) ||
+                  (cfg_raw[21][1:0] == 2'd3)) == (cfg_raw[22] != 8'd0));
+            if (cfg_raw[21][1:0] == 2'd1)
+                cfg_domain_valid &= (cfg_raw[3][6:0] == 7'd14) &&
+                    cfg_raw[9][5] && cfg_raw[10][2] &&
+                    (cfg_raw[10][7:6] == 2'd1) &&
+                    (cfg_raw[10][1:0] == 2'd0);
+            if (cfg_raw[21][1:0] == 2'd2)
+                cfg_domain_valid &= cfg_raw[9][5] && cfg_raw[10][2] &&
+                    (cfg_raw[10][7:6] == 2'd2) &&
+                    (cfg_raw[10][1:0] == 2'd1);
+        end
     end
 endfunction
 
@@ -193,10 +270,13 @@ endfunction
 always_comb begin
     cfg_sum = 8'd0;
     for (int cfg_i = 0; cfg_i < CFG_BYTES - 1; cfg_i++)
-        cfg_sum = cfg_sum + cfg_raw[cfg_i];
+        if ((cfg_raw[1] == 8'd3) || (cfg_i < CFG_V2_BYTES-1))
+            cfg_sum = cfg_sum + cfg_raw[cfg_i];
     cfg_accept = (cfg_raw[0] == 8'h53) &&
-                 (cfg_raw[1] == 8'd2) &&
-                 (cfg_raw[CFG_BYTES-1] == (-cfg_sum)) &&
+                 ((cfg_raw[1] == 8'd2) || (cfg_raw[1] == 8'd3)) &&
+                 ((cfg_raw[1] == 8'd3) ?
+                    (cfg_raw[CFG_BYTES-1] == (-cfg_sum)) :
+                    (cfg_raw[CFG_V2_BYTES-1] == (-cfg_sum))) &&
                  cfg_domain_valid();
 end
 
@@ -231,6 +311,10 @@ function automatic logic [SDR_AW:0] stream_byte_address(
 
         if ((stream_addr >= stream_gfx_start_cfg(cfg)) &&
             (stream_addr <  stream_samples_start_cfg(cfg))) begin
+            if (cfg.optional_io_mode == 2'd1)
+                stream_byte_address = SDR_GFX_BASE +
+                    (stream_addr - stream_gfx_start_cfg(cfg));
+            else begin
             // All populated quarters collapse into one aligned 16-byte
             // record per 16-pixel tile row, so the row fetcher gets a whole
             // row from a single 128-bit p2 burst. The descriptor determines
@@ -253,6 +337,7 @@ function automatic logic [SDR_AW:0] stream_byte_address(
                 quarter,
                 within_quarter[1:0]
             );
+            end
         end
         else if (cfg.has_st010 &&
                  stream_addr >= stream_st010_start_cfg(cfg)) begin
@@ -327,22 +412,22 @@ always_ff @(posedge clk) begin
 
         // --- index 1: capture the configuration block ---
         if (ioctl_download && ioctl_wr && ioctl_index == 8'd1 &&
+            !cfg_commit_pending &&
             ioctl_addr < CFG_BYTES) begin
-            cfg_raw[ioctl_addr[3:0]] <= ioctl_dout;
+            if (ioctl_addr == 0)
+                for (int cfg_clear_i = 0; cfg_clear_i < CFG_BYTES; cfg_clear_i++)
+                    cfg_raw[cfg_clear_i] <= 8'd0;
+            cfg_raw[ioctl_addr[4:0]] <= ioctl_dout;
             // Any descriptor byte invalidates the prior profile immediately.
             // Address zero begins a new transaction even if a prior malformed
             // block left a partial receive mask behind.
             cfg_valid <= 1'b0;
             rom_loaded <= 1'b0;
-            if (ioctl_addr == 0)
-                cfg_received <= {{(CFG_BYTES-1){1'b0}}, 1'b1};
-            else
-                cfg_received[ioctl_addr[3:0]] <= 1'b1;
+            cfg_received <= cfg_received_after_write;
 
-            if (((ioctl_addr == 0)
-                    ? {{(CFG_BYTES-1){1'b0}}, 1'b1}
-                    : (cfg_received | (16'b1 << ioctl_addr[3:0])))
-                == {CFG_BYTES{1'b1}})
+            if ((cfg_version_after_write == 8'd2 ||
+                 cfg_version_after_write == 8'd3) &&
+                (cfg_received_after_write == cfg_required_after_write))
                 cfg_commit_pending <= 1'b1;
         end
 

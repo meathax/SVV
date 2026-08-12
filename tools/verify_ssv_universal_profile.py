@@ -32,10 +32,10 @@ def cfg_bytes(root: ET.Element, setname: str, errors: list[str]) -> bytes:
     except ValueError:
         fail(f"{setname}: profile descriptor is not hexadecimal", errors)
         return b""
-    if len(data) != 16:
-        fail(f"{setname}: profile descriptor is {len(data)} bytes, expected 16", errors)
+    if len(data) != 24:
+        fail(f"{setname}: profile descriptor is {len(data)} bytes, expected 24", errors)
         return b""
-    if data[0:2] != b"\x53\x02":
+    if data[0:2] != b"\x53\x03":
         fail(f"{setname}: bad profile magic/version {data[0:2].hex()}", errors)
     if sum(data) & 0xFF:
         fail(f"{setname}: profile checksum does not sum to zero", errors)
@@ -214,19 +214,46 @@ def main() -> int:
         extra_ram_mode = (cfg[10] >> 3) & 0x03
         nvram_mode = (cfg[10] >> 6) & 0x03
         reserved_high = (
-            (cfg[2] & 0xF8) or (cfg[3] & 0xC0) or (cfg[4] & 0xE0) or
+            (cfg[2] & 0xF8) or (cfg[3] & 0x80) or (cfg[4] & 0xE0) or
             (cfg[5] & 0xFE) or (cfg[6] & 0xF8) or (cfg[8] & 0xF0) or
             (cfg[11] & 0xF0) or (cfg[12] & 0xC0)
         )
         if reserved_high:
             fail(f"{setname}: descriptor has non-zero reserved/high bits", errors)
+        if ((cfg[15] & 0xFE) or (cfg[16] & 0xF0) or
+                (cfg[17] & 0xF8) or (cfg[18] & 0xFE) or
+                (cfg[19] & 0xF8) or (cfg[20] & 0xFC) or
+                (cfg[21] & 0xFC)):
+            fail(f"{setname}: descriptor-v3 reserved bits are non-zero", errors)
+        input_layout, mahjong_mode = cfg[16] & 0x0F, cfg[17] & 0x07
+        if input_layout > 3:
+            fail(f"{setname}: unsupported input layout {input_layout}", errors)
+        if mahjong_mode > 5:
+            fail(f"{setname}: unsupported mahjong mode {mahjong_mode}", errors)
+        if bool(mahjong_mode) != (input_layout == 1):
+            fail(f"{setname}: mahjong mode/input layout disagree", errors)
+        if cfg[19] & 0x07:
+            fail(f"{setname}: unsupported custom output mode {cfg[19] & 7}", errors)
+        if (cfg[20] & 0x03) and mahjong_mode != 5:
+            fail(f"{setname}: SRMP7 flags require mahjong mode 5", errors)
+        optional_io_mode = cfg[21] & 3
+        if (optional_io_mode in (2, 3)) != bool(cfg[22]):
+            fail(f"{setname}: ADC mode/conversion count disagree", errors)
+        if optional_io_mode == 1 and not (
+                gfx_mb == 14 and (flags & 0x20) and (cfg[10] & 4) and
+                nvram_mode == 1 and (cfg[10] & 3) == 0):
+            fail(f"{setname}: incomplete Eagle Shot device profile", errors)
+        if optional_io_mode == 2 and not (
+                (flags & 0x20) and (cfg[10] & 4) and nvram_mode == 2 and
+                (cfg[10] & 3) == 1):
+            fail(f"{setname}: incomplete Sexy Reaction device profile", errors)
         if flags & 0x04:
             fail(f"{setname}: reserved descriptor flag byte-9 bit 2 is set", errors)
         if (cfg[8] & 0x0F) == 0:
             fail(f"{setname}: descriptor enables no ES5506 sample bank", errors)
         if prog_mb not in (1, 2, 4):
             fail(f"{setname}: unsupported program size {prog_mb} MiB", errors)
-        if gfx_mb not in (12, 16, 24, 32) or gfx_quarters not in (3, 4):
+        if gfx_mb not in (12, 14, 16, 24, 32, 64) or gfx_quarters not in (3, 4):
             fail(
                 f"{setname}: unsupported graphics geometry "
                 f"{gfx_mb} MiB/{gfx_quarters} quarters",
@@ -234,7 +261,7 @@ def main() -> int:
             )
         if gfx_factor is None:
             fail(f"{setname}: unsupported graphics factor code {gfx_factor_code}", errors)
-        elif (gfx_factor << gfx_k) != (gfx_mb << 13):
+        elif gfx_mb != 14 and (gfx_factor << gfx_k) != (gfx_mb << 13):
             fail(f"{setname}: graphics factor/k disagrees with region size", errors)
         if extra_input_mode == 3:
             fail(f"{setname}: reserved extra-input mode 3", errors)
@@ -242,20 +269,20 @@ def main() -> int:
             (336, 238), (336, 240), (338, 240), (352, 240)
         ):
             fail(f"{setname}: unsupported visible area {cfg[13] * 2}x{cfg[14]}", errors)
-        if sample_mb not in (4, 8):
+        if sample_mb not in (4, 8, 24):
             fail(f"{setname}: unsupported sample size {sample_mb} MiB", errors)
         else:
             for bank in range(4):
                 if (cfg[8] >> bank) & 1:
                     slot = (cfg[7] >> (bank * 2)) & 3
-                    if slot >= sample_mb // 4:
+                    if not (cfg[20] & 1) and slot >= sample_mb // 4:
                         fail(
                             f"{setname}: enabled ES5506 bank {bank} maps to "
                             f"absent sample slot {slot}",
                             errors,
                         )
-        if extra_ram_mode == 3:
-            fail(f"{setname}: reserved extra CPU RAM mode 3", errors)
+        if extra_ram_mode == 3 and mahjong_mode != 5:
+            fail(f"{setname}: expanded RAM requires SRMP7 mode", errors)
         if nvram_mode == 3:
             fail(f"{setname}: reserved NVRAM mode 3", errors)
         if bool(cfg[10] & 0x04) != bool(nvram_mode):

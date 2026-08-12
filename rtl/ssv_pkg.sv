@@ -77,7 +77,8 @@ package ssv_pkg;
     // Cairblad's address map adds a 64 KiB battery-backed NVRAM window at
     // $580000. Keep it in the unused tail of bank 0 so it uses the existing
     // external SDRAM path rather than spending another block-RAM instance.
-    localparam logic [SDR_AW:0] SDR_NVRAM_BASE   = 27'h0460000; // bank 0
+    localparam logic [SDR_AW:0] SDR_NVRAM_BASE   = 27'h0470000; // bank 0
+    localparam logic [SDR_AW:0] SDR_EAGL_RAM_BASE = 27'h0500000; // 4 MiB
     localparam logic [SDR_AW:0] SDR_SAMPLES_BASE = 27'h6000000; // bank 3
 
     // ST010 (NEC uPD96050) program ROM, for the three drifto94_state titles.
@@ -123,8 +124,9 @@ package ssv_pkg;
     localparam logic [SDR_AW:0] SDR_MAINCPU_SIZE = 27'h0400000; //  4 MB slot
     localparam logic [SDR_AW:0] SDR_GFX_SIZE     = 27'h2000000; // 32 MB slot
     localparam logic [SDR_AW:0] SDR_XRAM_SIZE    = 27'h0020000; // 128 KB
-    localparam logic [SDR_AW:0] SDR_CPU_RAM_SIZE = 27'h0040000; // 256 KB
+    localparam logic [SDR_AW:0] SDR_CPU_RAM_SIZE = 27'h0041000; // SRMP7 0x400fb0
     localparam logic [SDR_AW:0] SDR_NVRAM_SIZE   = 27'h0010000; //  64 KB
+    localparam logic [SDR_AW:0] SDR_EAGL_RAM_SIZE = 27'h0400000;
     localparam logic [SDR_AW:0] SDR_SAMPLES_SIZE = 27'h0800000; //  8 MB slot
     localparam logic [SDR_AW:0] SDR_ST010_SIZE   = 27'h0011000; // 68 KB exact
 
@@ -206,7 +208,7 @@ package ssv_pkg;
     typedef struct packed {
         logic [3:0] game_id;
         logic [2:0] prog_mb;            // 1, 2 or 4
-        logic [5:0] gfx_mb;             // 12, 16, 24 or 32 MiB
+        logic [6:0] gfx_mb;             // includes SRMP7's 64 MiB board
         logic [4:0] gfx_code_k;         // tile modulus exponent
         logic       gfx_code_mul3;      // modulus is 3<<k, not 1<<k
         // (1<<gfx_code_k)-1, precomputed. It is derived, not independent, but
@@ -240,6 +242,18 @@ package ssv_pkg;
         logic [1:0] extra_ram_mode;
         // 0 normal SYSTEM port; 1 fixes Test/Tilt high (Vasara wiring).
         logic       system_input_mode;
+        // Descriptor-v3 family extensions.  These are hardware/map classes,
+        // never set names: zero preserves the original SSV profile.
+        logic       irq_level2_line120;
+        logic       mainram_mirror_010000;
+        logic [3:0] input_layout;
+        logic [2:0] mahjong_mode;
+        logic [2:0] custom_output_mode;
+        logic       srmp7_sample_half_bank;
+        logic       srmp7_irqv_mame;
+        // 1 Eagle/uPD4701, 2 Sexy/uPD7001, 3 GDFS/ST0020+ADC+EEPROM.
+        logic [1:0] optional_io_mode;
+        logic [7:0] adc_conversion_cycles;
         logic [7:0] visible_width_half; // exact MAME visarea width / 2
         logic [7:0] visible_height;     // exact MAME visarea height
     } ssv_cfg_t;
@@ -247,89 +261,58 @@ package ssv_pkg;
     // Dyna Gear (SAM-5127). Reproduces today's hardwired behaviour exactly, so
     // it is the reference the generalisation is regression-tested against.
     function automatic ssv_cfg_t cfg_dynagear();
-        cfg_dynagear = '{
-            game_id:            4'd0,
-            prog_mb:            3'd1,
-            gfx_mb:             6'd16,
-            gfx_code_k:         5'd17,   // 0x20000 tiles
-            gfx_code_mul3:      1'b0,
-            gfx_code_mask:      20'h1FFFF, // (1<<17)-1
-            gfx_quarters:       3'd3,    // quarter 3 never populated
-            bank_map:           8'h00,
-            bank_valid:         4'b0100, // bank 2 only
-            tile_code_identity: 1'b0,
-            irq_level1_line0:   1'b0,
-            extra_input_mode:   2'd1,    // decoded, all Dyna bits idle
-            lockout_inverted:   1'b0,
-            has_nvram:          1'b0,
-            nvram_mode:         2'd0,
-            has_st010:          1'b0,
-            has_drifto_unknown: 1'b0,
-            sample_mb:          6'd4,
-            wdog_mode:          2'd1,    // read-kick at $210000
-            extra_ram_mode:     2'd1,    // survarts_map $400000-$43ffff
-            system_input_mode:  1'b0,
-            visible_width_half: 8'd168,
-            visible_height:     8'd240
-        };
+        cfg_dynagear = '0;
+        cfg_dynagear.game_id = 4'd0;
+        cfg_dynagear.prog_mb = 3'd1;
+        cfg_dynagear.gfx_mb = 6'd16;
+        cfg_dynagear.gfx_code_k = 5'd17;
+        cfg_dynagear.gfx_code_mask = 20'h1ffff;
+        cfg_dynagear.gfx_quarters = 3'd3;
+        cfg_dynagear.bank_valid = 4'b0100;
+        cfg_dynagear.extra_input_mode = 2'd1;
+        cfg_dynagear.sample_mb = 6'd4;
+        cfg_dynagear.wdog_mode = 2'd1;
+        cfg_dynagear.extra_ram_mode = 2'd1;
+        cfg_dynagear.visible_width_half = 8'd168;
+        cfg_dynagear.visible_height = 8'd240;
     endfunction
 
     // The three requested shooter sets. These records mirror the generated
     // MRA configuration block, whose fields are derived from MAME's ssv.cpp.
     function automatic ssv_cfg_t cfg_cairblad();
-        cfg_cairblad = '{
-            game_id:            4'd1,
-            prog_mb:            3'd2,
-            gfx_mb:             6'd32,
-            gfx_code_k:         5'd18,
-            gfx_code_mul3:      1'b0,
-            gfx_code_mask:      20'h3FFFF,
-            gfx_quarters:       3'd3,
-            bank_map:           8'h00,
-            bank_valid:         4'b0001,
-            tile_code_identity: 1'b1,
-            irq_level1_line0:   1'b0,
-            extra_input_mode:   2'd0,
-            lockout_inverted:   1'b1,
-            has_nvram:          1'b1,
-            nvram_mode:         2'd2,
-            has_st010:          1'b0,
-            has_drifto_unknown: 1'b0,
-            sample_mb:          6'd4,
-            wdog_mode:          2'd1,
-            extra_ram_mode:     2'd0,
-            system_input_mode:  1'b0,
-            visible_width_half: 8'd169,
-            visible_height:     8'd240
-        };
+        cfg_cairblad = '0;
+        cfg_cairblad.game_id = 4'd1;
+        cfg_cairblad.prog_mb = 3'd2;
+        cfg_cairblad.gfx_mb = 6'd32;
+        cfg_cairblad.gfx_code_k = 5'd18;
+        cfg_cairblad.gfx_code_mask = 20'h3ffff;
+        cfg_cairblad.gfx_quarters = 3'd3;
+        cfg_cairblad.bank_valid = 4'b0001;
+        cfg_cairblad.tile_code_identity = 1'b1;
+        cfg_cairblad.lockout_inverted = 1'b1;
+        cfg_cairblad.has_nvram = 1'b1;
+        cfg_cairblad.nvram_mode = 2'd2;
+        cfg_cairblad.sample_mb = 6'd4;
+        cfg_cairblad.wdog_mode = 2'd1;
+        cfg_cairblad.visible_width_half = 8'd169;
+        cfg_cairblad.visible_height = 8'd240;
     endfunction
 
     function automatic ssv_cfg_t cfg_vasara();
-        cfg_vasara = '{
-            game_id:            4'd2,
-            prog_mb:            3'd4,
-            gfx_mb:             6'd32,
-            gfx_code_k:         5'd18,
-            gfx_code_mul3:      1'b0,
-            gfx_code_mask:      20'h3FFFF,
-            gfx_quarters:       3'd4,
-            bank_map:           8'h04,
-            bank_valid:         4'b0011,
-            tile_code_identity: 1'b0,
-            irq_level1_line0:   1'b0,
-            extra_input_mode:   2'd0,
-            lockout_inverted:   1'b0,
-            has_nvram:          1'b0,
-            nvram_mode:         2'd0,
-            has_st010:          1'b0,
-            has_drifto_unknown: 1'b0,
-            sample_mb:          6'd8,
-            wdog_mode:          2'd2,
-            extra_ram_mode:     2'd0,
-            system_input_mode:  1'b1,
-            visible_width_half: 8'd168,
-            visible_height:     8'd240
-        };
+        cfg_vasara = '0;
+        cfg_vasara.game_id = 4'd2;
+        cfg_vasara.prog_mb = 3'd4;
+        cfg_vasara.gfx_mb = 6'd32;
+        cfg_vasara.gfx_code_k = 5'd18;
+        cfg_vasara.gfx_code_mask = 20'h3ffff;
+        cfg_vasara.gfx_quarters = 3'd4;
+        cfg_vasara.bank_map = 8'h04;
+        cfg_vasara.bank_valid = 4'b0011;
+        cfg_vasara.sample_mb = 6'd8;
+        cfg_vasara.wdog_mode = 2'd2;
+        cfg_vasara.system_input_mode = 1'b1;
+        cfg_vasara.visible_width_half = 8'd168;
+        cfg_vasara.visible_height = 8'd240;
     endfunction
 
     function automatic ssv_cfg_t cfg_vasara2();
@@ -461,6 +444,36 @@ package ssv_pkg;
     function automatic logic [26:0] stream_end_cfg(input ssv_cfg_t cfg);
         stream_end_cfg = stream_st010_start_cfg(cfg) +
                          (cfg.has_st010 ? STREAM_ST010_SIZE : 27'd0);
+    endfunction
+
+    function automatic logic [SDR_AW:1] sample_word_addr_cfg(
+        input ssv_cfg_t cfg, input logic [1:0] bank,
+        input logic [31:0] accum, input logic srmp7_bank
+    );
+        logic [1:0] slot;
+        begin
+            case (bank)
+                2'd0: slot = cfg.bank_map[1:0];
+                2'd1: slot = cfg.bank_map[3:2];
+                2'd2: slot = cfg.bank_map[5:4];
+                default: slot = cfg.bank_map[7:6];
+            endcase
+            if (cfg.srmp7_sample_half_bank) begin
+                case (bank)
+                    2'd0: slot = 2'd0;
+                    2'd1: slot = 2'd1;
+                    2'd2: slot = 2'd2;
+                    default: slot = 2'd0; // region 3 base is slot 4 below
+                endcase
+            end
+            sample_word_addr_cfg = SDR_SAMPLES_BASE[SDR_AW:1] +
+                (26'(slot) << 21) +
+                ((cfg.srmp7_sample_half_bank && bank == 2'd3)
+                    ? (26'd4 << 21) : 26'd0) +
+                ((cfg.srmp7_sample_half_bank && bank[1])
+                    ? (26'(srmp7_bank) << 21) : 26'd0) +
+                {5'd0, accum[31:11]};
+        end
     endfunction
 
     // MAME's graphics region is split into four logical quarters, but the

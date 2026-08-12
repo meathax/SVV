@@ -520,6 +520,7 @@ def main():
             ens_valid, ens_map = ensoniq_banks(regions)
             flags = cfgblk.resolve_init(src, g['init'])
             amap = cfgblk.resolve_addrmap(src, g['machine'])
+            flags.update(cfgblk.family_map_features(amap, g['ports'], src))
             flags['extra_input_mode'] = (
                 cfgblk.extra_input_mode(src, amap, g['ports']) if amap else 0)
             flags['system_input_mode'] = cfgblk.system_input_mode(src, g['ports'])

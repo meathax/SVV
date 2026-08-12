@@ -78,6 +78,7 @@ always_ff @(posedge clk) begin
 end
 
 ssv_es5506_voice dut (
+    .srmp7_bank(1'b0),
     .cfg, .clk, .rst, .ce,
     .active_voices,
     .eng_voice,

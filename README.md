@@ -1,8 +1,8 @@
-# SSV MiSTer FPGA Core
+# Sammy Seta Visco MiSTer FPGA Core
 
-The SSV core emulates the Sammy, Seta, and Visco (SSV) arcade PCB family on
+The Sammy Seta Visco core emulates the Sammy, Seta, and Visco arcade PCB family on
 MiSTer. The FPGA target is the MiSTer DE10-Nano/Cyclone V
-`5CSEBA6U23I7`; the board being emulated is the SSV arcade hardware used by
+`5CSEBA6U23I7`; the board being emulated is the Sammy Seta Visco arcade hardware used by
 the supported games below.
 
 This project produces one universal `Arcade-SSV.rbf`. Each MRA loads a
@@ -52,7 +52,7 @@ claims are documented elsewhere and are not presented as PCB accuracy here.
 ## Supported games
 
 These are the eight qualified parent sets in
-[`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other SSV entries
+[`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other Sammy Seta Visco entries
 present in MAME are not currently claimed as supported by this core.
 
 | Game | Set name | Runtime hardware notes |
@@ -70,16 +70,16 @@ present in MAME are not currently claimed as supported by this core.
 
 | Hardware | Function |
 | --- | --- |
-| NEC V60/uPD70616 | Main SSV arcade CPU and 16-bit external bus |
-| SSV video hardware | Background/tilemap rendering, sprite/object lists, row scroll, priority, shadows, palette, and native raster timing |
-| SSV memory and control logic | Work/sprite/palette RAM, XRAM/NVRAM windows, interrupts, watchdog, coin/service/test inputs, and DIP switches |
+| NEC V60/uPD70616 | Main Sammy Seta Visco arcade CPU and 16-bit external bus |
+| Sammy Seta Visco video hardware | Background/tilemap rendering, sprite/object lists, row scroll, priority, shadows, palette, and native raster timing |
+| Sammy Seta Visco memory and control logic | Work/sprite/palette RAM, XRAM/NVRAM windows, interrupts, watchdog, coin/service/test inputs, and DIP switches |
 | Ensoniq ES5506 (OTTO) | Host registers, 32-voice sample playback, interpolation, filters, envelopes, stereo mixing, and IRQ status |
 | NEC uPD96050 / ST010 | Optional protection/DSP daughterboard used by Drift Out '94, Storm Blade, and Twin Eagle II |
 | MiSTer platform interface | MiSTer HPS/OSD, SDRAM, HDMI/VGA video, audio output, rotation, scaling, scanlines, and CRT adjustment |
 
 ## Credits
 
-- **meathax** — original SSV RTL, universal descriptor/profile integration,
+- **meathax** — original Sammy Seta Visco RTL, universal descriptor/profile integration,
   MRA generation, verification, and MiSTer integration.
 - **Sega System 32 MiSTer core contributors** — source base for the V60,
   SDRAM controller, PLL, dual-port RAM helpers, and related verification
@@ -87,7 +87,7 @@ present in MAME are not currently claimed as supported by this core.
 - **MiSTer-devel and MiSTer framework contributors** — MiSTer shell, HPS/OSD,
   video, audio, and platform integration from
   [Template_MiSTer](https://github.com/MiSTer-devel/Template_MiSTer).
-- **MAMEdev and MAME contributors** — SSV driver/video behavior, V60 behavior,
+- **MAMEdev and MAME contributors** — Sammy Seta Visco driver/video behavior, V60 behavior,
   uPD96050/ST010 behavior, ES5506 behavior, ROM definitions, controls, DIP
   switches, and board-level reference contracts in
   [MAME](https://github.com/mamedev/mame). MAME source is used as a behavioral
@@ -109,7 +109,7 @@ present in MAME are not currently claimed as supported by this core.
 
 ## License
 
-The original SSV RTL and integration are released under the
+The original Sammy Seta Visco RTL and integration are released under the
 [GNU General Public License version 3 or later](LICENSE). Third-party files
 retain their own license notices; see the source headers and
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md). MAME and other references are

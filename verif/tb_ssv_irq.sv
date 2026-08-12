@@ -6,6 +6,8 @@ always #5 clk = ~clk;
 
 logic rst, cold_rst, vblank_pulse, vector_we, enable_we, ack_we, cpu_irq_ack;
 logic line0_pulse, irq_level1_line0;
+logic line120_pulse, irq_level2_line120;
+logic adc_eoc_pulse;
 logic [2:0] vector_level, ack_level;
 logic [15:0] vector_data, enable_data;
 logic [1:0] enable_be;
@@ -25,6 +27,8 @@ initial begin
     ack_we = 0; cpu_irq_ack = 0; vector_level = 0; ack_level = 0;
     vector_data = 0; enable_data = 0; enable_be = 0;
     line0_pulse = 0; irq_level1_line0 = 0;
+    line120_pulse = 0; irq_level2_line120 = 0;
+    adc_eoc_pulse = 0;
     repeat (2) tick();
     rst = 0; cold_rst = 0;
 
@@ -82,6 +86,25 @@ initial begin
     ack_we = 0; tick();
     if (requested !== 8'h00 || irq_n !== 1'b1)
         $fatal(1, "event-refreshed IRQ acknowledge mismatch");
+
+    // Descriptor-v3 raster class requests level 2 only when enabled.
+    enable_we = 1; enable_be = 2'b01; enable_data = 16'h0004; tick();
+    enable_we = 0;
+    line120_pulse = 1; tick(); line120_pulse = 0; tick();
+    if (requested !== 8'h00 || irq_n !== 1'b1)
+        $fatal(1, "disabled line-120 source requested IRQ2");
+    irq_level2_line120 = 1;
+    vector_we = 1; vector_level = 2; vector_data = 16'h0004; tick();
+    vector_we = 0; line120_pulse = 1; tick(); line120_pulse = 0; tick();
+    if (requested !== 8'h04 || irq_n !== 1'b0 || irq_vector !== 8'h04)
+        $fatal(1, "enabled line-120 IRQ2 mismatch");
+
+    ack_we=1; ack_level=2; tick(); ack_we=0; tick();
+    vector_we=1; vector_level=6; vector_data=16'h0007; tick(); vector_we=0;
+    enable_we=1; enable_data=16'h0040; tick(); enable_we=0;
+    adc_eoc_pulse=1; tick(); adc_eoc_pulse=0; tick();
+    if (requested !== 8'h40 || irq_n !== 1'b0 || irq_vector !== 8'h07)
+        $fatal(1, "ADC EOC IRQ6 mismatch");
 
     $display("PASS tb_ssv_irq");
     $finish;

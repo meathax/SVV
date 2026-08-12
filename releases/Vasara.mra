@@ -12,7 +12,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53020420120004040300220208A8F0A6</part>
+    <part>53030420120004040300220208A8F00000000000000000A5</part>
   </rom>
   <rom index="0" zip="vasara.zip">
     <!-- program -->

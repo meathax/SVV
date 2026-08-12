@@ -12,7 +12,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53020220120003000121850104A9F02F</part>
+    <part>53030220120003000121850104A9F000000000000000002E</part>
   </rom>
   <rom index="0" zip="cairblad.zip">
     <!-- program -->

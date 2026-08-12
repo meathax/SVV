@@ -74,7 +74,7 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 # worsening worst setup slack from -0.044 ns to -0.268 ns.  MEDIUM retains the
 # larger M10K placement saving without spending timing margin for dense packing.
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 3
+set_global_assignment -name SEED 15
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

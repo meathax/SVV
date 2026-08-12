@@ -14,7 +14,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>5302020C0F0103440F02110708A8F07D</part>
+    <part>5303020C0F0103440F02110708A8F000000000000000007C</part>
   </rom>
   <rom index="0" zip="ultrax.zip">
     <!-- program -->

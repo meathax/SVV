@@ -12,7 +12,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53020418100103000118440504B0F075</part>
+    <part>53030418100103000118440504B0F0000000000000000074</part>
   </rom>
   <rom index="0" zip="stmblade.zip">
     <!-- program -->

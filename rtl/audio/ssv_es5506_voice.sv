@@ -7,6 +7,7 @@
 module ssv_es5506_voice (
     // Per-game configuration: ES5506 bank population and aliasing.
     input  ssv_pkg::ssv_cfg_t cfg,
+    input  logic        srmp7_bank,
     input  logic        clk,
     input  logic        rst,
     input  logic        ce,
@@ -81,19 +82,9 @@ function automatic logic [SDR_AW:1] sample_address(
     input logic [1:0] bank,
     input logic [31:0] accum_in
 );
-    logic [1:0] slot;
     begin
-        case (bank)
-            2'd0: slot = cfg_in.bank_map[1:0];
-            2'd1: slot = cfg_in.bank_map[3:2];
-            2'd2: slot = cfg_in.bank_map[5:4];
-            default: slot = cfg_in.bank_map[7:6];
-        endcase
-        // Each loaded ES5506 bank occupies one 4 MiB slot, or 2^21 16-bit
-        // words. Vasara and Vasara 2 populate banks 0 and 1, while Dyna Gear
-        // aliases its active bank to slot 0.
-        sample_address = SDR_SAMPLES_BASE[SDR_AW:1] +
-                         (26'(slot) << 21) + {5'd0, accum_in[31:11]};
+        sample_address = sample_word_addr_cfg(
+            cfg_in, bank, accum_in, srmp7_bank);
     end
 endfunction
 

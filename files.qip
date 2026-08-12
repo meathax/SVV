@@ -8,10 +8,17 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_host_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_mode_guard.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_irq.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_video_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_mahjong_matrix.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_upd4701.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_upd7001.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_adc0809.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_93c46_16.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_srmp7_bank.sv
 # rtl/video/ssv_sprite_decode.sv is intentionally absent: nothing in the build
 # instantiates it. Its only consumer was the legacy rtl/video/ssv_sprite_renderer.sv,
 # which is already out of the file list (the release uses the cached renderer).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_st0020_ctrl.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_gfx_row_fetch.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_palette_ram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_line_buffer4.sv

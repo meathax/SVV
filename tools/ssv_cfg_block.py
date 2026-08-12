@@ -7,7 +7,7 @@ same reason: nine sets of per-game behaviour is exactly where transcription
 goes wrong.
 
 The byte layout is documented in rtl/mem/ssv_rom_loader.sv and decoded into
-ssv_pkg::ssv_cfg_t. Byte 15 is the negated sum of bytes 0..14, so a truncated
+ssv_pkg::ssv_cfg_t. Descriptor v3 is 24 bytes; byte 23 is the negated sum, so a truncated
 or reordered block is rejected rather than half-applied.
 """
 
@@ -63,7 +63,7 @@ import re
 # geometries used by tools/ssv_supported_sets.py.  Keep these constraints here
 # so both descriptor generation and its focused tests reject an accidental
 # expansion to an unqualified MAME set.
-SUPPORTED_GFX_MB = (12, 16, 24, 32)
+SUPPORTED_GFX_MB = (12, 14, 16, 24, 32, 64)
 ODD_TILE_FACTORS = (1, 3)
 
 
@@ -124,7 +124,8 @@ def resolve_init(src, name, depth=0):
     identifier in the body tells you nothing about which way it was set.
     """
     body = _fn_body(src, name)
-    flags = {"tile_code_identity": False, "irq_level1_line0": False}
+    flags = {"tile_code_identity": False, "irq_level1_line0": False,
+             "irq_level2_line120": False}
     if not body or depth > 3:
         return flags
     # Inherit first, then let this body's own assignments override.
@@ -136,7 +137,47 @@ def resolve_init(src, name, depth=0):
     irq = re.findall(r"m_interrupt_ultrax\s*=\s*(true|false)", body)
     if irq:
         flags["irq_level1_line0"] = (irq[-1] == "true")
+    raster = re.findall(r"m_raster_interrupt_enabled\s*=\s*(true|false)", body)
+    if raster:
+        flags["irq_level2_line120"] = (raster[-1] == "true")
     return flags
+
+
+def family_map_features(map_name, ports_name, src=None):
+    """Descriptor-v3 map classes derived from MAME map/input declarations.
+
+    Values describe shared wiring classes.  They intentionally do not enter
+    the qualified-set manifest by themselves.
+    """
+    mahjong = {
+        "hypreact_map": 1, "hypreac2_map": 2, "janjans1_map": 3,
+        "srmp4_map": 4, "srmp7_map": 5,
+    }.get(map_name, 0)
+    layout = 1 if mahjong else 0
+    input_text = "\n".join(_input_bodies(src, ports_name)) if src else ""
+    if (ports_name and "quiz" in ports_name) or (
+            "IPT_BUTTON4" in input_text and "IPT_START1" in input_text):
+        layout = 2
+    if ports_name and any(tag in ports_name for tag in ("twineag2", "gdfs")):
+        layout = 3
+    return {
+        "mainram_mirror_010000": map_name == "mslider_map",
+        "mahjong_mode": mahjong,
+        "input_layout": layout,
+        # MAME-profile outputs implemented by a shared sink/register bank.
+        "custom_output_mode": 0,
+        "srmp7_sample_half_bank": map_name == "srmp7_map",
+        "srmp7_irqv_mame": map_name == "srmp7_map",
+        "optional_io_mode": (1 if map_name == "eaglshot_map" else
+                             2 if map_name == "sxyreact_map" else
+                             3 if map_name == "gdfs_map" else 0),
+        # MAME config uses 56 device clocks and itself marks the 1.5 MHz
+        # clock as a too-fast FIXME. Descriptor keeps this replaceable.
+        # GDFS' pinned driver specifies 1 MHz but labels it unknown. 64 core
+        # profile ticks is deterministic and intentionally replaceable.
+        "adc_conversion_cycles": (56 if map_name == "sxyreact_map" else
+                                  64 if map_name == "gdfs_map" else 0),
+    }
 
 
 def parse_inits(src):
@@ -232,13 +273,17 @@ def has_add_buttons(src, map_name):
 
 def has_nvram(src, map_name):
     """True when the address map decodes Cairblad's $580000 NVRAM window."""
-    return any("0x580000" in body for body in _addrmap_bodies(src, map_name))
+    return any(("0x580000" in body or "0xc00000" in body) and
+               'share("nvram")' in body
+               for body in _addrmap_bodies(src, map_name))
 
 
 def nvram_mode(src, map_name):
     """Return the exact MAME NVRAM window size: 0, 2 KiB, or 64 KiB."""
     for body in _addrmap_bodies(src, map_name):
         if re.search(r"0x580000\s*,\s*0x5807ff\)\.ram", body):
+            return 1
+        if re.search(r"0xc00000\s*,\s*0xc007ff\)\.ram", body):
             return 1
         if re.search(r"0x580000\s*,\s*0x58ffff\)\.ram", body):
             return 2
@@ -257,6 +302,8 @@ def extra_ram_mode(src, map_name):
             return 1
         if re.search(r"0x010000\s*,\s*0x03ffff\)\.ram\s*\(", body):
             return 2
+        if re.search(r"0x010000\s*,\s*0x050faf\)\.ram\s*\(", body):
+            return 3
     return 0
 
 
@@ -355,13 +402,16 @@ def graphics_quarters(gfx_region, gfx_load_end):
 def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
                     sample_mb, ens_valid, ens_map, flags, wdog,
                     visible_width, visible_height):
-    """Assemble the 16-byte block. Raises if a field will not fit."""
-    k, factor_code = decompose_tiles(gfx_region // 128)
-    quarters = graphics_quarters(gfx_region, gfx_load_end)
+    """Assemble the atomic 24-byte version-3 block. Raises if a field will not fit."""
+    if flags.get("optional_io_mode") == 1 and gfx_region == 14 << 20:
+        k, factor_code, quarters = 14, 0, 4
+    else:
+        k, factor_code = decompose_tiles(gfx_region // 128)
+        quarters = graphics_quarters(gfx_region, gfx_load_end)
     prog_mb = prog_size >> 20
     gfx_mb = gfx_region >> 20
     if not 0 <= game_id <= 7:
-        raise ValueError("game id %d is outside the version-2 profile" % game_id)
+        raise ValueError("game id %d is outside the descriptor profile" % game_id)
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
     if gfx_mb not in SUPPORTED_GFX_MB:
@@ -371,7 +421,7 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
         raise ValueError("visible width %d is not an encodable even width" % visible_width)
     if not 1 <= visible_height <= 255:
         raise ValueError("visible height %d does not fit" % visible_height)
-    if sample_mb not in (4, 8):
+    if sample_mb not in (4, 8, 24):
         raise ValueError("sample size %d MB is outside the supported profile" %
                          sample_mb)
     if ens_valid & ~0x0F:
@@ -381,15 +431,49 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     for bank in range(4):
         if ens_valid & (1 << bank):
             slot = (ens_map >> (bank * 2)) & 3
-            if slot >= sample_mb // 4:
+            if not flags.get("srmp7_sample_half_bank") and slot >= sample_mb // 4:
                 raise ValueError("ES5506 bank %d maps to absent slot %d" %
                                  (bank, slot))
     if wdog not in (0, 1, 2):
         raise ValueError("unsupported watchdog mode %r" % (wdog,))
+    input_layout = flags.get("input_layout", 0)
+    mahjong_mode = flags.get("mahjong_mode", 0)
+    custom_output_mode = flags.get("custom_output_mode", 0)
+    optional_io_mode = flags.get("optional_io_mode", 0)
+    adc_cycles = flags.get("adc_conversion_cycles", 0)
+    if input_layout not in (0, 1, 2, 3):
+        raise ValueError("unsupported input layout %r" % (input_layout,))
+    if mahjong_mode not in (0, 1, 2, 3, 4, 5):
+        raise ValueError("unsupported mahjong mode %r" % (mahjong_mode,))
+    if bool(mahjong_mode) != (input_layout == 1):
+        raise ValueError("mahjong mode and matrix input layout disagree")
+    if custom_output_mode != 0:
+        raise ValueError("unsupported custom output mode %r" %
+                         (custom_output_mode,))
+    if optional_io_mode not in (0, 1, 2, 3):
+        raise ValueError("unsupported optional I/O mode %r" % optional_io_mode)
+    if (optional_io_mode in (2, 3)) != (1 <= adc_cycles <= 255):
+        raise ValueError("ADC device mode requires a nonzero conversion count")
+    if optional_io_mode not in (2, 3) and adc_cycles != 0:
+        raise ValueError("ADC conversion count without ADC device mode")
+    if optional_io_mode == 1 and not (gfx_mb == 14 and
+            flags.get("lockout_inverted") and flags.get("has_nvram") and
+            flags.get("nvram_mode") == 1 and wdog == 0):
+        raise ValueError("Eagle Shot optional-device profile is incomplete")
+    if optional_io_mode == 2 and not (flags.get("lockout_inverted") and
+            flags.get("has_nvram") and flags.get("nvram_mode") == 2 and
+            wdog == 1):
+        raise ValueError("Sexy Reaction optional-device profile is incomplete")
+    if (flags.get("srmp7_sample_half_bank") or flags.get("srmp7_irqv_mame")) \
+            and mahjong_mode != 5:
+        raise ValueError("SRMP7 features require mahjong mode 5")
+    if (flags.get("srmp7_sample_half_bank") and
+            (sample_mb != 24 or ens_valid != 0x0F)):
+        raise ValueError("SRMP7 requires four banks in its 24 MiB sample image")
 
-    b = [0] * 16
+    b = [0] * 24
     b[0] = 0x53                 # magic 'S'
-    b[1] = 2                    # version
+    b[1] = 3                    # version
     b[2] = prog_mb
     b[3] = gfx_mb
     b[4] = k
@@ -405,8 +489,10 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
             (32 if flags.get("lockout_inverted") else 0) |
             ((flags.get("extra_input_mode", 0) & 0x03) << 6))
     extra_mode = flags.get("extra_ram_mode", 0)
-    if extra_mode not in (0, 1, 2):
+    if extra_mode not in (0, 1, 2, 3):
         raise ValueError("unsupported extra RAM mode %r" % (extra_mode,))
+    if extra_mode == 3 and mahjong_mode != 5:
+        raise ValueError("expanded SRMP7 RAM requires mahjong mode 5")
     nvram_size_mode = flags.get("nvram_mode", 0)
     if nvram_size_mode not in (0, 1, 2):
         raise ValueError("unsupported NVRAM mode %r" % (nvram_size_mode,))
@@ -419,7 +505,19 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     b[12] = sample_mb & 0x3F
     b[13] = visible_width // 2
     b[14] = visible_height
-    b[15] = (-sum(b[:15])) & 0xFF
+    # Family map/device classes.  All are derived flags and default to the
+    # original base board.  MAME 0.289 is the behavioral reference where no
+    # physical documentation exists.
+    b[15] = 1 if flags.get("mainram_mirror_010000") else 0
+    b[16] = input_layout
+    b[17] = mahjong_mode
+    b[18] = 1 if flags.get("irq_level2_line120") else 0
+    b[19] = custom_output_mode
+    b[20] = ((1 if flags.get("srmp7_sample_half_bank") else 0) |
+             (2 if flags.get("srmp7_irqv_mame") else 0))
+    b[21] = optional_io_mode
+    b[22] = adc_cycles
+    b[23] = (-sum(b[:23])) & 0xFF
     return b
 
 

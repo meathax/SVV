@@ -13,7 +13,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53020218100103440F0A110608A8F069</part>
+    <part>53030218100103440F0A110608A8F0000300000000000065</part>
   </rom>
   <rom index="0" zip="twineag2.zip">
     <!-- program -->

@@ -85,7 +85,8 @@ ssv_core dut (
     .sdr_p4_dout(sdr_p4_dout), .sdr_p4_ack(sdr_p4_ack),
     .in_dsw1(16'hffff), .in_dsw2(16'hfffd),
     .in_p1(16'hffff), .in_p2(16'hffff),
-    .in_system(16'hffff), .in_extra(16'hffff),
+    .in_system(16'hffff), .in_extra(16'hffff), .in_mahjong_rows(24'hffffff),
+    .in_coord_x(12'h800), .in_coord_y(12'h800), .in_paddle(8'h80), .in_ball_switch(1'b0),
     .rgb(rgb), .ce_pixel(ce_pixel), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
     .audio_l(audio_l), .audio_r(audio_r),
     .debug_pc(debug_pc), .debug_status(debug_status)

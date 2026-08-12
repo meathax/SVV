@@ -15,6 +15,9 @@ module ssv_irq (
     // which is why it is per game and not unconditional.
     input              line0_pulse,
     input              irq_level1_line0,
+    input              line120_pulse,
+    input              irq_level2_line120,
+    input              adc_eoc_pulse,
 
     input              vector_we,
     input        [2:0] vector_level,
@@ -62,6 +65,14 @@ always_comb begin
         requested_after_events[1] = 1'b1;
         irq_state_update = 1'b1;
     end
+    if (line120_pulse && irq_level2_line120) begin
+        requested_after_events[2] = 1'b1;
+        irq_state_update = 1'b1;
+    end
+    if (adc_eoc_pulse) begin
+        requested_after_events[6] = 1'b1;
+        irq_state_update = 1'b1;
+    end
 end
 
 always_ff @(posedge clk) begin
@@ -92,6 +103,10 @@ always_ff @(posedge clk) begin
         // vblank request, never instead of it.
         if (line0_pulse && irq_level1_line0)
             requested[1] <= 1'b1;
+        if (line120_pulse && irq_level2_line120)
+            requested[2] <= 1'b1;
+        if (adc_eoc_pulse)
+            requested[6] <= 1'b1;
 
         if (irq_state_update)
             irq_asserted <= |(requested_after_events & enabled);

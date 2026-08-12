@@ -176,7 +176,8 @@ wire ioctl_download, ioctl_upload, ioctl_wr, ioctl_rd, ioctl_wait;
 wire [15:0] ioctl_index;
 wire [26:0] ioctl_addr;
 wire [7:0] ioctl_dout;
-wire [31:0] joystick_0, joystick_1;
+wire [31:0] joystick_0, joystick_1, joystick_2, joystick_3;
+wire [15:0] joystick_l_analog_0;
 // Driven by hps_io, consumed by the video chain at the bottom of this file.
 // There is no gamma_bus: gamma_corr went with arcade_video.
 wire        forced_scandoubler;
@@ -295,7 +296,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .status_menumask({13'd0, ~status[24], ~hs_configured, 1'b0}),
     .forced_scandoubler(forced_scandoubler),
     .video_rotated(video_rotated),
-    .joystick_0(joystick_0), .joystick_1(joystick_1)
+    .joystick_0(joystick_0), .joystick_1(joystick_1),
+    .joystick_2(joystick_2), .joystick_3(joystick_3)
+    ,.joystick_l_analog_0(joystick_l_analog_0)
 );
 
 // V60 clock enable.
@@ -560,6 +563,8 @@ sdram sdram (
 //
 wire [31:0] joy_p1 = joystick_0;
 wire [31:0] joy_p2 = joystick_1;
+wire [31:0] joy_p3 = joystick_2;
+wire [31:0] joy_p4 = joystick_3;
 
 // MAME P1 ($210008) bits 7:0: UP, DOWN, LEFT, RIGHT, B1, B2, B3, START.
 // P1/P2 port bits: U D L R B1 B2 B3 START, active low. B3 is a real
@@ -569,6 +574,23 @@ function automatic [15:0] player_port(input [31:0] joy);
     player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
                               joy[4], joy[5], joy[6], joy[12]}};
 endfunction
+
+function automatic [15:0] quiz_port(input [31:0] joy);
+    quiz_port = {8'hff, ~{joy[4], joy[5], joy[6], joy[7],
+                            3'b000, joy[12]}};
+endfunction
+
+wire [15:0] p1_input_port = (game_cfg.input_layout == 4'd2)
+                          ? quiz_port(joy_p1) : player_port(joy_p1);
+wire [15:0] p2_input_port = (game_cfg.input_layout == 4'd2)
+                          ? quiz_port(joy_p2) : player_port(joy_p2);
+wire [23:0] mahjong_rows = {~joy_p4[9:4], ~joy_p3[9:4],
+                            ~joy_p2[9:4], ~joy_p1[9:4]};
+wire signed [7:0] analog_x = joystick_l_analog_0[7:0];
+wire signed [7:0] analog_y = joystick_l_analog_0[15:8];
+wire [11:0] optional_coord_x = 12'h800 + (12'($signed(analog_x)) <<< 3);
+wire [11:0] optional_coord_y = 12'h800 + (12'($signed(analog_y)) <<< 3);
+wire [7:0] optional_paddle = 8'h80 + 8'($signed(analog_x));
 
 // MAME ADD_BUTTONS ($500008): P1 B4-B6 on bits 0-2, P2 B4-B6 on bits 4-6,
 // active low, and ONLY survarts_map decodes the window. Gate it on the config
@@ -655,16 +677,19 @@ ssv_core core (
     .sdr_p4_req(p4_req), .sdr_p4_addr(p4_addr),
     .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
     .in_dsw1(dsw1_port), .in_dsw2(dsw2_port),
-    .in_p1(player_port(joy_p1)), .in_p2(player_port(joy_p2)),
+    .in_p1(p1_input_port), .in_p2(p2_input_port),
     .in_system(system_port),
     .in_extra(extra_input_port),
+    .in_mahjong_rows(mahjong_rows),
+    .in_coord_x(optional_coord_x), .in_coord_y(optional_coord_y),
+    .in_paddle(optional_paddle), .in_ball_switch(joy_p1[11]),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
     .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
-    .coin_lockout()
+    .coin_lockout(), .motor_output()
 );
 
 // ---------------------------------------------------------------------------

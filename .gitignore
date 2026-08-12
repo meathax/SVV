@@ -55,3 +55,17 @@ Thumbs.db
 
 # MAME MCP generated scripts/logs/state (mister-mame-diff skill)
 .mame_mcp/
+
+# MISTER-FPGA-AUTOPILOT-V4 START
+.mister/runs/*
+!.mister/runs/.gitkeep
+.mister/cache/*
+!.mister/cache/.gitkeep
+.mister/reports/*
+!.mister/reports/.gitkeep
+.mister/state.json
+.mister/release/
+.mister/provenance/licenses/*
+!.mister/provenance/licenses/.gitkeep
+.mister/donors/
+# MISTER-FPGA-AUTOPILOT-V4 END
