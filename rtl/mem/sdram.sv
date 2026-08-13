@@ -170,6 +170,19 @@ reg [12:0] open_row [0:7];
 integer    ri;
 reg [1:0]  ack_stretch;     // acks held 2 clk_ram cycles (clk_sys is /2 sync)
 
+// p5 is consumed by the ST010 fetcher in clk_sys, which is the synchronous
+// divide-by-two domain of this controller.  The old response register was
+// clocked on posedge clk_ram, so its very short local route could launch at
+// the same physical edge sampled by clk_sys.  That is a real cross-domain
+// hold violation (the retained fit measured -0.606 ns), not a simulation-only
+// warning.  Keep the controller's command/read machine on posedge clk_ram,
+// but transfer only the p5 response packet to a negedge register.  This gives
+// the clk_sys consumer a complete half clk_ram period of data/ack settling
+// while preserving the existing two-clk_ram acknowledgement contract.
+reg [63:0] p5_dout_pending;
+reg        p5_ack_pending;
+reg [1:0]  p5_ack_hold;
+
 reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
 
 // Request mailboxes.  Capture every transaction's metadata with its request;
@@ -335,7 +348,12 @@ task automatic deliver(input [15:0] final_word);
                                 cap_buf[3], cap_buf[2], cap_buf[1], cap_buf[0]}; p2_ack <= 1'b1; end
         3'd3: begin p3_dout <= final_word; p3_ack <= 1'b1; end
         3'd4: begin p4_dout <= final_word; p4_ack <= 1'b1; end
-        3'd5: begin p5_dout <= {final_word, cap_buf[2], cap_buf[1], cap_buf[0]}; p5_ack <= 1'b1; end
+        // p5 is intentionally phase-transferred below on negedge clk.  Do
+        // not drive its externally visible packet from this posedge process.
+        3'd5: begin
+            p5_dout_pending <= {final_word, cap_buf[2], cap_buf[1], cap_buf[0]};
+            p5_ack_pending   <= 1'b1;
+        end
         default: ;
     endcase
 endtask
@@ -343,13 +361,17 @@ endtask
 always @(posedge clk) begin
     cmd    <= CMD_NOP;
     dq_oe  <= 1'b0;
+    // A response is a one-shot request into the negedge phase-transfer
+    // register.  deliver() below may override this assignment on the same
+    // edge when the final read word arrives.
+    p5_ack_pending <= 1'b0;
 
     // acks: assert for 2 cycles so clk_sys (=clk/2, synchronous) always
     // samples exactly one rising edge with ack high
     if (ack_stretch != 0) ack_stretch <= ack_stretch - 1'd1;
     else begin
         p0_ack <= 1'b0; p1_ack <= 1'b0; p2_ack <= 1'b0;
-        p3_ack <= 1'b0; p4_ack <= 1'b0; p5_ack <= 1'b0; wr_ack <= 1'b0;
+        p3_ack <= 1'b0; p4_ack <= 1'b0; wr_ack <= 1'b0;
     end
 
     if (init) begin
@@ -364,6 +386,8 @@ always @(posedge clk) begin
         chip_sel <= 1'b0;
         cl_pipe  <= 6'b000000;
         ack_stretch <= 0;
+        p5_dout_pending <= '0;
+        p5_ack_pending   <= 1'b0;
         rr_next <= 3'd0;
     end
     else if (!ready) begin
@@ -615,6 +639,35 @@ always @(posedge clk) begin
         end
         default: state <= ST_IDLE;
         endcase
+    end
+end
+
+// Phase-transfer the ST010 response after the SDRAM read packet has been
+// assembled.  p5_ack is held for two clk_ram cycles so a clk_sys edge always
+// observes the packet after this negedge transfer, even when the response
+// coincides with a clk_sys edge.
+always @(negedge clk) begin
+    if (init) begin
+        p5_dout  <= '0;
+        p5_ack   <= 1'b0;
+        p5_ack_hold <= 2'd0;
+    end
+    else if (p5_ack_pending) begin
+        p5_dout     <= p5_dout_pending;
+        p5_ack      <= 1'b1;
+        p5_ack_hold <= 2'd2;
+    end
+    else if (p5_ack_hold != 0) begin
+        if (p5_ack_hold == 2'd1) begin
+            p5_ack      <= 1'b0;
+            p5_ack_hold <= 2'd0;
+        end
+        else begin
+            p5_ack_hold <= p5_ack_hold - 1'd1;
+        end
+    end
+    else begin
+        p5_ack <= 1'b0;
     end
 end
 

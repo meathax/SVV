@@ -512,7 +512,12 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
     b[16] = input_layout
     b[17] = mahjong_mode
     b[18] = 1 if flags.get("irq_level2_line120") else 0
-    b[19] = custom_output_mode
+    # Byte 19 bits 2:0 retain the MAME output class. Bits 3:5 are separate
+    # descriptor ABI extensions for shared MiSTer rapid-fire mappers.
+    b[19] = (custom_output_mode |
+             (8 if flags.get("rapid_fire_b3_to_b1") else 0) |
+             (16 if flags.get("rapid_fire_b1") else 0) |
+             (32 if flags.get("rapid_fire_b2") else 0))
     b[20] = ((1 if flags.get("srmp7_sample_half_bank") else 0) |
              (2 if flags.get("srmp7_irqv_mame") else 0))
     b[21] = optional_io_mode

@@ -15,6 +15,7 @@ from ssv_supported_sets import (
     RETIRED_LOCAL_SETS,
     SUPPORTED_SETS,
     SUPPORTED_SET_IDS,
+    DESCRIPTOR_FEATURE_OVERRIDES,
 )
 
 
@@ -222,7 +223,7 @@ def main() -> int:
             fail(f"{setname}: descriptor has non-zero reserved/high bits", errors)
         if ((cfg[15] & 0xFE) or (cfg[16] & 0xF0) or
                 (cfg[17] & 0xF8) or (cfg[18] & 0xFE) or
-                (cfg[19] & 0xF8) or (cfg[20] & 0xFC) or
+                (cfg[19] & 0xC0) or (cfg[20] & 0xFC) or
                 (cfg[21] & 0xFC)):
             fail(f"{setname}: descriptor-v3 reserved bits are non-zero", errors)
         input_layout, mahjong_mode = cfg[16] & 0x0F, cfg[17] & 0x07
@@ -234,6 +235,11 @@ def main() -> int:
             fail(f"{setname}: mahjong mode/input layout disagree", errors)
         if cfg[19] & 0x07:
             fail(f"{setname}: unsupported custom output mode {cfg[19] & 7}", errors)
+        rapid_features = DESCRIPTOR_FEATURE_OVERRIDES.get(setname, {})
+        if (bool(cfg[19] & 0x08) != bool(rapid_features.get("rapid_fire_b3_to_b1")) or
+                bool(cfg[19] & 0x10) != bool(rapid_features.get("rapid_fire_b1")) or
+                bool(cfg[19] & 0x20) != bool(rapid_features.get("rapid_fire_b2"))):
+            fail(f"{setname}: rapid-fire descriptor feature mismatch", errors)
         if (cfg[20] & 0x03) and mahjong_mode != 5:
             fail(f"{setname}: SRMP7 flags require mahjong mode 5", errors)
         optional_io_mode = cfg[21] & 3

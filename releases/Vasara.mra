@@ -12,7 +12,7 @@
   <bootleg>no</bootleg>
   <rotation>vertical (ccw)</rotation>
   <rom index="1">
-    <part>53030420120004040300220208A8F00000000000000000A5</part>
+    <part>53030420120004040300220208A8F000000000080000009D</part>
   </rom>
   <rom index="0" zip="vasara.zip">
     <!-- program -->
@@ -53,5 +53,5 @@
     <dip bits="14" name="Game Voice" ids="Off,On" values="0,1"/>
     <dip bits="15" name="English Subtitles" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Attack,Bomb,-,-,-,-,Start,Coin,Service,Test" default="A,B,Start,Select,R,L" count="2"/>
+  <buttons names="Attack,Bomb,Rapid Fire,-,-,-,Start,Coin,Service,Test" default="A,B,X,Start,Select,R,L" count="3"/>
 </misterromdescription>

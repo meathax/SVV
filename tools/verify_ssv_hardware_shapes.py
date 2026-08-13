@@ -53,6 +53,15 @@ EXPECTED_MEMORIES = {
     ),
 }
 
+UNREACHABLE_RELEASE_INSTANCES = (
+    "ssv_mahjong_matrix mahjong_matrix",
+    "ssv_upd4701 optional_upd4701",
+    "ssv_upd7001 optional_upd7001",
+    "ssv_adc0809 optional_gdfs_adc",
+    "ssv_93c46_16 optional_gdfs_eeprom",
+    "ssv_st0020_ctrl optional_st0020_ctrl",
+)
+
 
 def audit(root: Path) -> dict:
     errors: list[str] = []
@@ -96,6 +105,16 @@ def audit(root: Path) -> dict:
         for pattern in patterns:
             if not re.search(pattern, text, re.DOTALL):
                 errors.append(f"expected flat memory/ramstyle intent missing in {item}: {pattern}")
+
+    core_path = root / "rtl/ssv_core.sv"
+    core_text = COMMENT_RE.sub(
+        "", core_path.read_text(encoding="utf-8", errors="replace")
+    ) if core_path.is_file() else ""
+    for instance in UNREACHABLE_RELEASE_INSTANCES:
+        if instance in core_text:
+            errors.append(
+                "unsupported optional device instantiated in universal core: " + instance
+            )
 
     git = subprocess.run(
         ["git", "-C", str(root), "status", "--porcelain", "--", "sys"],

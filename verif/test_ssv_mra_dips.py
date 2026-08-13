@@ -21,8 +21,8 @@ MAME_TO_MRA_ROTATION = {
 EXPECTED_BUTTONS = {
     "dynagear": ("Jump,Attack,-,-,-,-,Start,Coin,Service,Test", 2),
     "cairblad": ("Fire,Bomb,Special,-,-,-,Start,Coin,Service,Test", 3),
-    "vasara": ("Attack,Bomb,-,-,-,-,Start,Coin,Service,Test", 2),
-    "vasara2": ("Attack,Vasara Attack,-,-,-,-,Start,Coin,Service,Test", 2),
+    "vasara": ("Attack,Bomb,Rapid Fire,-,-,-,Start,Coin,Service,Test", 3),
+    "vasara2": ("Attack,Vasara Attack,Rapid Fire,-,-,-,Start,Coin,Service,Test", 3),
     "drifto94": ("Brake,Accelerate,-,-,-,-,Start,Coin,Service,Test", 2),
     "stmblade": ("Fire,Bomb,-,-,-,-,Start,Coin,Service,Test", 2),
     "twineag2": ("Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test", 3),

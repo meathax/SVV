@@ -105,7 +105,8 @@ function automatic logic [191:0] encode_cfg_v3(input ssv_cfg_t c);
         b[16] = {4'd0, c.input_layout};
         b[17] = {5'd0, c.mahjong_mode};
         b[18] = {7'd0, c.irq_level2_line120};
-        b[19] = {5'd0, c.custom_output_mode};
+        b[19] = {2'd0, c.rapid_fire_b2, c.rapid_fire_b1,
+                 c.rapid_fire_b3_to_b1, c.custom_output_mode};
         b[20] = {6'd0, c.srmp7_irqv_mame, c.srmp7_sample_half_bank};
         b[21] = {6'd0, c.optional_io_mode};
         b[22] = c.adc_conversion_cycles;
@@ -337,10 +338,14 @@ initial begin
     cairblad_cfg.mainram_mirror_010000 = 1'b1;
     cairblad_cfg.input_layout = 4'd2;
     cairblad_cfg.irq_level2_line120 = 1'b1;
+    cairblad_cfg.rapid_fire_b3_to_b1 = 1'b1;
+    cairblad_cfg.rapid_fire_b1 = 1'b1;
+    cairblad_cfg.rapid_fire_b2 = 1'b1;
     v3_image = encode_cfg_v3(cairblad_cfg);
     send_cfg_v3_version_last(v3_image);
     if (!cfg_valid || !cfg.mainram_mirror_010000 ||
-        cfg.input_layout !== 4'd2 || !cfg.irq_level2_line120)
+        cfg.input_layout !== 4'd2 || !cfg.irq_level2_line120 ||
+        !cfg.rapid_fire_b3_to_b1 || !cfg.rapid_fire_b1 || !cfg.rapid_fire_b2)
         $fatal(1, "version-3 extension did not commit atomically");
 
     // A complete checksum-valid image with an unsupported enum fails closed.

@@ -218,8 +218,13 @@ initial begin
             active_height_cfg(cfg_drifto94()) !== 9'd238 ||
             cfg_vasara().system_input_mode !== 1'b1 ||
             cfg_vasara2().system_input_mode !== 1'b1 ||
+            !cfg_vasara().rapid_fire_b3_to_b1 ||
+            !cfg_vasara2().rapid_fire_b3_to_b1 ||
+            !cfg_twineag2().rapid_fire_b1 || !cfg_twineag2().rapid_fire_b2 ||
             cfg_drifto94().system_input_mode !== 1'b0 ||
-            cfg_dynagear().system_input_mode !== 1'b0) begin
+            cfg_dynagear().system_input_mode !== 1'b0 ||
+            cfg_dynagear().rapid_fire_b3_to_b1 || cfg_dynagear().rapid_fire_b1 ||
+            cfg_dynagear().rapid_fire_b2) begin
             errors++;
             $display("FAIL descriptor geometry/system-input mode");
         end

@@ -32,6 +32,14 @@ SUPPORTED_SET_IDS = {
     setname: game_id for game_id, setname in enumerate(SUPPORTED_SETS)
 }
 
+# MiSTer-only convenience controls selected by the profile descriptor.  This
+# is deliberately metadata, never a synthesizable set-name branch.
+DESCRIPTOR_FEATURE_OVERRIDES = {
+    "vasara": {"rapid_fire_b3_to_b1": True},
+    "vasara2": {"rapid_fire_b3_to_b1": True},
+    "twineag2": {"rapid_fire_b1": True, "rapid_fire_b2": True},
+}
+
 # Execution scope for the current source-exhaustion/real-game proof pass.
 # This remains separate from SUPPORTED_SETS so future diagnostic subsets cannot
 # silently change the release profile.

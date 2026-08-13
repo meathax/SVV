@@ -5,6 +5,7 @@
 module tb_ssv_input_matrix;
 
 logic [31:0] joy_p1, joy_p2;
+logic clk, rst, frame_tick, rapid_fire_b3_to_b1, rapid_fire_b1, rapid_fire_b2;
 logic [3:0] input_layout;
 logic system_input_mode;
 logic [1:0] extra_input_mode;
@@ -13,6 +14,8 @@ logic [15:0] p1_port, p2_port, system_port, extra_port;
 integer fails;
 
 ssv_input_ports dut (.*);
+
+always #5 clk = ~clk;
 
 task automatic expect16(input string name, input [15:0] got, input [15:0] exp);
     if (got !== exp) begin
@@ -25,6 +28,13 @@ task automatic settle;
     #1;
 endtask
 
+task automatic frame;
+    frame_tick = 1'b1;
+    @(posedge clk); #1;
+    frame_tick = 1'b0;
+    @(posedge clk); #1;
+endtask
+
 // DIP bytes are direct wrapper passthroughs and remain checked independently;
 // they are not descriptor-selected cabinet transforms handled by the DUT.
 function automatic logic [15:0] dsw_port(input logic [7:0] value);
@@ -33,12 +43,18 @@ endfunction
 
 initial begin
     fails = 0;
+    clk = 1'b0; rst = 1'b1; frame_tick = 1'b0;
     joy_p1 = '0; joy_p2 = '0;
     input_layout = 4'd0;
     system_input_mode = 1'b0;
     extra_input_mode = 2'd0;
+    rapid_fire_b3_to_b1 = 1'b0;
+    rapid_fire_b1 = 1'b0;
+    rapid_fire_b2 = 1'b0;
     test_button = 1'b0; service_button = 1'b0;
     coin1_button = 1'b0; coin2_button = 1'b0;
+    @(posedge clk); #1;
+    rst = 1'b0;
     settle();
 
     expect16("P1 idle", p1_port, 16'hffff);
@@ -53,6 +69,43 @@ initial begin
     joy_p1 = 32'h0000_0040; settle(); expect16("P1 B3", p1_port, 16'hfffd);
     joy_p1 = 32'h0000_1000; settle(); expect16("P1 START", p1_port, 16'hfffe);
     joy_p1 = 32'hffff_ffff; settle(); expect16("P1 all", p1_port, 16'hff00);
+
+    // Vasara's descriptor-selected convenience mapping takes the otherwise
+    // unused B3 J1 slot as the rapid-fire trigger. At the native 60 Hz frame
+    // boundary, phase 0/1 press B1 and phase 2/3 release it: 15 Hz, with no
+    // host-polling or CPU-enable dependency. Physical B1 remains live.
+    joy_p1 = 32'h0000_0040; joy_p2 = 32'h0000_0040;
+    rapid_fire_b3_to_b1 = 1'b1; settle();
+    expect16("rapid P1 phase0 B1", p1_port, 16'hfff7);
+    expect16("rapid P2 phase0 B1", p2_port, 16'hfff7);
+    frame();
+    expect16("rapid P1 phase1 B1", p1_port, 16'hfff7);
+    frame();
+    expect16("rapid P1 phase2 release", p1_port, 16'hffff);
+    frame();
+    expect16("rapid P2 phase3 release", p2_port, 16'hffff);
+    joy_p1 = 32'h0000_0050; settle();
+    expect16("rapid physical B1 persists", p1_port, 16'hfff7);
+    frame();
+    joy_p1 = 32'h0000_0040; settle();
+    expect16("rapid wraps phase0", p1_port, 16'hfff7);
+    rapid_fire_b3_to_b1 = 1'b0; settle();
+    expect16("normal B3 restored when rapid disabled", p1_port, 16'hfffd);
+
+    // Twin Eagle II uses the same descriptor-timed cadence directly on its
+    // existing Cannon (B1) and Ground Attack (B2) controls; it has no MRA
+    // control remap. Both players must share the phase precisely.
+    rapid_fire_b1 = 1'b1; rapid_fire_b2 = 1'b1;
+    joy_p1 = 32'h0000_0030; joy_p2 = 32'h0000_0030; settle();
+    expect16("auto B1/B2 P1 phase0", p1_port, 16'hfff3);
+    expect16("auto B1/B2 P2 phase0", p2_port, 16'hfff3);
+    frame(); frame();
+    expect16("auto B1/B2 P1 phase2 release", p1_port, 16'hffff);
+    expect16("auto B1/B2 P2 phase2 release", p2_port, 16'hffff);
+    frame(); frame();
+    expect16("auto B1/B2 phase0 wrap", p1_port, 16'hfff3);
+    rapid_fire_b1 = 1'b0; rapid_fire_b2 = 1'b0;
+    joy_p1 = '0; joy_p2 = '0;
 
     // Quiz layout maps B1-B4 to bits 7:4 and retains START on bit 0.
     input_layout = 4'd2;

@@ -212,6 +212,7 @@ def main():
     gfx_loaded = sum(l['size'] for r in gfx for l in r['loads'])
     ens_valid, ens_map = gen.ensoniq_banks(regions)
     flags = cfgblk.resolve_init(text, game['init'])
+    flags.update(gen.DESCRIPTOR_FEATURE_OVERRIDES.get(setname, {}))
     amap = cfgblk.resolve_addrmap(text, game['machine'])
     flags['has_add_buttons'] = cfgblk.has_add_buttons(text, amap) if amap else False
     flags['has_st010'] = cfgblk.has_st010(regions)

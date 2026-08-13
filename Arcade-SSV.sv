@@ -582,12 +582,17 @@ wire coin1_button = joy_p1[11];
 wire coin2_button = joy_p2[11];
 wire [15:0] system_port;
 wire [15:0] extra_input_port;
+wire core_frame_tick;
 
 ssv_input_ports input_ports (
+    .clk(clk_sys), .rst(core_cold_reset), .frame_tick(core_frame_tick),
     .joy_p1(joy_p1), .joy_p2(joy_p2),
     .input_layout(game_cfg.input_layout),
     .system_input_mode(game_cfg.system_input_mode),
     .extra_input_mode(game_cfg.extra_input_mode),
+    .rapid_fire_b3_to_b1(game_cfg.rapid_fire_b3_to_b1),
+    .rapid_fire_b1(game_cfg.rapid_fire_b1),
+    .rapid_fire_b2(game_cfg.rapid_fire_b2),
     .test_button(test_button), .service_button(service_button),
     .coin1_button(coin1_button), .coin2_button(coin2_button),
     .p1_port(p1_input_port), .p2_port(p2_input_port),
@@ -653,6 +658,7 @@ ssv_core core (
     .in_mahjong_rows(mahjong_rows),
     .in_coord_x(optional_coord_x), .in_coord_y(optional_coord_y),
     .in_paddle(optional_paddle), .in_ball_switch(joy_p1[11]),
+    .frame_tick(core_frame_tick),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
     .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),

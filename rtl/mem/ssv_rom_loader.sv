@@ -155,6 +155,9 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
     cfg_decode.input_layout       = (cfg_raw[1] == 8'd3) ? cfg_raw[16][3:0] : 4'd0;
     cfg_decode.mahjong_mode       = (cfg_raw[1] == 8'd3) ? cfg_raw[17][2:0] : 3'd0;
     cfg_decode.custom_output_mode = (cfg_raw[1] == 8'd3) ? cfg_raw[19][2:0] : 3'd0;
+    cfg_decode.rapid_fire_b3_to_b1 = (cfg_raw[1] == 8'd3) && cfg_raw[19][3];
+    cfg_decode.rapid_fire_b1       = (cfg_raw[1] == 8'd3) && cfg_raw[19][4];
+    cfg_decode.rapid_fire_b2       = (cfg_raw[1] == 8'd3) && cfg_raw[19][5];
     cfg_decode.srmp7_sample_half_bank = (cfg_raw[1] == 8'd3) && cfg_raw[20][0];
     cfg_decode.srmp7_irqv_mame    = (cfg_raw[1] == 8'd3) && cfg_raw[20][1];
     cfg_decode.optional_io_mode   = (cfg_raw[1] == 8'd3) ? cfg_raw[21][1:0] : 2'd0;
@@ -249,7 +252,7 @@ function automatic logic cfg_domain_valid();
               (cfg_raw[16][7:4] == 4'd0) &&
               (cfg_raw[17][7:3] == 5'd0) &&
               (cfg_raw[18][7:1] == 7'd0) &&
-              (cfg_raw[19][7:3] == 5'd0) &&
+              (cfg_raw[19][7:6] == 2'd0) &&
               (cfg_raw[20][7:2] == 6'd0) &&
               (cfg_raw[21][7:2] == 6'd0)));
         if (cfg_raw[1] == 8'd3) begin

@@ -249,6 +249,11 @@ package ssv_pkg;
         logic [3:0] input_layout;
         logic [2:0] mahjong_mode;
         logic [2:0] custom_output_mode;
+        // Descriptor-selected MiSTer convenience inputs. These are not PCB
+        // features: each selects one shared frame-timed mapper.
+        logic       rapid_fire_b3_to_b1;
+        logic       rapid_fire_b1;
+        logic       rapid_fire_b2;
         logic       srmp7_sample_half_bank;
         logic       srmp7_irqv_mame;
         // 1 Eagle/uPD4701, 2 Sexy/uPD7001, 3 GDFS/ST0020+ADC+EEPROM.
@@ -311,6 +316,7 @@ package ssv_pkg;
         cfg_vasara.sample_mb = 6'd8;
         cfg_vasara.wdog_mode = 2'd2;
         cfg_vasara.system_input_mode = 1'b1;
+        cfg_vasara.rapid_fire_b3_to_b1 = 1'b1;
         cfg_vasara.visible_width_half = 8'd168;
         cfg_vasara.visible_height = 8'd240;
     endfunction
@@ -361,6 +367,8 @@ package ssv_pkg;
         cfg_twineag2.sample_mb        = 6'd8;
         cfg_twineag2.wdog_mode        = 2'd1;
         cfg_twineag2.extra_ram_mode   = 2'd2; // twineag2_map $010000-$03ffff
+        cfg_twineag2.rapid_fire_b1    = 1'b1;
+        cfg_twineag2.rapid_fire_b2    = 1'b1;
         // twineag2() restores the standard 336-pixel SSV visible width;
         // do not inherit STM Blade's wider 352-pixel machine configuration.
         cfg_twineag2.visible_width_half = 8'd168;

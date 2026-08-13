@@ -19,7 +19,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ssv_cfg_block as cfgblk
-from ssv_supported_sets import SUPPORTED_SETS, SUPPORTED_SET_IDS
+from ssv_supported_sets import (SUPPORTED_SETS, SUPPORTED_SET_IDS,
+                                DESCRIPTOR_FEATURE_OVERRIDES)
 
 # The core's J1 list is ten entries: six game buttons followed by
 # Start/Coin/Service/Test. Keep that positional list in every MRA, using '-'
@@ -37,10 +38,10 @@ BUTTONS = {
                  'A,B,Start,Select,R,L', 2),
     'cairblad': ('Fire,Bomb,Special,-,-,-,Start,Coin,Service,Test',
                  'A,B,X,Start,Select,R,L', 3),
-    'vasara': ('Attack,Bomb,-,-,-,-,Start,Coin,Service,Test',
-               'A,B,Start,Select,R,L', 2),
-    'vasara2': ('Attack,Vasara Attack,-,-,-,-,Start,Coin,Service,Test',
-                'A,B,Start,Select,R,L', 2),
+    'vasara': ('Attack,Bomb,Rapid Fire,-,-,-,Start,Coin,Service,Test',
+               'A,B,X,Start,Select,R,L', 3),
+    'vasara2': ('Attack,Vasara Attack,Rapid Fire,-,-,-,Start,Coin,Service,Test',
+                'A,B,X,Start,Select,R,L', 3),
     'drifto94': ('Brake,Accelerate,-,-,-,-,Start,Coin,Service,Test',
                  'A,B,Start,Select,R,L', 2),
     'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test',
@@ -519,6 +520,7 @@ def main():
             prog_size = prog[0]['size'] if prog else 0
             ens_valid, ens_map = ensoniq_banks(regions)
             flags = cfgblk.resolve_init(src, g['init'])
+            flags.update(DESCRIPTOR_FEATURE_OVERRIDES.get(setname, {}))
             amap = cfgblk.resolve_addrmap(src, g['machine'])
             flags.update(cfgblk.family_map_features(amap, g['ports'], src))
             flags['extra_input_mode'] = (

@@ -1,5 +1,55 @@
 # Pre-RBF optimization notes
 
+## Qualified-profile optional-device pruning (13 Aug 2026, no Quartus/RBF)
+
+The retained 13 Aug synthesis report showed that optional hardware unreachable
+from every descriptor in `tools/ssv_supported_sets.py` was still instantiated
+in the universal core. The largest block was the GDFS serial EEPROM at 663
+combinational ALUTs; the GDFS ADC, Eagle Shot uPD4701, Sexy Reaction uPD7001,
+mahjong matrix and their address/readback muxes added further logic. Their
+standalone source and focused benches remain available, but the release
+`ssv_core` no longer instantiates these unsupported families. The eight
+qualified descriptors select none of them.
+
+ST010, ES5506, NVRAM, every qualified RAM/ROM geometry, watchdog mode,
+descriptor-selected system/extra inputs and the new frame-timed rapid-fire
+controls remain in the shared runtime profile. The retained report measured
+`ssv_input_ports` at only four ALUTs, so duplicating or specializing the input
+mapper would save essentially nothing and would weaken the one-profile design.
+A source audit now rejects re-instantiating the unreachable optional families.
+
+This is a source-shape optimization only. Headless Verilator regressions and
+the profile/media audit must pass after the edit; only a later explicitly
+authorized Quartus map can measure the actual ALM/placement change. No Quartus
+stage or RBF build was run for this change.
+
+## ST010 SDRAM response phase transfer (12 Aug 2026, no Quartus/RBF)
+
+The retained fresh fit exposed one actual negative-hold path outside the HDMI
+domain: the 64-bit ST010 p5 response launched from `clk_ram` directly into the
+`clk_sys` fetch line register (`-0.606 ns`). The p5 packet and its two-cycle
+acknowledgement are now assembled on the existing controller edge and
+transferred through a dedicated `negedge clk_ram` response register before the
+fetcher sees them. This preserves the request/line-cache protocol while
+providing a half-cycle of settling margin at the synchronous divide-by-two
+consumer. The renderer also now has simulation-fatal ownership/deadline
+invariants for the shared p2 acknowledgement and line-start scheduler.
+
+The ST010 fetch arithmetic, SDRAM command timing, 128 MB module contract,
+round-robin fairness, loader image, scandoubler cadence, core memory windows
+and 30-frame hang/renderer-watch regressions pass under headless Verilator with
+assertions and one runtime thread. A 120-frame Dyna Gear real-SDRAM run also
+completed with zero renderer overruns; its intentionally short window did not
+claim the 360-frame attract gate. A 360-frame Drift Out real-SDRAM replay
+completed its declared frame window with no overrun or watchdog failure, but
+did not reach the separate attract milestone, which remains an existing
+real-game qualification gap.
+
+The negative HDMI setup path remains inside the vendored `sys/ascal` scaler.
+No PLL, generated IP, `sys_top`, `ascal`, false-path constraint or speculative
+placement assignment was changed. A fresh authorized Quartus fit and physical
+HDMI/audio/display soak are required before claiming that domain closed.
+
 ## Audio/renderer ownership and HDMI placement pass (12 Aug 2026, no Quartus/RBF)
 
 Hardware feedback on the retained seed-15 RBF reported harsh/static sound in
