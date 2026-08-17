@@ -1,1 +1,20 @@
-{"id":"attract_idle","set":"twineag2","mame":"0.288","mra":"Twin Eagle II - The Rescue Mission.mra","inputs":{"in_p1":"0xFFFF","in_p2":"0xFFFF","in_system":"0xFFFF","in_extra":"0xFFFF"},"geometry":{"active_w":336,"active_h":240}}
+{
+  "id": "attract_idle",
+  "set": "twineag2",
+  "mame": "0.289",
+  "mra": "Twin Eagle II - The Rescue Mission.mra",
+  "mra_sha256": "20818135426578015cc4a31aa702077e68aa05a0255d9c7ef4633fe9111279e4",
+  "rom_zip": "twineag2.zip",
+  "rom_zip_sha256": "6f82463d0f41b44bd0c706904318121ca63a6b0e1508aa2d15a2b1850f2ed02c",
+  "maincpu_sha256": "7ba42c2adfc983321aa33ee8fc2eb916565dd7fc1d5ff4d97cc225473081074b",
+  "sprites_sha256": "277fca09d9991d2731765ff8607a2e9a2716237180f891bddd10d2ec1f1f4939",
+  "samples_sha256": "1ecdcd3add9a5fc2fa42b322d3a5b6d7d603a3846fded944cc4f8bbf9e80c8cf",
+  "st010_sha256": "6ccc192e9e965347dda948170f530ced5a63e16dbc87f8c93b3c1f1ad83cdfd6",
+  "dsw1": "0x00FF",
+  "dsw2": "0x00FF",
+  "inputs": {"in_p1": "0xFFFF", "in_p2": "0xFFFF", "in_system": "0xFFFF", "in_extra": "0xFFFF"},
+  "geometry": {"active_w": 336, "active_h": 240, "orientation": "vertical_ccw"},
+  "hardware": {"program_bytes": 2097152, "graphics_bytes": 18874368, "sample_bytes": 8388608, "nvram": "none", "st010": true, "es5506_aliases": 4, "irq_level": 1},
+  "stop": {"kind": "later_of", "after_video_enable_frames": 360, "after_attract_marker_neutral_frames": 120, "attract_marker": "attract_mode", "barrier": "complete_native_frame"},
+  "outputs": {"native_frames": true, "audio_pcm": true, "state_hashes": true, "canonical_trace": true, "comparator_receipt": true}
+}

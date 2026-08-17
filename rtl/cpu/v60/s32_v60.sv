@@ -37,7 +37,17 @@ module s32_v60 #(
     // instead of the ce-gated 16-bit data adapter.  This is what makes the
     // prefetch pay off on the production (gated-ce) build; the unit testbenches
     // run ce=1 (adapter already fast) and leave it 0 so if_* can stay unconnected.
-    parameter        FAST_IFETCH = 1'b0
+    parameter        FAST_IFETCH = 1'b0,
+    // EXEC_RETIRE=1: allowlisted register-only operations retire the sequential
+    // fetch window on the execute edge. Memory destinations, control transfers,
+    // iterative operations, and all external bus transactions retain their
+    // existing sequencing. This is the proven S32 V60 overlap contract,
+    // adapted to SVV's existing fetch-window implementation.
+`ifdef V60_NO_EXEC_RETIRE
+    parameter        EXEC_RETIRE = 1'b0
+`else
+    parameter        EXEC_RETIRE = 1'b1
+`endif
 )(
     input             clk,
     input             ce,            // 16.108 MHz (V60) / 20 MHz (V70) enable
@@ -79,7 +89,15 @@ module s32_v60 #(
     // mirror registers or status ports.
     , output reg [31:0] dbg_pc,
     output            dbg_halted,
-    output            dbg_retire
+    // This pulse names an architectural instruction boundary: the previous
+    // instruction (if any) has completed and fb[0] is the next opcode about
+    // to be dispatched.  Keeping the definition here, instead of inferring it
+    // hierarchically in a bench, makes MAME/RTL sampling semantics reviewable.
+    output            dbg_retire,
+    output     [31:0] dbg_retire_pc,
+    output      [7:0] dbg_retire_opcode,
+    output     [31:0] dbg_retire_psw,
+    output    [1023:0] dbg_gpr_flat
 `endif
 );
 
@@ -361,6 +379,13 @@ typedef enum logic [6:0] {
 st_t st, st_after_ea, st_after_fill;
 `ifdef SIMULATION
 assign dbg_retire = ce && (st == S_DECODE) && !halted;
+assign dbg_retire_pc = pc;
+assign dbg_retire_opcode = fb[0];
+assign dbg_retire_psw = psw;
+generate
+    for (genvar dbg_gpr_i = 0; dbg_gpr_i < 32; dbg_gpr_i = dbg_gpr_i + 1)
+        assign dbg_gpr_flat[dbg_gpr_i * 32 +: 32] = r[dbg_gpr_i];
+endgenerate
 `endif
 
 // A control-flow decode may replace the active fetch window with the retained
@@ -371,6 +396,11 @@ assign dbg_retire = ce && (st == S_DECODE) && !halted;
 wire pf_decode_redirect = (st == S_DECODE) &&
     ((opcode[7:4] == 4'h6) || (opcode[7:4] == 4'h7) ||
      (opcode == 8'h48) || (opcode == 8'hc6) || (opcode == 8'hc7));
+
+// RSR is a non-sequential control transfer.  A prefetch acknowledgement
+// landing on the same edge as its popped PC must not append bytes from the
+// interrupted instruction stream into the newly rebased window.
+wire rsr_rebase_now = (st == S_RSR && dack);
 
 // One restoring-division bit per enabled CPU clock.  The 33-bit trial value
 // is the only compare/subtract datapath used for all 64 dividend bits.
@@ -398,6 +428,30 @@ typedef enum logic [4:0] {
 cls_t cls;
 
 reg [7:0] cur_op;
+
+// S32's mature V60 overlaps the EXU result commit with the sequential fetch
+// window handoff for a deliberately small allowlist. Keep the candidate
+// predicate independent of any game/profile identity: only instruction class,
+// decoded register-vs-memory form, and opcode decide whether it is eligible.
+// The shift is capped at four bytes, matching SVV's established S_NEXT path.
+wire [4:0] exec_retire_len = (cls == C_SHORT) ? (5'd1 + len1)
+                                                 : (5'd2 + len1 + len2);
+wire [4:0] exec_retire_s = (exec_retire_len >= 5'd4) ? 5'd4 : exec_retire_len;
+wire       exec_retire_f12 = (cls == C_F12) &&
+                             f12_simple_register_retire(cur_op) &&
+                             (flag2 || f12_no_writeback(cur_op));
+wire       exec_retire_short = (cls == C_SHORT) &&
+                               short_simple_register_retire(cur_op) &&
+                               (flag1 || short_no_writeback(cur_op));
+wire       exec_retire_candidate = EXEC_RETIRE && (st == S_EXEC) &&
+                                   (exec_retire_f12 || exec_retire_short);
+wire       exec_retire_shift_ok = exec_retire_candidate && (fb_base == pc) &&
+                                  (exec_retire_len != 5'd0) &&
+                                  (exec_retire_len < fb_valid);
+wire [4:0] exec_retire_valid_after = fb_valid - exec_retire_len;
+wire       exec_retire_dispatch_now = exec_retire_shift_ok &&
+                                      (exec_retire_len <= 5'd4) &&
+                                      (exec_retire_valid_after >= FB_THRESH);
 
 // Consolidate every dynamic general-register read onto two explicit ports.
 // The architectural register array remains flip-flop based with its existing
@@ -810,17 +864,14 @@ else if (ce) begin
                 st <= st_after_fill;
         end
     end
-    // S_FILLW is retained for the enum but no longer reached: instruction fetch
-    // is performed asynchronously by the PFU (see the prefetch block below).
-    S_FILLW: if (dack) begin
-        dbus_req <= 0;
-        for (int i = 0; i < 24; i++)
-            if (i >= fb_wr && i < fb_wr + 4)
-                fb[i] <= bus_rdata[(i - fb_wr)*8 +: 8];
-        fb_valid <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
-        fb_wr    <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
-        st <= S_FILL;
-    end
+    // S_FILLW: no case arm.  Instruction fetch is performed asynchronously by
+    // the PFU (see the prefetch block below), and no assignment anywhere sets
+    // st <= S_FILLW, so this state is unreachable.  The enum literal is kept
+    // at its declaration position because the state encoding is consumed by
+    // tools/analyze_v60_state_profile.py (declaration-order index table); the
+    // dead synchronous body is removed so it cannot hide a bug and cannot
+    // contribute inputs to the fb[]/fb_valid/fb_wr registered multiplexers.
+    // Unreachable states fall through to the `default` arm (st <= S_RESET).
 
     // ------------------------------------------------------------------
     S_DECODE: begin
@@ -1129,7 +1180,7 @@ else if (ce) begin
             default: begin
                 exc_vector <= 8'd8; exc_pushval <= psw; st <= S_EXC_PUSH1;
                 // synthesis translate_off
-                $display("V60: unimplemented 59 sub %02x at %08x", fb[1], pc);
+                $fatal(1, "V60_UNIMPLEMENTED pc=%08x opcode=59 sub=%02x", pc, fb[1]);
                 // synthesis translate_on
             end
             endcase
@@ -1149,7 +1200,7 @@ else if (ce) begin
             default: begin
                 exc_vector <= 8'd8; exc_pushval <= psw; st <= S_EXC_PUSH1;
                 // synthesis translate_off
-                $display("V60: unimplemented 5B sub %02x at %08x", fb[1], pc);
+                $fatal(1, "V60_UNIMPLEMENTED pc=%08x opcode=5b sub=%02x", pc, fb[1]);
                 // synthesis translate_on
             end
             endcase
@@ -1181,7 +1232,7 @@ else if (ce) begin
             default: begin
                 exc_vector <= 8'd8; exc_pushval <= psw; st <= S_EXC_PUSH1;
                 // synthesis translate_off
-                $display("V60: unimplemented 5D sub %02x at %08x", fb[1], pc);
+                $fatal(1, "V60_UNIMPLEMENTED pc=%08x opcode=5d sub=%02x", pc, fb[1]);
                 // synthesis translate_on
             end
             endcase
@@ -1207,7 +1258,7 @@ else if (ce) begin
                 exc_pushval <= psw;
                 st <= S_EXC_PUSH1;
                 // synthesis translate_off
-                $display("V60: unimplemented FP group %02x sub %02x at %08x", opcode, fb[1], pc);
+                $fatal(1, "V60_UNIMPLEMENTED pc=%08x opcode=%02x sub=%02x", pc, opcode, fb[1]);
                 // synthesis translate_on
             end
         end
@@ -1607,6 +1658,53 @@ else if (ce) begin
             st <= S_NEXT;   // default: single-cycle exec, then advance
             total_len <= 5'd2 + len1 + len2;
             exec_op();      // task below sets wb / flags / possibly overrides st
+            if (exec_retire_candidate) begin
+                logic [2:0] exec_s;
+                logic [4:0] remaining, next_need;
+                logic [7:0] next_opcode;
+
+                // Mirror the existing SVV S_NEXT handoff exactly, but perform
+                // it on the execute edge for the safe register-only allowlist.
+                // No data transaction can be outstanding for these forms.
+                exec_s      = (exec_retire_len >= 5'd4) ? 3'd4 : exec_retire_len[2:0];
+                remaining   = fb_valid - exec_retire_len;
+                next_opcode = fb[exec_retire_len];
+                next_need   = FB_THRESH;
+                casez (next_opcode)
+                    8'h00,
+                    8'hc8, 8'hc9, 8'hca, 8'hcd: next_need = 5'd1;
+                    8'b0110_????:                 next_need = 5'd2;
+                    8'b0111_????, 8'h48:          next_need = 5'd3;
+                    8'hc6, 8'hc7:                 next_need = 5'd4;
+                    8'h2d: begin
+                        if (remaining < 5'd3)
+                            next_need = 5'd3;
+                        else if (fb[exec_retire_len + 1'd1][7:5] == 3'b001 &&
+                                 fb[exec_retire_len + 2'd2] == 8'hf4)
+                            next_need = 5'd11;
+                    end
+                    default: ;
+                endcase
+
+                pc <= pc + {27'b0, exec_retire_len};
+                st <= S_FILL;
+                st_after_fill <= S_DECODE;
+                if (exec_retire_shift_ok) begin
+                    if (!fb_realigning && fb_prev_valid == 0) begin
+                        for (int i = 0; i < 24; i++) fb_prev[i] <= fb[i];
+                        fb_prev_base  <= fb_base;
+                        fb_prev_valid <= fb_valid;
+                    end
+                    for (int i = 0; i < 24; i++)
+                        if (i + exec_s < 24) fb[i] <= fb[i + exec_s];
+                    fb_base  <= fb_base + {29'b0, exec_s};
+                    fb_valid <= fb_valid - {2'b0, exec_s};
+                    fb_wr    <= fb_wr - {2'b0, exec_s};
+                    fb_realigning <= (exec_retire_len > 5'd4);
+                    if (exec_retire_dispatch_now && remaining >= next_need)
+                        st <= S_DECODE;
+                end
+            end
         end
     end
     S_OP2_LD: begin
@@ -2021,6 +2119,16 @@ else if (ce) begin
         dbus_req <= 0;
         pc <= bus_rdata;
         queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+        // Flush the live and retained prefetch windows at the same edge as the
+        // popped PC.  pf_epoch invalidates any outstanding old-stream fetch;
+        // rsr_rebase_now prevents an acknowledgement coincident with this
+        // data response from racing the flush assignments below.
+        fb_valid <= 5'd0;
+        fb_wr    <= 5'd0;
+        fb_base  <= bus_rdata;
+        fb_prev_valid <= 5'd0;
+        pf_epoch <= pf_epoch + 4'd1;
+        pf_suppress <= 1'b0;
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
 
@@ -3198,7 +3306,9 @@ else if (ce) begin
             && pf_addr == fb_base + {27'b0, fb_wr}
             && !(st == S_FILL && fb_base != pc)
             && st != S_NEXT
-            && !pf_decode_redirect) begin
+            && !exec_retire_shift_ok
+            && !pf_decode_redirect
+            && !rsr_rebase_now) begin
             if (FAST_IFETCH) begin
                 // append the 8-byte line from the frontier offset to the line end
                 // (1..8 bytes).  s32_core has ALREADY aligned if_data so byte 0 is
@@ -3251,6 +3361,11 @@ else if (ce) begin
         if (fb_prev_valid != 0 && dbus_addr < pv_end && wr_end > fb_prev_base)
             fb_prev_valid <= 5'd0;
     end
+
+`ifdef SIMULATION
+    if (exec_retire_candidate && dbus_req)
+        $fatal(1, "V60 execute-retire: data transaction outstanding in S_EXEC (pc=%08x)", pc);
+`endif
 
     // Port 1 is applied second so the final queued write retains the original
     // nonblocking-assignment priority when both ports address the same bit.
@@ -3342,6 +3457,54 @@ function automatic f12_reads_dest(input [7:0] op);
         8'h13, 8'h4a,                        // UPDPSW.W / UPDPSW.H mask
         8'h4b:  f12_reads_dest = 1;          // CHLVL level data
         default: f12_reads_dest = 0;
+    endcase
+endfunction
+
+// F12 operations whose execute task completes in one edge for a register
+// destination. The explicit allowlist excludes iterative, exceptional,
+// control-transfer, privileged, multiword, and memory-RMW operations.
+function automatic f12_simple_register_retire(input [7:0] op);
+    case (op)
+        8'h08,8'h09,8'h0a,8'h0b,8'h0c,8'h0d,
+        8'h19,8'h1b,8'h1c,8'h1d,8'h29,8'h2b,8'h2c,8'h2d,
+        8'h38,8'h39,8'h3a,8'h3b,8'h3c,8'h3d,
+        8'h40,8'h42,8'h44,8'h47,
+        8'h80,8'h82,8'h84,8'h88,8'h8a,8'h8c,
+        8'h90,8'h92,8'h94,8'h98,8'h9a,8'h9c,
+        8'ha0,8'ha2,8'ha4,8'ha8,8'haa,8'hac,
+        8'hb0,8'hb2,8'hb4,8'hb8,8'hba,8'hbc:
+            f12_simple_register_retire = 1'b1;
+        default: f12_simple_register_retire = 1'b0;
+    endcase
+endfunction
+
+function automatic f12_no_writeback(input [7:0] op);
+    case (op)
+        8'hb8,8'hba,8'hbc: f12_no_writeback = 1'b1; // CMP.B/H/W
+        default:            f12_no_writeback = 1'b0;
+    endcase
+endfunction
+
+// Safe short-format forms: register INC/DEC and GETPSW write only registers;
+// TEST and CLRTLB have no writeback. Memory forms remain on their existing
+// read/modify/write or continuation states through flag1.
+function automatic short_simple_register_retire(input [7:0] op);
+    case (op)
+        8'hd0,8'hd1,8'hd2,8'hd3,8'hd4,8'hd5,
+        8'hd8,8'hd9,8'hda,8'hdb,8'hdc,8'hdd,
+        8'hf0,8'hf1,8'hf2,8'hf3,8'hf4,8'hf5,
+        8'hf6,8'hf7,
+        8'hfe,8'hff:
+            short_simple_register_retire = 1'b1;
+        default: short_simple_register_retire = 1'b0;
+    endcase
+endfunction
+
+function automatic short_no_writeback(input [7:0] op);
+    case (op)
+        8'hf0,8'hf1,8'hf2,8'hf3,8'hf4,8'hf5,
+        8'hfe,8'hff: short_no_writeback = 1'b1;
+        default:     short_no_writeback = 1'b0;
     endcase
 endfunction
 

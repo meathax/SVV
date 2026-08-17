@@ -410,8 +410,8 @@ def build_cfg_bytes(game_id, prog_size, gfx_region, gfx_load_end,
         quarters = graphics_quarters(gfx_region, gfx_load_end)
     prog_mb = prog_size >> 20
     gfx_mb = gfx_region >> 20
-    if not 0 <= game_id <= 7:
-        raise ValueError("game id %d is outside the descriptor profile" % game_id)
+    if not 0 <= game_id <= 0x0F:
+        raise ValueError("game id %d is outside the 4-bit descriptor profile" % game_id)
     if not 1 <= prog_mb <= 7:
         raise ValueError("program size %d MB does not fit prog_mb" % prog_mb)
     if gfx_mb not in SUPPORTED_GFX_MB:

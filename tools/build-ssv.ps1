@@ -14,6 +14,12 @@ param(
     # the Lite install.
     [string]$QuartusRoot = "D:\Q17",
     [switch]$MapOnly,
+    # Run Analysis&Synthesis -> Fitter -> TimeQuest and stop. No assembler, no
+    # .rbf, no release staging. This is the measurement mode used while
+    # optimizing for a future RBF: it produces the same fit/timing evidence as
+    # a full compile, but cannot emit a bitstream, so it is safe to run without
+    # RBF-build authorization. Mutually exclusive with -MapOnly.
+    [switch]$NoAssemble,
     [Nullable[int]]$Seed,
     [switch]$SetSeedOnly,
     # Queue behind any Quartus build on this machine. Use this only for a
@@ -39,6 +45,7 @@ $slotInfo = [ordered]@{
     revision = $project
     quartus_root = $QuartusRoot
     map_only = [bool]$MapOnly
+    no_assemble = [bool]$NoAssemble
     state = "starting"
     started_utc = (Get-Date).ToUniversalTime().ToString("o")
 }
@@ -211,7 +218,12 @@ function Assert-BuildPolicy {
     # than raising fitter effort.
     $required = @(
         'set_global_assignment -name FITTER_EFFORT "FAST FIT"',
-        'set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL NORMAL',
+        # Raised to MAXIMUM on 13 Aug 2026; see the evidence block in
+        # Arcade-SSV.qsf. The pinned setting here is what the guard enforces,
+        # so it has to move deliberately with the QSF rather than drift.
+        # FITTER_EFFORT "FAST FIT" above is unchanged and still pinned -- it is
+        # the Standard Fit *combination* that crashed quartus_fit, not this.
+        'set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM',
         'set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC OFF',
         'set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF',
         'set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM',
@@ -281,8 +293,92 @@ function Set-QsfSeed([int]$Value) {
     Write-Host "Set Arcade-SSV.qsf SEED to $Value while holding the global Quartus slot."
 }
 
+# Quartus 17.0.2 aborts with a fatal Access Violation inside
+# STA_SCC_MGR::find_and_create_scc_bypass_edges (reached from
+# read_and_apply_sdc_constraints, i.e. timing-driven synthesis reading the SDC
+# against the netlist) when db/ holds incremental state whose netlist shape no
+# longer matches the current sources. SMART_RECOMPILE ON makes that reuse the
+# default, so a structural RTL change -- removing module instances is enough --
+# can turn every subsequent compile into a 20-minute crash whose message names
+# neither the database nor the real cause.
+#
+# The crash is deterministic and survives a single-process retry, so it is not
+# the concurrency hazard the global build slot already guards. Moving db/ and
+# incremental_db/ aside clears it. That is a real evidence-backed reason to
+# discard the incremental database, which is why this recovers automatically --
+# but only once per run, only for this exact signature, and the old directories
+# are preserved under tmp/ rather than deleted, so a misdiagnosis is reversible.
+function Reset-QuartusDatabase([string]$Reason) {
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $tmpRoot = Join-Path $repoRoot 'tmp'
+    New-Item -ItemType Directory -Force $tmpRoot | Out-Null
+    foreach ($dir in @('db', 'incremental_db')) {
+        $path = Join-Path $repoRoot $dir
+        if (Test-Path -LiteralPath $path) {
+            $dest = Join-Path $tmpRoot "$dir.stale-$stamp"
+            Move-Item -LiteralPath $path -Destination $dest -Force
+            Write-Warning "Moved $dir to tmp\$dir.stale-$stamp ($Reason)."
+        }
+    }
+}
+
+# Runs one Quartus stage. Returns $true on success. On a fatal Access
+# Violation it returns $false so the caller can reset the database and restart
+# the whole stage sequence -- a later stage cannot simply be retried on its
+# own, because clearing db/ also discards the earlier stages' output.
+function Invoke-QuartusStage([string]$Exe, [string]$Stage) {
+    $logDir = Join-Path $repoRoot 'tmp'
+    New-Item -ItemType Directory -Force $logDir | Out-Null
+    $log = Join-Path $logDir "$Stage.stdout.log"
+    # quartus_sta does not accept --read_settings_files/--write_settings_files;
+    # passing them is a hard "Error (23024): Unknown long option" before it does
+    # any analysis. Only map and fit take the settings-file switches.
+    $stageArgs = if ($Stage -eq 'quartus_sta') {
+        @($project, '-c', $project)
+    }
+    else {
+        @('--read_settings_files=on', '--write_settings_files=off', $project, '-c', $project)
+    }
+    & $Exe @stageArgs 2>&1 | Tee-Object -FilePath $log
+    if ($LASTEXITCODE -eq 0) {
+        return $true
+    }
+    if (Select-String -Path $log -Pattern 'Fatal Error: Access Violation' -Quiet) {
+        return $false
+    }
+    throw "$Stage failed. Inspect $log and output_files\Arcade-SSV.*.rpt."
+}
+
+function Invoke-QuartusStages([string[]]$Stages) {
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $ok = $true
+        foreach ($stage in $Stages) {
+            $exe = Join-Path $quartusBin "$stage.exe"
+            if (-not (Test-Path -LiteralPath $exe)) {
+                throw "Quartus stage $stage was not found below $QuartusRoot."
+            }
+            Write-Host "== $stage =="
+            if (-not (Invoke-QuartusStage $exe $stage)) {
+                if ($attempt -ge 2) {
+                    throw "$stage aborted with a fatal Access Violation against a fresh database; this is not the stale-database case."
+                }
+                Reset-QuartusDatabase "$stage aborted with a fatal Access Violation"
+                Write-Warning 'Restarting the Quartus stage sequence once against a fresh database.'
+                $ok = $false
+                break
+            }
+        }
+        if ($ok) {
+            return
+        }
+    }
+}
+
 Push-Location $repoRoot
 try {
+    if ($MapOnly -and $NoAssemble) {
+        throw '-MapOnly and -NoAssemble are mutually exclusive.'
+    }
     Assert-BuildPolicy
     Wait-QuartusSlot
 
@@ -306,7 +402,14 @@ try {
     }
 
     if ($MapOnly) {
-        & $map --read_settings_files=on --write_settings_files=off $project -c $project
+        Invoke-QuartusStages @('quartus_map')
+    }
+    elseif ($NoAssemble) {
+        # Explicit stages instead of --flow compile: quartus_sh's compile flow
+        # always runs the assembler, which is exactly what must not happen
+        # without RBF authorization.
+        Invoke-QuartusStages @('quartus_map', 'quartus_fit', 'quartus_sta')
+        Write-Host 'NoAssemble: fit and timing reports refreshed; no RBF was produced.'
     }
     else {
         & $flow --flow compile $project
@@ -315,7 +418,7 @@ try {
         throw "Quartus failed. Inspect output_files\Arcade-SSV.*.rpt."
     }
 
-    if (-not $MapOnly) {
+    if (-not $MapOnly -and -not $NoAssemble) {
         $inputSnapshotAfter = Get-BuildInputSnapshot
         $inputSnapshotAfterPath = Write-BuildInputSnapshot $inputSnapshotAfter 'Arcade-SSV-inputs-after.json'
         Assert-BuildInputsUnchanged $inputSnapshotBefore $inputSnapshotAfter

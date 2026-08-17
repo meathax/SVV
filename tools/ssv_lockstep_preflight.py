@@ -4,7 +4,10 @@
 This tool deliberately writes ``PREFLIGHT_PENDING.json``.  A live coordinator
 may promote it to ``PREFLIGHT_PASS.json`` only after the MAME and RTL adapters
 report their *effective* dimensions, DIPs, inputs, sound/reset state and frame
-boundary.  Static provenance alone is never treated as a passing comparison.
+boundary.  The static half binds the authored gameplay-v1 scenario, its
+scenario-authored input-journal-v2 contract, the exact 120-frame neutral tail,
+and the candidate ``cpu_data`` strict domain.  Static provenance alone is
+never treated as a passing comparison.
 """
 
 from __future__ import annotations
@@ -30,9 +33,18 @@ from ssv_supported_sets import (  # noqa: E402
     SUPPORTED_SET_IDS,
     SUPPORTED_SETS,
 )
-from ssv_input_journal import inspect_journal  # noqa: E402
+from ssv_gameplay_scenario import read_scenario  # noqa: E402
+from ssv_input_journal import inspect_journal, read_packet  # noqa: E402
 
 MB = 1 << 20
+SCENARIO_SCHEMA = "ssv-gameplay-scenario-v1"
+JOURNAL_SCHEMA = "ssv-input-journal-v2"
+PINNED_MAME_TAG = "mame0289"
+PINNED_MAME_VERSION = "0.289"
+STRICT_DOMAIN = "cpu_data"
+DIAGNOSTIC_DOMAIN = "mainbus"
+PROGRAM_ROM_DEVICE = 1
+NEUTRAL_SOAK_FRAMES = 120
 
 
 def source_git(source_root: Path, *arguments: str) -> list[str]:
@@ -220,30 +232,257 @@ def archive_provenance(rom_node: ET.Element, rom_dir: Path) -> dict[str, object]
             archive.close()
 
 
+def scenario_contract(path: Path, setname: str, scenario_id: str,
+                      mra_path: Path, width: int, height: int) -> tuple[dict[str, object], dict[str, object]]:
+    """Read and bind the authored gameplay-v1 scenario to this preflight.
+
+    The old lockstep path treated a scenario as an optional filename/hash.  That
+    allowed a legacy coin/start JSON (and its 0.289/v2 assumptions) to look like
+    an equivalent input contract.  Parse the project-owned schema here so the
+    manifest carries the semantic gate and cannot silently fall back to that
+    older contract.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"missing scenario-v1 contract: {path}")
+    try:
+        scenario, raw = read_scenario(path)
+    except Exception as error:  # noqa: BLE001 - preserve the actionable path
+        raise ValueError(f"invalid {SCENARIO_SCHEMA} scenario {path}: {error}") from error
+
+    if scenario.get("schema") != SCENARIO_SCHEMA:
+        raise ValueError(
+            f"scenario must use {SCENARIO_SCHEMA}; got {scenario.get('schema')!r}: {path}"
+        )
+    if scenario.get("id") != scenario_id:
+        raise ValueError(
+            f"scenario id {scenario.get('id')!r} does not match --scenario {scenario_id!r}"
+        )
+    if scenario.get("set") != setname:
+        raise ValueError(
+            f"scenario set {scenario.get('set')!r} does not match --set {setname!r}"
+        )
+
+    # Gameplay lockstep is intentionally pinned to the installed 0.289
+    # executable and matching source checkout.
+    declared_mame = str(scenario.get("mame", "")).strip()
+    if declared_mame != PINNED_MAME_VERSION:
+        raise ValueError(
+            f"scenario reference must declare MAME {PINNED_MAME_VERSION}; "
+            f"got {declared_mame or '<missing>'}: {path}"
+        )
+
+    declared_mra = scenario.get("mra")
+    if not declared_mra:
+        raise ValueError(f"scenario must declare its release MRA: {path}")
+    if declared_mra and Path(str(declared_mra)).name != mra_path.name:
+        raise ValueError(
+            f"scenario MRA {declared_mra!r} does not match selected release MRA "
+            f"{mra_path.name!r}"
+        )
+    geometry = scenario.get("geometry", {})
+    scenario_geometry = [
+        geometry.get("active_w") if isinstance(geometry, dict) else None,
+        geometry.get("active_h") if isinstance(geometry, dict) else None,
+    ]
+    # Drift Out's MAME/descriptor raster is 336x238 while the shared capture
+    # surface is padded to 336x240.  Preserve that authored capture geometry;
+    # all other sets must agree exactly with the descriptor width/height.
+    geometry_ok = (
+        scenario_geometry[0] == width
+        and (
+            scenario_geometry[1] == height
+            or (height < 240 and scenario_geometry[1] == 240)
+        )
+    )
+    if not geometry_ok:
+        raise ValueError(
+            f"scenario geometry must use width {width} and descriptor height {height} "
+            f"(or the shared 240-line capture surface); got {geometry!r}: {path}"
+        )
+
+    entry = scenario["gameplay_entry"]
+    stop = scenario["stop"]
+    neutral_after = entry["neutral_after_frame"]
+    neutral_soak = stop["neutral_soak_frames"]
+    through = stop["through_frame"]
+    if neutral_soak != NEUTRAL_SOAK_FRAMES or through != neutral_after + NEUTRAL_SOAK_FRAMES:
+        raise ValueError(
+            "gameplay scenario must end after exactly 120 neutral frames "
+            f"(entry={neutral_after}, soak={neutral_soak}, through={through})"
+        )
+
+    scenario_hash = hashlib.sha256(raw).hexdigest()
+    # Derive the exact digest emitted by ssv_gameplay_scenario.py without
+    # writing a generated journal.  This lets a cold preflight bind the
+    # scenario-authored packet stream before either adapter compiles it.
+    current = {
+        key: scenario.get("defaults", {}).get(key, 0)
+        for key in ("p1_pressed", "p2_pressed", "system_pressed")
+    }
+    events = {event["frame"]: event for event in scenario["events"]}
+    journal_digest = hashlib.sha256()
+    for frame in range(through + 1):
+        if frame in events:
+            current.update({
+                key: events[frame][key]
+                for key in ("p1_pressed", "p2_pressed", "system_pressed")
+            })
+        if frame >= neutral_after:
+            current = {key: 0 for key in current}
+        packet = {"frame": frame, **current, "source": "scenario"}
+        encoded = (json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        journal_digest.update(len(encoded).to_bytes(4, "big"))
+        journal_digest.update(encoded)
+    journal_semantic_sha256 = journal_digest.hexdigest()
+    identity: dict[str, object] = {
+        "schema": SCENARIO_SCHEMA,
+        "id": scenario_id,
+        "set": setname,
+        "path": str(path.resolve()),
+        # Keep sha256 for consumers of the previous manifest, while exposing
+        # the explicit scenario_sha256 name used by checkpoint sidecars.
+        "sha256": scenario_hash,
+        "scenario_sha256": scenario_hash,
+        "mame": declared_mame,
+        "mra": str(declared_mra) if declared_mra else None,
+        "geometry": {"active_w": scenario_geometry[0], "active_h": scenario_geometry[1]},
+        "gameplay_entry": {
+            "neutral_after_frame": neutral_after,
+            "marker_status": entry.get("marker_status"),
+        },
+        "stop": {
+            "neutral_soak_frames": NEUTRAL_SOAK_FRAMES,
+            "through_frame": through,
+        },
+        "journal": {
+            "schema": JOURNAL_SCHEMA,
+            "semantic_sha256": journal_semantic_sha256,
+            "packet_count": through + 1,
+            "ownership": "scenario-authored immutable packets",
+        },
+    }
+    gate = {
+        "schema": SCENARIO_SCHEMA,
+        "entry_frame": neutral_after,
+        "neutral_after_frame": neutral_after,
+        "neutral_soak_frames": NEUTRAL_SOAK_FRAMES,
+        "through_frame": through,
+        "post_entry_input": "forbidden",
+        "ownership": "scenario-authored immutable packets",
+    }
+    return identity, gate
+
+
+def journal_contract(journal: Path | None, scenario_identity: dict[str, object],
+                     gate: dict[str, object]) -> dict[str, object]:
+    """Return a v2 journal identity without trusting an unbound sidecar.
+
+    A checkpoint journal is often an RTL-owned directory and may not have a
+    compile manifest.  In that case ``inspect_journal`` supplies the semantic
+    digest later.  If a manifest exists (the scenario compiler emits one), its
+    schema, set and scenario hash are checked now so a stale v1/v2 journal
+    cannot be paired with a different authored scenario.
+    """
+    identity: dict[str, object] = {
+        "schema": JOURNAL_SCHEMA,
+        "scenario_schema": SCENARIO_SCHEMA,
+        "scenario_id": scenario_identity["id"],
+        "set": scenario_identity["set"],
+        "scenario_sha256": scenario_identity["scenario_sha256"],
+        "semantic_sha256": scenario_identity["journal"]["semantic_sha256"],
+        "packet_count": scenario_identity["journal"]["packet_count"],
+        "through_frame": gate["through_frame"],
+        "neutral_after_frame": gate["neutral_after_frame"],
+        "neutral_soak_frames": NEUTRAL_SOAK_FRAMES,
+        "ownership": "scenario-authored immutable packets",
+        "path": str(journal.resolve()) if journal is not None else None,
+    }
+    if journal is None:
+        return identity
+    manifest_path = journal / "manifest.json"
+    if not manifest_path.is_file():
+        return identity
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid input journal manifest {manifest_path}: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("schema") != JOURNAL_SCHEMA:
+        raise ValueError(
+            f"input journal manifest must use {JOURNAL_SCHEMA}: {manifest_path}"
+        )
+    expected = {
+        "scenario_schema": SCENARIO_SCHEMA,
+        "scenario_id": scenario_identity["id"],
+        "set": scenario_identity["set"],
+        "scenario_sha256": scenario_identity["scenario_sha256"],
+        "neutral_after_frame": gate["neutral_after_frame"],
+        "neutral_soak_frames": NEUTRAL_SOAK_FRAMES,
+        "through_frame": gate["through_frame"],
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ValueError(
+                f"input journal {manifest_path} has stale {key}: "
+                f"expected {value!r}, got {manifest.get(key)!r}"
+            )
+    semantic = manifest.get("semantic_sha256")
+    packet_count = manifest.get("packet_count")
+    if (not isinstance(semantic, str) or
+            not re.fullmatch(r"[0-9a-fA-F]{64}", semantic) or
+            packet_count != int(gate["through_frame"]) + 1):
+        raise ValueError(
+            f"input journal {manifest_path} has no complete v2 semantic identity"
+        )
+    identity.update({
+        "manifest": str(manifest_path.resolve()),
+        "semantic_sha256": semantic,
+        "packet_count": packet_count,
+        "ownership": manifest.get("ownership", identity["ownership"]),
+    })
+    return identity
+
+
+def require_neutral_tail(journal: Path, through_frame: int,
+                         neutral_after_frame: int) -> None:
+    """Reject a journal that drives input after the authored gameplay entry."""
+    start = max(0, neutral_after_frame)
+    for frame in range(start, min(through_frame, neutral_after_frame + NEUTRAL_SOAK_FRAMES) + 1):
+        packet = read_packet(journal, frame)
+        if any(packet[key] for key in ("p1_pressed", "p2_pressed", "system_pressed")):
+            raise ValueError(
+                f"input journal is not neutral after gameplay entry at frame {frame}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--set", required=True, choices=SUPPORTED_SETS)
     parser.add_argument("--session", required=True, type=Path)
-    parser.add_argument("--mame", type=Path, default=Path(r"D:\Arcade\AI\mame\mame.exe"))
+    parser.add_argument("--mame", type=Path, default=Path(r"D:\Arcade\AI\mameexe\mame.exe"))
     parser.add_argument("--mame-source", type=Path,
                         default=Path(r"D:\Arcade\AI\mame289"))
-    parser.add_argument("--rom-dir", type=Path, default=ROOT / "rom")
+    parser.add_argument("--rom-dir", type=Path,
+                        default=Path(r"D:\Arcade\AI\MAME 0.289 ROMs (merged)"))
     parser.add_argument("--image-root", type=Path, default=ROOT / "sim_output" / "rom")
     parser.add_argument("--mra-dir", type=Path, default=ROOT / "releases")
     parser.add_argument(
         "--allow-unversioned-source", action="store_true",
         help="accept hashes from a source tree without the executable's Git tag",
     )
+    parser.add_argument(
+        "--allow-legacy-v2", action="store_true",
+        help="diagnostic-only compatibility for a 16-byte v2 descriptor; release MRAs require v3",
+    )
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--scenario", default="coin_start_p1_gameplay")
+    parser.add_argument("--scenario", default="gameplay_neutral")
     parser.add_argument("--start-frame", type=int)
     parser.add_argument("--rtl-restore", type=Path)
     parser.add_argument("--input-journal", type=Path)
     args = parser.parse_args()
 
-    if args.set not in PARENT_RUN_ORDER:
+    if args.set not in SUPPORTED_SETS:
         raise SystemExit(
-            f"{args.set} is a clone and is excluded from the parent-only audit"
+            f"{args.set} is not in the authoritative supported-set manifest"
         )
     if args.session.exists() and any(args.session.iterdir()):
         if not args.force:
@@ -254,15 +493,20 @@ def main() -> int:
     mra_path, mra = find_mra(args.set, args.mra_dir)
     descriptor_hex = (mra.find("rom[@index='1']/part").text or "").strip()
     descriptor = bytes.fromhex(descriptor_hex)
-    if len(descriptor) != 16 or descriptor[:2] != b"S\x02" or sum(descriptor) & 0xff:
-        raise ValueError(f"invalid schema-v2 descriptor: {mra_path}")
+    descriptor_v3 = len(descriptor) == 24 and descriptor[:2] == b"S\x03"
+    descriptor_v2 = len(descriptor) == 16 and descriptor[:2] == b"S\x02"
+    if sum(descriptor) & 0xff:
+        raise ValueError(f"descriptor checksum does not sum to zero: {mra_path}")
+    if not descriptor_v3 and not (args.allow_legacy_v2 and descriptor_v2):
+        raise ValueError(
+            f"release preflight requires a 24-byte schema-v3 descriptor: {mra_path}"
+        )
+    descriptor_schema = "v3-release" if descriptor_v3 else "v2-legacy-diagnostic"
 
     switches = mra.find("switches")
     mra_dips = [int(value, 16) for value in switches.get("default", "FF,FD").split(",")]
     machine = mame_xml(args.mame, args.set)
     cloneof = machine.get("cloneof")
-    if cloneof:
-        raise ValueError(f"parent-only target {args.set} is cloneof={cloneof}")
     display = machine.find("display")
     if display is None:
         raise ValueError(f"MAME {args.set} has no display")
@@ -280,7 +524,9 @@ def main() -> int:
     mame_dips = mame_dip_defaults(machine)
     checks = {
         "supported_manifest": args.set in SUPPORTED_SET_IDS,
-        "mame_parent": cloneof is None,
+        "mame_parent_or_manifest_clone": (
+            cloneof is None or args.set in SUPPORTED_SETS
+        ),
         "geometry_matches": [width, height] == [mame_width, mame_height],
         "mra_rotation_matches": (
             expected_mra_rotation is not None
@@ -293,11 +539,13 @@ def main() -> int:
     }
 
     scenario_path = ROOT / "verif" / "scenarios" / args.set / f"{args.scenario}.json"
-    scenario_identity = {
-        "id": args.scenario,
-        "path": str(scenario_path.resolve()) if scenario_path.is_file() else None,
-        "sha256": sha256_file(scenario_path) if scenario_path.is_file() else None,
-    }
+    scenario_identity, gameplay_gate = scenario_contract(
+        scenario_path, args.set, args.scenario, mra_path, width, height
+    )
+    # The scenario compiler emits a v2 manifest for authored packets.  Keep
+    # this contract in every preflight (including a cold run with no staged
+    # journal yet) so both adapters are bound to the same journal schema.
+    input_contract = journal_contract(None, scenario_identity, gameplay_gate)
     rtl_startup: dict[str, object] = {"mode": "cold-lockstep"}
     if args.rtl_restore:
         if args.start_frame is None or args.start_frame < 1 or not args.input_journal:
@@ -311,9 +559,27 @@ def main() -> int:
         if not metadata_path.is_file():
             raise FileNotFoundError(f"missing RTL checkpoint metadata: {metadata_path}")
         checkpoint = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
-        journal_identity = inspect_journal(
-            args.input_journal.resolve(), args.start_frame
+        journal_path = args.input_journal.resolve()
+        # Validate any compiler manifest before inspecting packets.  A
+        # checkpoint journal normally has no manifest, so its v2 identity is
+        # still proved by inspect_journal below and bound to the checkpoint's
+        # scenario hash.
+        staged_contract = journal_contract(journal_path, scenario_identity, gameplay_gate)
+        journal_identity = inspect_journal(journal_path, args.start_frame)
+        require_neutral_tail(
+            journal_path, args.start_frame,
+            int(gameplay_gate["neutral_after_frame"]),
         )
+        journal_identity.update({
+            "scenario_schema": SCENARIO_SCHEMA,
+            "scenario_id": args.scenario,
+            "set": args.set,
+            "scenario_sha256": scenario_identity["scenario_sha256"],
+            "neutral_after_frame": gameplay_gate["neutral_after_frame"],
+            "neutral_soak_frames": NEUTRAL_SOAK_FRAMES,
+            "gate_through_frame": gameplay_gate["through_frame"],
+            "manifest": staged_contract.get("manifest"),
+        })
         checkpoint_journal = checkpoint.get("input_journal", {})
         checkpoint_scenario = checkpoint.get("input_identity", {})
         checkpoint_schema = checkpoint.get("schema")
@@ -334,6 +600,9 @@ def main() -> int:
             "checkpoint_set": checkpoint.get("set") == args.set,
             "checkpoint_scenario": checkpoint.get("scenario") == args.scenario,
             "checkpoint_frame_precedes_start": checkpoint.get("frame") == args.start_frame - 1,
+            "checkpoint_within_gameplay_gate": (
+                args.start_frame <= int(gameplay_gate["through_frame"])
+            ),
             "checkpoint_archive_bytes": checkpoint.get("archive_bytes") == restore.stat().st_size,
             "checkpoint_archive_sha256": str(checkpoint.get("archive_sha256", "")).lower() == sha256_file(restore),
             "checkpoint_input_prefix": (
@@ -345,6 +614,15 @@ def main() -> int:
                 scenario_identity["sha256"] is not None
                 and str(checkpoint_scenario.get("scenario_sha256", "")).lower() ==
                     str(scenario_identity["sha256"]).lower()
+            ),
+            "checkpoint_input_journal_schema": (
+                checkpoint_journal.get("schema") == JOURNAL_SCHEMA
+            ),
+            "checkpoint_input_journal_identity": (
+                journal_identity.get("schema") == JOURNAL_SCHEMA
+                and journal_identity.get("scenario_schema") == SCENARIO_SCHEMA
+                and journal_identity.get("scenario_sha256") ==
+                    scenario_identity["scenario_sha256"]
             ),
         })
         rtl_startup = {
@@ -411,6 +689,13 @@ def main() -> int:
         runtime_source_revision != "unversioned"
         or args.allow_unversioned_source
     )
+    checks["mame_reference_pinned_0289"] = (
+        runtime_source_tag == PINNED_MAME_TAG
+        and version.startswith(f"{PINNED_MAME_VERSION} ")
+    )
+    checks["scenario_reference_pinned_0289"] = (
+        scenario_identity.get("mame") == PINNED_MAME_VERSION
+    )
 
     pertinent_source_files = (
         "src/mame/seta/ssv.cpp",
@@ -440,9 +725,27 @@ def main() -> int:
         "set": args.set,
         "game_id": SUPPORTED_SET_IDS[args.set],
         "parent_run_order": list(PARENT_RUN_ORDER),
+        "mame_relationship": {
+            "cloneof": cloneof,
+            "manifest_authorized_clone": bool(cloneof and args.set in SUPPORTED_SETS),
+        },
         "mra": {"path": str(mra_path.resolve()), "sha256": sha256_file(mra_path),
-                "descriptor_hex": descriptor_hex},
+                "descriptor_hex": descriptor_hex,
+                "descriptor_schema": descriptor_schema,
+                "release_eligible": descriptor_v3},
         "media": {"archives": provenance, "simulation_images": images},
+        "scenario": scenario_identity,
+        "gameplay_gate": gameplay_gate,
+        "input_contract": input_contract,
+        "strict_domain": STRICT_DOMAIN,
+        "trace_contract": {
+            "schema": "mister-raw-trace-v4",
+            "strict_domain": STRICT_DOMAIN,
+            "candidate_strict": True,
+            "diagnostic_domain": DIAGNOSTIC_DOMAIN,
+            "excluded_device": PROGRAM_ROM_DEVICE,
+            "no_resynchronization": True,
+        },
         "reference": {
             "mame_path": str(args.mame.resolve()),
             "mame_sha256": sha256_file(args.mame),
@@ -461,6 +764,7 @@ def main() -> int:
                 if runtime_source_revision != "unversioned"
                 else "unversioned source-tree file hashes; executable SHA-256 pinned"
             ),
+            "runtime_contract": "MAME 0.289 (mame0289) executable and matching source checkout",
             "source_files": source_files,
             "audit_source_revision": source_revision(args.mame_source),
             "audit_source_files": audit_source_files,
@@ -487,13 +791,21 @@ def main() -> int:
             ),
             "neutral_input_packet": neutral_packet,
             "neutral_input_sha256": hashlib.sha256(packet_bytes).hexdigest(),
+            "gameplay_gate": gameplay_gate,
+            "strict_domain": STRICT_DOMAIN,
+            "diagnostic_domain": DIAGNOSTIC_DOMAIN,
+            "strict_excluded_device": PROGRAM_ROM_DEVICE,
             "first_complete_token": 1,
             "first_comparable_token": first_comparable_token,
             "warmup_excluded_tokens": list(range(first_comparable_token)),
-            "rtl_expected_boundary": "completed post-video-enable native surface before SDL scaling",
+            "rtl_expected_boundary": "completed post-video-enable native surface before presentation scaling",
         },
         "checks": checks,
         "scenario_identity": scenario_identity,
+        "journal_identity": input_contract,
+        # Alias retained for coordinators that consume the checkpoint-style
+        # field name even on a cold scenario-authored run.
+        "input_journal": input_contract,
         "rtl_startup": rtl_startup,
         "required_live_ready": ["rtl_ready.json", "reference_ready.json"],
     }

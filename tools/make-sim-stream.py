@@ -36,7 +36,7 @@ Writes, into <outdir>:
   sprites.bin   graphics, MAME "sprites"/"gfxdata" region image
   samples.bin   ES5506 samples, all "ensoniq.*" regions concatenated
   st010.bin     uPD96050 image, when the set has one
-  cfg.bin       the 16-byte per-game config block (MRA <rom index="1">)
+  cfg.bin       the 24-byte v3 per-game config block (MRA <rom index="1">)
   stream.bin    program + graphics + samples + st010, i.e. the MRA index-0
                 stream, for a bench that drives ssv_rom_loader
 """
@@ -168,7 +168,7 @@ def main():
             r'\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,', text, gen.re.M):
         if m.group(2) == setname:
             game = {'parent': m.group(3), 'machine': m.group(4),
-                    'init': m.group(7)}
+                    'ports': m.group(5), 'init': m.group(7)}
             break
     if not game:
         raise SystemExit('no GAME() line for %s' % setname)
@@ -206,16 +206,26 @@ def main():
     if st010_img:
         emit('st010.bin', st010_img)
 
-    # 16-byte config block, byte-identical to what gen_ssv_mras.py puts in the
-    # MRA -- same inputs, same function.
+    # Descriptor-v3 block, byte-identical to what gen_ssv_mras.py puts in the
+    # release MRA -- same inputs, same function.
     gfx_region = gfx[0]['size'] if gfx else 0
     gfx_loaded = sum(l['size'] for r in gfx for l in r['loads'])
     ens_valid, ens_map = gen.ensoniq_banks(regions)
     flags = cfgblk.resolve_init(text, game['init'])
     flags.update(gen.DESCRIPTOR_FEATURE_OVERRIDES.get(setname, {}))
     amap = cfgblk.resolve_addrmap(text, game['machine'])
-    flags['has_add_buttons'] = cfgblk.has_add_buttons(text, amap) if amap else False
+    flags.update(cfgblk.family_map_features(amap, game['ports'], text))
+    flags['extra_input_mode'] = (
+        cfgblk.extra_input_mode(text, amap, game['ports']) if amap else 0)
+    flags['system_input_mode'] = cfgblk.system_input_mode(text, game['ports'])
+    flags['has_nvram'] = cfgblk.has_nvram(text, amap) if amap else False
+    flags['nvram_mode'] = cfgblk.nvram_mode(text, amap) if amap else 0
+    flags['extra_ram_mode'] = cfgblk.extra_ram_mode(text, amap) if amap else 0
     flags['has_st010'] = cfgblk.has_st010(regions)
+    flags['has_drifto_unknown'] = (
+        cfgblk.has_drifto_unknown(text, amap) if amap else False)
+    flags['lockout_inverted'] = (
+        cfgblk.lockout_inverted(text, amap) if amap else False)
     wdog = cfgblk.watchdog_mode(text, amap) if amap else 0
     samples_size = sum(cfgblk.region_extent(r) for r in samp if r['loads'])
     if samples_size != len(samp_img):
@@ -223,9 +233,11 @@ def main():
                          'config block and the image would disagree'
                          % (samples_size, len(samp_img)))
     cfg_bytes = cfgblk.build_cfg_bytes(
-        gen.SUPPORTED.index(setname) if setname in gen.SUPPORTED else 15,
-        prog[0]['size'] if prog else 0, gfx_region, gfx_loaded,
-        ens_valid, ens_map, flags, wdog, samples_size)
+        gen.SUPPORTED_SET_IDS.get(setname, 15),
+        prog[0]['size'] if prog else 0, gfx_region,
+        max((gen.region_load_end(r) for r in gfx), default=0),
+        ens_valid, ens_map, flags, wdog, samples_size >> 20,
+        *cfgblk.visible_geometry(text, game['machine']))
     emit('cfg.bin', bytes(cfg_bytes))
 
     emit('stream.bin', prog_img + gfx_img + samp_img + st010_img)

@@ -254,6 +254,26 @@ initial begin
     if (plots != 1)
         $fatal(1, "empty line produced pixels count=%0d", plots);
 
+    // A frame may legitimately contain no visible descriptors.  The cache
+    // builder must publish an empty ready cache, not enter reindex and decode
+    // descriptor_cache[0] (which is unwritten in this case).
+    sprite_mem[0] = 16'h0000;
+    sprite_mem[1] = 16'h8000;
+    cache_start = 1'b1;
+    @(negedge clk);
+    cache_start = 1'b0;
+    wait (cache_busy);
+    wait (cache_ready);
+    if (cache_busy || cache_overflow || dut.cache_count != 0)
+        $fatal(1, "empty cache completion flags mismatch busy=%0b overflow=%0b count=%0d",
+               cache_busy, cache_overflow, dut.cache_count);
+
+    // Restore the one-global fixture for the following coordinate/readback
+    // checks after the empty-list case above.
+    sprite_mem[0] = 16'h6000;
+    sprite_mem[1] = 16'h0400;
+    sprite_mem[5] = 16'h8000;
+
     // Prove the paired global read preserves distinct words 2 and 3. These
     // offsets cancel in Y and move X by five pixels. The cache now stores the
     // compact visual descriptor (88 bits), so check its encoded coordinates

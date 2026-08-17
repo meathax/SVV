@@ -14,6 +14,14 @@ IRQ_SCHED="${IRQ_SCHED:-sim_output/diff/mame_irq_schedule_8s.txt}"
 if [[ ! -f "$IRQ_SCHED" ]]; then
   IRQ_SCHED="sim_output/diff/mame_irq_schedule_long.txt"
 fi
+AUDIO_ISOLATION_ARGS=()
+if [[ "${AUDIO_ISOLATION_DIAGNOSTIC:-0}" == 1 ]]; then
+  # This deliberately allows the simulation-only renderer deadline guard to
+  # report and continue. It isolates ES5506 host/sample traffic; it is not a
+  # full-core acceptance result and must never be enabled for release gates.
+  AUDIO_ISOLATION_ARGS+=(+ALLOW_RENDERER_OVERRUN_DIAGNOSTIC)
+  echo "AUDIO ISOLATION DIAGNOSTIC: renderer deadline fatal is non-blocking"
+fi
 
 VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -CFLAGS -D_GLIBCXX_USE_CXX11_ABI=0
@@ -106,6 +114,11 @@ verilator-sim-safe -- "$boot_bin" \
   "+DIFF_IRQ_SCHEDULE=$IRQ_SCHED" \
   "+SAMPLES=sim_output/rom/samples.bin" \
   "+ROM=sim_output/rom/maincpu.bin" \
+  "${AUDIO_ISOLATION_ARGS[@]}" \
   | tee "$OUT/boot/run.log"
 
-echo "ALL AUDIO SIMS PASS"
+if [[ "${AUDIO_ISOLATION_DIAGNOSTIC:-0}" == 1 ]]; then
+  echo "AUDIO ISOLATION DIAGNOSTIC PASS (not full-core acceptance)"
+else
+  echo "ALL AUDIO SIMS PASS"
+fi

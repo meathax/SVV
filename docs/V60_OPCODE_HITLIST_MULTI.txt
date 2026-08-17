@@ -1,0 +1,138 @@
+# V60 executed-opcode summary, multi-set
+# mame_version=0.285
+# sets=8  reports=32
+
+=== cairblad ===
+  run cairblad_idle_s1 preset=idle     seed=1   sec= 1050.0 retired=    2093485066 distinct_pc= 13165 rom_base=e00000 mismatch=0
+  run cairblad_play_2p_s5 preset=play_2p  seed=5   sec=  240.0 retired=     478510873 distinct_pc= 11637 rom_base=e00000 mismatch=0
+  run cairblad_play_s1 preset=play     seed=1   sec=  240.0 retired=     478510873 distinct_pc= 10640 rom_base=e00000 mismatch=0
+  run cairblad_play_s7 preset=play     seed=7   sec= 1080.0 retired=    2153298925 distinct_pc= 13841 rom_base=e00000 mismatch=0
+  --- valid-run totals: retired=5203805737  distinct primary opcodes=105
+  GROUP 58  byte string (implemented)              EXECUTED 8
+           subop 88  x8
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== drifto94 ===
+  run drifto94_idle_s1 preset=idle     seed=1   sec= 1200.0 retired=    2392423291 distinct_pc=  4931 rom_base=c00000 mismatch=0
+  run drifto94_play_2p_s5 preset=play_2p  seed=5   sec= 1200.0 retired=    2392423291 distinct_pc=  8848 rom_base=c00000 mismatch=0
+  run drifto94_play_s1 preset=play     seed=1   sec=  960.0 retired=    1913912419 distinct_pc=  9198 rom_base=c00000 mismatch=0
+  run drifto94_play_s7 preset=play     seed=7   sec=  960.0 retired=    1913912419 distinct_pc=  9074 rom_base=c00000 mismatch=0
+  --- valid-run totals: retired=8612671420  distinct primary opcodes=109
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== dynagear ===
+  run dynagear_idle_s1 preset=idle     seed=1   sec= 1050.0 retired=    2093485066 distinct_pc=  8078 rom_base=f00000 mismatch=0
+  run dynagear_play_2p_s5 preset=play_2p  seed=5   sec= 1050.0 retired=    2093485066 distinct_pc= 10548 rom_base=f00000 mismatch=0
+  run dynagear_play_s1 preset=play     seed=1   sec= 1050.0 retired=    2093485066 distinct_pc= 10638 rom_base=f00000 mismatch=0
+  run dynagear_play_s7 preset=play     seed=7   sec= 1050.0 retired=    2093485066 distinct_pc= 10345 rom_base=f00000 mismatch=0
+  --- valid-run totals: retired=8373940264  distinct primary opcodes=103
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== stmblade ===
+  run stmblade_idle_s1 preset=idle     seed=1   sec= 1200.0 retired=    2392554361 distinct_pc= 10770 rom_base=c00000 mismatch=0
+  run stmblade_play_2p_s5 preset=play_2p  seed=5   sec= 1200.0 retired=    2392553059 distinct_pc= 26666 rom_base=c00000 mismatch=0
+  run stmblade_play_s1 preset=play     seed=1   sec= 1200.0 retired=    2392552222 distinct_pc= 16952 rom_base=c00000 mismatch=0
+  run stmblade_play_s7 preset=play     seed=7   sec= 1080.0 retired=    2153297034 distinct_pc= 16773 rom_base=c00000 mismatch=0
+  --- valid-run totals: retired=9330956676  distinct primary opcodes=102
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== twineag2 ===
+  run twineag2_idle_s1 preset=idle     seed=1   sec=  990.0 retired=    1973726278 distinct_pc=  3190 rom_base=e00000 mismatch=0
+  run twineag2_play_2p_s5 preset=play_2p  seed=5   sec= 1200.0 retired=    2392423291 distinct_pc= 48188 rom_base=e00000 mismatch=0
+  run twineag2_play_s1 preset=play     seed=1   sec=  960.0 retired=    1913912419 distinct_pc= 27899 rom_base=e00000 mismatch=0
+  run twineag2_play_s7 preset=play     seed=7   sec=  960.0 retired=    1913912419 distinct_pc= 35030 rom_base=e00000 mismatch=0
+  --- valid-run totals: retired=8193974407  distinct primary opcodes=126
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              EXECUTED 2227231
+           subop 88  x1981438
+           subop 8a  x245793
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== ultrax ===
+  run ultrax_idle_s1 preset=idle     seed=1   sec= 1200.0 retired=    2392423291 distinct_pc=  4123 rom_base=e00000 mismatch=0
+  run ultrax_play_2p_s5 preset=play_2p  seed=5   sec= 1050.0 retired=    2093353996 distinct_pc= 34130 rom_base=e00000 mismatch=0
+  run ultrax_play_s1 preset=play     seed=1   sec= 1050.0 retired=    2093353996 distinct_pc= 33101 rom_base=e00000 mismatch=0
+  run ultrax_play_s7 preset=play     seed=7   sec= 1200.0 retired=    2392423291 distinct_pc= 35245 rom_base=e00000 mismatch=0
+  --- valid-run totals: retired=8971554574  distinct primary opcodes=127
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              EXECUTED 2288303
+           subop 88  x2019068
+           subop 8a  x269235
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== vasara ===
+  run vasara_idle_s1 preset=idle     seed=1   sec=  990.0 retired=    1973856945 distinct_pc=  9069 rom_base=c00000 mismatch=0
+  run vasara_play_2p_s5 preset=play_2p  seed=5   sec=  990.0 retired=    1973856821 distinct_pc= 16333 rom_base=c00000 mismatch=0
+  run vasara_play_s1 preset=play     seed=1   sec= 1200.0 retired=    2392553772 distinct_pc= 15935 rom_base=c00000 mismatch=0
+  run vasara_play_s7 preset=play     seed=7   sec= 1200.0 retired=    2392553772 distinct_pc= 14273 rom_base=c00000 mismatch=0
+  --- valid-run totals: retired=8732821310  distinct primary opcodes=95
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== vasara2 ===
+  run vasara2_idle_s1 preset=idle     seed=1   sec=  930.0 retired=    1854228824 distinct_pc= 10910 rom_base=c00000 mismatch=0
+  run vasara2_play_2p_s5 preset=play_2p  seed=5   sec=  930.0 retired=    1854229041 distinct_pc= 19716 rom_base=c00000 mismatch=0
+  run vasara2_play_s1 preset=play     seed=1   sec=  930.0 retired=    1854229103 distinct_pc= 18523 rom_base=c00000 mismatch=0
+  run vasara2_play_s7 preset=play     seed=7   sec=  930.0 retired=    1854229103 distinct_pc= 18612 rom_base=c00000 mismatch=0
+  --- valid-run totals: retired=7416916071  distinct primary opcodes=96
+  GROUP 58  byte string (implemented)              not executed
+  GROUP 59  decimal / BCD           *candidate*    not executed
+  GROUP 5a  half string (implemented)              not executed
+  GROUP 5b  bit string              *candidate*    not executed
+  GROUP 5c  floating point          *candidate*    not executed
+  GROUP 5d  bit field               *candidate*    not executed
+  GROUP 5e  long float (not implemented)           not executed
+  GROUP 5f  float convert           *candidate*    not executed
+
+=== VERDICT (candidate groups, across all valid runs) ===
+# total retired instructions across all valid runs: 64836640459
+GROUP 59  NOT-EXECUTED in any of 8 sets
+GROUP 5b  NOT-EXECUTED in any of 8 sets
+GROUP 5c  NOT-EXECUTED in any of 8 sets
+GROUP 5d  NOT-EXECUTED in any of 8 sets
+GROUP 5f  NOT-EXECUTED in any of 8 sets
+
+All runs passed the ROM-base integrity check.

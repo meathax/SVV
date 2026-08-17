@@ -1,0 +1,149 @@
+{
+  "schema": "ssv-diagnostic-decision-v1",
+  "date": "2026-08-15",
+  "set": "dynagear",
+  "domain": "irq_cadence",
+  "observation": {
+    "mame_start": {"pc": "00F1E8E8", "r2": "FFFA1A72", "r16": "00F29D94", "cursor": 482},
+    "mame_next_pc": "00F1E8EB",
+    "rtl_next_pc": "00F11124",
+    "mame_start_beam": {"x": 220, "y": 215},
+    "mame_handler_beam": {"x": 2, "y": 240},
+    "rtl_irq_request_cycle": 406962020,
+    "rtl_irq_ack_cycles": [406962038, 406962039, 406962040]
+  },
+  "evidence": {
+    "comparator": "sim_output/diff/dynagear-irq-cadence-exec-v2.json",
+    "comparator_sha256": "56da7c63bb7d2fe3ba4e64d21bb07c2b5a57b50274bd52bc435366b96bc4c658",
+    "mame_debugger_sha256": "296a427aa728ffa63fbc53f90f1920c9fa1ec3eb58e360eed52c95ded6d58244",
+    "mame_causal_replay": {
+      "sessions": ["sim_output/diff/dynagear-mame-irq-pe482-b", "sim_output/diff/dynagear-mame-irq-pe482-c"],
+      "debugger_trace_sha256": "7e84807f929cb9e06df1a66c871b726cc60b6c1578f5a2ffe21abbf810559975",
+      "exact_state_occurrences_each": 1,
+      "state": {"pc": "00F1E8E8", "r2": "FFFA1A72", "r16": "00F29D94", "beam": {"x": 220, "y": 215}},
+      "interpretation": "cold_mame_causal_observation_is_deterministic"
+    },
+    "rtl_trace_sha256": "fa28abe6ab439d694823bfaae2e7ca78acde11db7246b5a4d5cd6be16590091a",
+    "journal_sha256": "8396230ffcefd1dc5d7c28bb9391b938c6293b6dd78b9a57daecaa260ab9fcc4",
+    "coin_impulse": -1,
+    "rom_words_match": true,
+    "current_strict_window": {
+      "receipt": "sim_output/diff/dynagear-cross-strict-current-f841-843.json",
+      "receipt_sha256": "0359693fa5f3e1a2301d110e360563940d196097f7b70aac48a39463ccf390cd",
+      "normalization": "cpu_data_lane_mask_v1",
+      "mame_events": 65275,
+      "rtl_events": 61854,
+      "matching_prefix": 21,
+      "first_bad_ordinal": 21,
+      "mame_data": "5100",
+      "rtl_data": "1100",
+      "address": "00790C",
+      "byte_enable": 2,
+      "status": "mismatch_active_target"
+    },
+    "gameplay_soak_frame_crc": {
+      "receipt": "sim_output/diff/dynagear-frame-crc-gameplay-soak.json",
+      "receipt_sha256": "7b252c1dea79dc8ffb13a12eaba891a066e8bacdc2a87b36b91d9208f067bb1b",
+      "comparator_sha256": "0c610d069cc982d7f05f594641bcd1ae423dd191c4b3679132f957d24efd07d3",
+      "normalization": "native_rgb_crc32_v1",
+      "start_frame": 820,
+      "stop_frame": 940,
+      "frames": 121,
+      "matching_prefix": 121,
+      "status": "match"
+    },
+    "gameplay_state_crc": {
+      "mame_capture_a": "sim_output/diff/dynagear-state-mame-a/mame-state.crc",
+      "mame_capture_b": "sim_output/diff/dynagear-state-mame-b/mame-state.crc",
+      "mame_state_sha256": "309e2f028a47d7356b2eda02b33fcd14e58889d563939db538360c29650d3d65",
+      "same_side_receipt": "sim_output/diff/dynagear-state-mame-sameside.json",
+      "same_side_receipt_sha256": "ff13bfc07a9186aff693cfcddcc1538d9bb53627519c9393ecc9f3d6febefc7b",
+      "cross_receipt": "sim_output/diff/dynagear-state-gameplay-soak.json",
+      "cross_receipt_sha256": "5a65da81316a4185d6a430ecfd1e06a50f0b575ee2004cbb2f394a01024927ed",
+      "normalization": "state_crc32_v1",
+      "start_frame": 820,
+      "stop_frame": 940,
+      "matching_prefix": 0,
+      "first_bad_frame": 820,
+      "first_bad_fields": {"scroll63": {"mame": "15c7d3d4", "rtl": "5456bd80"}},
+      "matching_fields_at_first_bad": ["list512", "spr8k", "pal512"],
+      "non_scroll_control_receipt": "sim_output/diff/dynagear-state-gameplay-soak-noscroll.json",
+      "non_scroll_control_receipt_sha256": "26663c92b54e800636814d17b7f605a251ab277ac15dc0da237268a6e00c8fd0",
+      "non_scroll_control_status": "match_121_frames; scroll63_excluded_diagnostic_only",
+      "status": "diagnostic_mismatch_downstream_of_active_cpu_irq_target"
+    },
+    "full_frame_crc_control": {
+      "receipt": "sim_output/diff/dynagear-frame-crc-all.json",
+      "receipt_sha256": "0e22d491ea3eaee9bce35975aa24c55548e68d6e578dbad352c0f222c7695cea",
+      "normalization": "native_rgb_crc32_v1",
+      "start_frame": 0,
+      "stop_frame": 940,
+      "matching_prefix": 1,
+      "first_bad_frame": 1,
+      "status": "mismatch_expected_pregame_control"
+    },
+    "rtl_cadence_run": {
+      "receipt": "sim_output/diff/dynagear-rtl-cadence-pe482-a/rtl-receipt.json",
+      "receipt_sha256": "291BD12CB95D338E9B6794C04D460DA654A3A2D265CB9FC56919E073ADF60E75",
+      "frame_stream_sha256": "6FED82ED218BDFCCE2792F67CD6EEF1C784161F6998CFF93CE202D03D4224B7F",
+      "state_stream_sha256": "D2056A997696936A7ECFB9C589FC693E5DB080817FEDDC20725ADD3A514C60B5",
+      "native_frames": 510,
+      "cycles": 428638144,
+      "dropped": 0,
+      "retire_boundaries_per_steady_frame": {"min": 36028, "max": 40320, "average_frames_ge_20": 37823.42607003891, "frame_482": 36260},
+      "irq_vblank_contract": "one level-3 request/ack sequence per native frame",
+      "semantic_comparison_to_mame": "not_proven"
+    }
+  },
+  "hypotheses": [
+    {"name": "rom_or_fetch_data", "status": "falsified"},
+    {"name": "irq_latch_order", "status": "unselected"},
+    {"name": "natural_cpu_pixel_irq_cadence", "status": "selected_inferred"}
+  ],
+  "rtl_change": null,
+  "verification_change": {
+    "file": "verif/tb_ssv_frame_crc.sv",
+    "kind": "simulation_only_irq_cadence_assertion",
+    "runner_switch": "tools/run_ssv_headless.ps1 -AssertIrqCadence",
+    "dyna_smoke": {
+      "session": "sim_output/diff/irqassert-dynagear-final",
+      "receipt_sha256": "913BF0588E0D98F2B00E84CB19348A9E5D45540B7E59022BA256F53A2025343C",
+      "frames": 20,
+      "result": "pass; one handler entry per completed VBlank interval; zero renderer overruns"
+    },
+    "cairblad_scope_smoke": {
+      "session": "sim_output/diff/irqassert-cairblad-diag",
+      "receipt_sha256": "F98030B48F030BA43A83C2EC52BB92998C6696A485B15CF239F685B7673D2B6F",
+      "frames": 4,
+      "result": "pass with diagnostic IGNORE_NONBLACK; no duplicate handler assertion; exact-one opt-in intentionally not enabled because CPU remained in boot"
+    }
+  },
+  "known_unknowns": ["exact PCB VBlank-to-CPU phase", "fractional CEN versus IRQ-latch contribution", "semantic equivalence of MAME schedule entries and RTL retire boundaries"],
+  "cursor_483_falsification": {
+    "session": "sim_output/diff/dynagear-mame-irq-pe483-a",
+    "receipt_sha256": "8443ba2f743cab0bc7d7da193641a2b04c664920410db2a2e4acf19e22596211",
+    "debugger_trace_sha256": "32bd82abd5e2ea11ed450e0906df223a002e3591e48f40c44efa87a5ed216748",
+    "receipt_complete": true,
+    "frames": 941,
+    "gameplay_entry_seen": true,
+    "dropped": 0,
+    "journal_sha256": "8396230ffcefd1dc5d7c28bb9391b938c6293b6dd78b9a57daecaa260ab9fcc4",
+    "cursor_482_state_found_at_cursor_483": false,
+    "handler_entry": "F11124",
+    "handler_beam": {"x": 2, "y": 240},
+    "terminal_idle_pc": "F10575",
+    "interpretation": "barrier_translation_falsified; natural_cpu_irq_cadence_remains_inferred"
+  },
+  "mcp_preflight": {
+    "mame_ping": "pong",
+    "config_check": "okForMameLaunch",
+    "rom_audit": "dynagear_good",
+    "ioports": "discovered_P1_P2_SYSTEM",
+    "persistent_session": "launch_status_stop_ok",
+    "status_frame": 2862,
+    "verilator_preflight": {"headless": true, "display_backend": "none", "strict_correctness_defaults": true},
+    "capability_gap": "MCP live surface does not preserve the project-owned journaled strict trace, native frame/state/audio artifacts, or final zero-drop receipt; acceptance used project-owned adapters",
+    "mutations": "none"
+  },
+  "status": "evidence_blocker_no_rtl_change"
+}

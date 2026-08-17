@@ -19,7 +19,13 @@ This is an upper bound, not a disassembly: most candidates will be operand or
 table bytes.  It is useful in exactly one direction - a group with zero
 candidates cannot be executed by any path, reached or not.
 
-Usage: scan-v60-opcode-sites.py sim_output/rom/maincpu.bin [covered_pc_list]
+Usage: scan-v60-opcode-sites.py <maincpu.bin> [covered_pc_list]
+
+The program-ROM base defaults to Dyna Gear's 0xF00000.  ssv_map() maps the
+maincpu region as `map(rom, 0xffffff)`, so for any other SSV set the base is
+`0x1000000 - len(rom)`; pass --base=auto to derive it that way, or
+--base=<hex> to set it explicitly.  The base only shifts the printed site
+addresses -- the candidate *counts* are base-independent.
 """
 import sys
 from collections import Counter
@@ -65,9 +71,22 @@ def scan(rom, table):
 
 
 def main(argv):
+    global ROM_BASE
+    argv = list(argv)
+    base_arg = None
+    for a in list(argv[1:]):
+        if a.startswith("--base="):
+            base_arg = a.split("=", 1)[1]
+            argv.remove(a)
+
     rom_path = argv[1]
     with open(rom_path, "rb") as fh:
         rom = fh.read()
+
+    if base_arg == "auto":
+        ROM_BASE = 0x1000000 - len(rom)
+    elif base_arg is not None:
+        ROM_BASE = int(base_arg, 16)
 
     covered = set()
     if len(argv) > 2:

@@ -1,5 +1,137 @@
 # Pre-RBF optimization notes
 
+## Measured pre-RBF baseline and the real HDMI deficit (13 Aug 2026, fit+STA, no RBF)
+
+This is the first fit run against the pruned universal profile, so it also
+retires the "expected but unmeasured" claims of the two entries below it.
+
+**A stale `db/` was silently blocking every compile.** Before any of this could
+be measured, `quartus_map` aborted with `Fatal Error: Access Violation` inside
+`STA_SCC_MGR::find_and_create_scc_bypass_edges`, reached from
+`read_and_apply_sdc_constraints`. The crash is deterministic and survives a
+single-process retry, so it is not the concurrency hazard the global build slot
+already guards; `SMART_RECOMPILE ON` was reusing incremental state whose netlist
+shape predated the optional-device pruning. Moving `db/` and `incremental_db/`
+aside cleared it immediately. `tools/build-ssv.ps1` now recognises that exact
+signature, relocates both directories under `tmp/` (never deletes them) and
+restarts the stage sequence once. Structural RTL edits are the trigger to watch
+for: removing module instances is enough.
+
+Measured, against the retained 10:54 pre-pruning fit:
+
+| | pre-pruning | 13 Aug pruned | delta |
+|---|---:|---:|---:|
+| ALMs | 39,866 (95%) | **39,628 (95%)** | −238 |
+| Registers | 27,207 | **26,055** | −1,152 |
+| RAM blocks | 517 (93%) | 517 (93%) | — |
+| DSP | 44 | 44 | — |
+
+**The pruning is real but nowhere near enough**: −238 ALMs did not move worst
+slack at 100 C at all (−0.064 ns both times). Small area wins are not the lever.
+
+**The failing paths were re-measured rather than assumed, and the earlier
+diagnosis was wrong.** The pre-pruning report showed −1.285 ns clock skew, which
+reads as placement scatter on a full device. On the current fit the same domain
+shows **skew of only −0.170 ns** and **data delay of 6.426 ns against a 6.732 ns
+period across 4 logic levels**. The miss is routing-delay bound, not skew bound.
+Both failing paths are inside `sys/ascal`'s pixel-fetch stage:
+
+```
+-0.064  ascal|o_acpt4[0]  -> ascal|o_hpixs.b[4]        4 levels
+-0.026  ascal|o_vacpt[10] -> ascal|o_vpixq_pre[3].r[6] 4 levels
+```
+
+Everything else passes at all four corners, and unconstrained clocks are 0.
+
+Consequences for the remaining levers:
+
+- **Seed sweeping is spent.** `output_files/seed-sweep.log` rejected seeds 1, 2,
+  3 and 5 at −0.064 to −0.135 ns. The sweep predates the pruned netlist, so it
+  is repeatable, but the distribution is tight and centred on the miss.
+- **Fitter-effort escalation stays impossible** — Standard Fit crashes
+  `quartus_fit` on this install; that note is unchanged.
+- **`ROUTER_TIMING_OPTIMIZATION_LEVEL` NORMAL → MAXIMUM is the on-target
+  change**, because it is the only available setting that attacks routing delay
+  directly. Critically, this is *not* the configuration that crashed on 28 Jul:
+  that failure was Standard Fit **plus** router MAXIMUM, and Fast Fit with
+  router MAXIMUM had never been tried. Memory headroom also looks adequate —
+  the 13 Aug Fast Fit peaked at 8,732 MB virtual and completed successfully,
+  far above the 4,649 MB at which the Standard Fit attempt died, so that figure
+  was never a hard host ceiling. `Assert-BuildPolicy` was updated deliberately
+  alongside the QSF so the pinned profile moves as one reviewed change.
+
+### Result: router MAXIMUM closed the 100 C corner, a seed closed the rest
+
+Single-variable runs, each measured with `-NoAssemble` (map/fit/STA, no RBF):
+
+| Configuration | Slow 100 C setup | Slow -40 C setup |
+|---|---:|---:|
+| pre-pruning baseline | -0.064 | +0.138 |
+| pruned netlist, fresh db | -0.064 | -0.173 |
+| + `ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM` | **+0.081** | -0.173 |
+| + router MAXIMUM, `SEED 3` | worst across all corners **+0.04** | |
+
+Router MAXIMUM did the structural work and **did not crash `quartus_fit`**,
+confirming the 28 Jul failure belonged to Standard Fit rather than the router.
+ALMs were unchanged at 39,628, so the gain was pure routing — exactly what the
+data-delay diagnosis predicted, and the reason this was tried before any further
+area work.
+
+It did not help the -40 C corner because that corner fails by a **different
+mechanism**, which is worth recording so it is not re-attacked with the wrong
+tool. Those paths launch from `ascal`'s line-buffer M10K write-enable registers
+into `o_vpix_inner`/`o_vpix_outer` with **skew -2.206 ns and only 4.5 ns of data
+delay** — block-RAM placement, not routing delay.
+
+**M10K cannot be freed to relieve it, and the older notes overstate the floor.**
+The measured breakdown of the 517 blocks is: `sprite_ram` 256, `palette_ram` 96,
+`work_ram` 64 (416 board-accurate, at the Cyclone V floor), `ascal` 32
+(framework, hard stop), sprite renderer 45, everything else 24. The 28 Jul entry
+below claims a 448-block floor made of 256/128/64; the palette figure is 96, not
+128, so the real board-accurate floor is **416**. The renderer's 45 is the only
+reclaimable pool and shrinking it means reducing cache/pool depth, i.e. dropping
+sprites — not a trade worth 0.173 ns.
+
+The residual misses were tightly clustered (-0.173, -0.119, -0.096, -0.014),
+which is the placement lottery this QSF already documents, and the earlier sweep
+was invalid once both the netlist and the router level had changed. Re-sweeping
+found `SEED 3` clean at +0.04 ns. That is a passing lottery ticket rather than
+margin, so the sweep was allowed to continue through seeds 7, 11 and 19 to pin
+the best rather than the first. Two caveats on that number: `Get-HdmiSlack`
+scans only `pll_hdmi` rows, so the complete 144-check STA summary must be
+re-verified on the finally pinned seed; and the sweep overwrites
+`output_files\*.sta.summary` per seed, so a final compile on the pinned seed is
+required regardless of which seed wins.
+
+`tools/seed-sweep.ps1` gained `-NoAssemble` for this. It previously ran a *full*
+compile per seed, which assembles and stages `releases\Arcade-SSV.rbf` for every
+seed tried — that both requires RBF-build authorization and leaves the staged
+artifact holding whichever seed happened to be compiled last. Its status labels
+were corrected at the same time: under `-NoAssemble` no RBF exists and
+`report-quartus.ps1` never runs, so a zero exit means only that the stages
+completed. Reporting that as `deployable` would have overstated what was
+actually checked; it now reports `timing-clean`/`timing-miss`.
+
+Also confirmed clean while auditing, so they are not hidden release blockers:
+both RAM-placement gates in `tools/report-quartus.ps1` already pass
+(`line_page_starts` and the single `line_meta` instance are both `M10K block` —
+`ssv_mlab240_sdp` lands in M10K because 240x121 bits exceeds MLAB), the profile
+audit passes for all eight sets, and `Unconstrained Clocks` is 0.
+
+One behaviour-neutral RTL change was taken this pass:
+`ssv_cached_sprite_renderer.line_page_ram_wr_data` was a 3:1 mux across all
+`LINE_PAGE_META_WIDTH` bits in which two branches wrote an identical constant
+and the idle default wrote a `'0` that no write port ever commits. The data bus
+is a don't-care whenever `we == 0`, so defaulting it to the fill constant and
+merging the two fill states leaves a plain 2:1 select with every written value
+unchanged. Focused bring-up regressions pass with a pass set byte-identical to
+the pre-change baseline.
+
+`tools/build-ssv.ps1` also gained `-NoAssemble`, which runs map/fit/STA through
+explicit stages and stops. `quartus_sh --flow compile` always runs the
+assembler, so it could not be used to measure timing without producing a
+bitstream. No RBF was built in this pass.
+
 ## Qualified-profile optional-device pruning (13 Aug 2026, no Quartus/RBF)
 
 The retained 13 Aug synthesis report showed that optional hardware unreachable

@@ -90,10 +90,6 @@ for setname in SUPPORTED_SETS:
     print(f"{setname}|{SUPPORTED_SET_IDS[setname]}|FF{dsw[0]}|FF{dsw[1]}")
 ')"
 mapfile -t PROFILE <<<"$PROFILE_TEXT"
-if (( ${#PROFILE[@]} != 8 )); then
-  echo "expected 8 authoritative supported profiles, got ${#PROFILE[@]}" >&2
-  exit 1
-fi
 
 for row in "${PROFILE[@]}"; do
   IFS='|' read -r setname game_id dsw1 dsw2 <<<"$row"

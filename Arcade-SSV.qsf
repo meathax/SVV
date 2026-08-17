@@ -70,7 +70,22 @@ set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP OFF
 set_global_assignment -name SYNTH_GATED_CLOCK_CONVERSION ON
 set_global_assignment -name PRE_MAPPING_RESYNTHESIS OFF
 set_global_assignment -name ROUTER_CLOCKING_TOPOLOGY_ANALYSIS ON
-set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL NORMAL
+# Raised from NORMAL on 13 Aug 2026 against measured evidence. The 13 Aug fit
+# (39,628 ALMs, fresh db) fails only pll_hdmi setup, at -0.064 ns / 100 C and
+# -0.173 ns / -40 C, and every failing path is inside sys/ascal's pixel-fetch
+# stage (o_acpt4 -> o_hpixs, o_vacpt -> o_vpixq_pre). Those paths are NOT skew
+# bound -- clock skew is only -0.170 ns -- they are data-delay bound: 6.426 ns
+# of the 6.732 ns period across 4 logic levels. Routing delay is therefore the
+# thing to attack, and this is the only setting that attacks it directly.
+#
+# This is not the configuration that crashed on 28 Jul. That failure was
+# STANDARD FIT *plus* router MAXIMUM; Fast Fit with router MAXIMUM was never
+# tried. The Fast Fit note above stands unchanged and FITTER_EFFORT is
+# deliberately left alone. Memory headroom also looks adequate: the 13 Aug Fast
+# Fit peaked at 8,732 MB virtual and completed, far above the 4,649 MB at which
+# the Standard Fit attempt died, so that figure was not a hard host ceiling.
+# If quartus_fit ever ends unexpectedly with this on, revert to NORMAL first.
+set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
 set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
@@ -78,7 +93,26 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 # worsening worst setup slack from -0.044 ns to -0.268 ns.  MEDIUM retains the
 # larger M10K placement saving without spending timing margin for dense packing.
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 15
+# SEED STATUS 13 Aug 2026 -- NO SEED IS CURRENTLY KNOWN-GOOD. Do not treat this
+# value as a closed result.
+#
+# Seed 3 measured timing-clean at +0.04 ns worst pll_hdmi setup under router
+# MAXIMUM, but that was against the PRE-cleanup netlist. After the 13 Aug RTL
+# cleanup (V60 S_FILLW dead-arm removal, width/comment changes) the same seed 3
+# re-fits at -0.156 ns / 100 C and -0.069 ns / -40 C. That is the expected
+# behaviour of a placement lottery, not a regression caused by the cleanup:
+# +0.04 ns was never margin, and the cleanup REDUCED area (39,628 -> 39,257).
+#
+# Measured so far under router MAXIMUM: 3 (+0.04 pre-cleanup / -0.156 post),
+# 7 (stage failed), 11 (-0.077). Seeds 19, 23 and 31 were queued but the sweep
+# was stopped before any of them completed a fit, so 19 -- which this file was
+# left on -- has never been measured at all. Restored to 3 as the only seed
+# with any recorded clean result.
+#
+# Both failing corners show TNS == Slack, i.e. exactly ONE failing endpoint per
+# corner, and both are inside sys/ascal. Next step is a fresh sweep on the
+# current netlist.
+set_global_assignment -name SEED 3
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

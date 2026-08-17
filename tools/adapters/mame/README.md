@@ -1,6 +1,8 @@
 # MAME capture adapter
 
-`capture_template.lua` is a deliberately incomplete board adapter. Codex must wire it to the exact
+`capture_template.lua` is the functional bus-only SSV fallback adapter. The active universal supported-set cold
+capture path is `tools/mame-ssv-headless.lua`, which also owns frame artifacts and journaled inputs.
+The fallback is wired to the exact
 MAME device/address-space and event phase proved in `docs/OBSERVABILITY.json`.
 
 The capture task receives these environment variables:
@@ -21,7 +23,7 @@ A normal launch shape is:
     "${MAME_EXE}",
     "GAME_SHORTNAME",
     "-rompath", "${MAME_ROMS}",
-    "-window", "-nothrottle", "-video", "none", "-sound", "none",
+    "-nothrottle", "-video", "none", "-sound", "none",
     "-autoboot_script", "${PROJECT}\\sim\\mame\\capture.lua"
   ]
 }

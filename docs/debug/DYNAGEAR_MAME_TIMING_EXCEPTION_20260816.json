@@ -1,0 +1,69 @@
+{
+  "schema": "ssv-reviewed-mame-reference-exception-v1",
+  "date": "2026-08-16",
+  "set": "dynagear",
+  "profile": "MAME-0.289-behavioral-reference",
+  "status": "reviewed_exception_pending_other_gates",
+  "production_rtl_change": null,
+  "reference": {
+    "mame_version": "0.289",
+    "mame_sha256": "af6966108d9b52c22465c6d50f4e5d50cc371b50f2d27dc443935f287aad37a3",
+    "source_files": [
+      "D:/Arcade/AI/mame289/src/devices/cpu/v60/v60.cpp:614-626",
+      "D:/Arcade/AI/mame289/src/mame/seta/ssv.cpp:239-263",
+      "D:/Arcade/AI/mame289/src/mame/seta/ssv.cpp:2422-2440"
+    ],
+    "timing_statement": "MAME uses a documented flat average instruction charge; exact V60 READY/T-state and VBlank sampling phase are not present in the available primary evidence."
+  },
+  "active_divergence": {
+    "normalization": "cpu_data_lane_mask_v1",
+    "ordinal": 535665,
+    "mame": {
+      "pc": "00F10575",
+      "event": "read",
+      "address": "000000",
+      "data": "0000",
+      "byte_enable": 1,
+      "frame": 21
+    },
+    "rtl": {
+      "event_sequence": 583729,
+      "event": "write",
+      "address": "007908",
+      "data": "0100",
+      "byte_enable": 2,
+      "producer": "natural_level3_vblank_handler_entry_00F11124"
+    },
+    "reference_trace_sha256": "1291e63b402d53c69304ede09f61454ad03d491f4f2f470d00879144ba1ee3f1",
+    "rtl_trace_sha256": "f71af953c6fb024ed5c323f9f59af79f7348d61be8d68a886045b9c69b613ebd"
+  },
+  "falsification": {
+    "probe": "simulation-only +IRQ3_DELAY_SYS",
+    "canonical_delay_sys": 0,
+    "large_delay_sys": 200,
+    "large_delay_first_bad_ordinal": 535670,
+    "large_delay_result": "handler entry shifted by ten RTL retirements; strict stream remained divergent",
+    "interpretation": "phase contributes to the ordering but does not identify a justified production correction"
+  },
+  "allowed_scope": {
+    "domain": "cpu_data",
+    "condition": "natural V60 retirement versus raster IRQ ordering at the bound active divergence",
+    "non_resynchronizing": true,
+    "no_tolerance": true,
+    "no_masking": true,
+    "no_rtl_game_branch": true
+  },
+  "required_companion_gates": [
+    "complete deterministic MAME and headless-Verilator gameplay receipts",
+    "native RGB CRC match for declared gameplay/soak frames",
+    "controls, DIPs, service/test, reset/reload, watchdog and persistence gates",
+    "independent ES5506 semantic and real-ROM zero-underrun evidence",
+    "focused/full shared eight-set regression disposition",
+    "release/provenance/observability/architecture records reconciled"
+  ],
+  "known_unknowns": [
+    "V60 external READY wait-state selection on the original board",
+    "VBlank latch sampling phase relative to V60 bus cycles",
+    "whether MAME debugger instruction boundaries count exactly the same event as RTL retirement"
+  ]
+}

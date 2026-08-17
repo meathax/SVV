@@ -4,6 +4,23 @@ This is the dependency-ordered plan for taking the current SSV RTL from its
 simulation bring-up state to a reliable, fully playable Dyna Gear core on a
 real MiSTer FPGA.
 
+## 2026-08-16 local gate status
+
+The goal excludes only the final Quartus/RBF build and physical MiSTer test,
+but the local 100% gate is not yet closed. A fresh complete 941-frame
+MAME/RTL pair has a strict `cpu_data` mismatch at ordinal 535665: MAME is
+idle at `PC=0x00F10575`, while RTL is entering the level-3 VBlank handler and
+writes the interrupt frame at work RAM `0x007908`. This is an unresolved
+shared V60/IRQ cadence issue; no timing patch is justified without board-level
+wait-state/phase evidence. Native video CRCs match in the established gameplay
+window, but full PCM is silent because the CPU has not reached Dyna's ES5506
+programming stream. Direct controls, an isolated system journal, and an
+isolated player journal pass; the combined control matrix now passes with one
+manifest-declared watchdog reset in the Test/service transition window,
+matching MAME's reset-image CRC transition. The watchdog remains strict for
+scenarios with no declared reset. The detailed receipt and hashes are in
+[`docs/debug/DYNAGEAR_FRESH_EVIDENCE_20260816.md`](debug/DYNAGEAR_FRESH_EVIDENCE_20260816.md).
+
 **Sim-first gameplay (attract + coin/start, no RBF):** follow
 [`DYNAGEAR_GAMEPLAY_PLAN.md`](DYNAGEAR_GAMEPLAY_PLAN.md). Use this document for
 the full release path (audio depth, Quartus, physical MiSTer) after those sim

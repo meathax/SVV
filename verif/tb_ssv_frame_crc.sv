@@ -3,7 +3,7 @@
 // Plusargs:
 //   +MAINROM= +SPRROM= +FRAME_CRC=path +STATE_CRC=path
 //   +FRAMES=N +SOAK_FRAMES=N
-//   +GAME_ID=0..9 +DSW1= +DSW2= +SCENARIO=attract_idle|coin_start_p1...
+//   +GAME_ID=0..8 +DSW1= +DSW2= +SCENARIO=attract_idle|coin_start_p1...
 //   +DUMP_FRAME_DIAG (IRQ/list/scroll/pal snapshots at vb-edge)
 //   +DUMP_LATE_LINE (classify the first object-renderer late line)
 //   +REQUIRE_GAMEPLAY (require a jungle-stage visual at frame 850)
@@ -21,12 +21,27 @@ module tb_ssv_frame_crc(
     output logic [63:0] checkpoint_native_frame,
     output logic        checkpoint_ve_seen,
     output logic [31:0] checkpoint_post_ve_frame
+`ifdef SSV_HEADLESS_DIFF
+    , output logic [23:0] headless_rgb
+    , output logic        headless_pixel_valid
+    , output logic signed [15:0] headless_audio_l
+    , output logic signed [15:0] headless_audio_r
+    , output logic        headless_audio_valid
+    , output logic        headless_frame_tick
+`endif
 );
 `else
 module tb_ssv_frame_crc;
 logic run_done;
 `endif
 `include "ssv_tb_crc32.svh"
+
+// Slang/Quartus do not permit a hierarchical localparam in a constant
+// part-select.  The universal renderer's release CACHE_ENTRIES is 2048, so
+// LINE_COUNT_WIDTH=$clog2(2048+1)=12.  Keep this probe-side mirror explicit;
+// if the renderer capacity changes, update this diagnostic width with it.
+localparam integer SSV_LINE_COUNT_WIDTH = 12;
+localparam integer SSV_LINE_META_WIDTH = 27;
 
 `ifdef SSV_VISUAL
 import "DPI-C" function int ssv_visual_present(
@@ -270,9 +285,52 @@ assign sdr_p4_dout = use_real_sdram ? real_p4_dout : beh_p4_dout;
 `endif
 logic [23:0] rgb;
 logic ce_pixel, hs, vs, hb, vb;
+logic renderer_overrun;
 logic signed [15:0] audio_l, audio_r;
 logic [31:0] debug_pc;
 logic [23:0] debug_status;
+`ifdef SSV_HEADLESS_DIFF
+logic debug_v60_retire;
+logic [31:0] debug_v60_retire_pc, debug_v60_psw;
+logic [7:0] debug_v60_opcode;
+logic [1023:0] debug_v60_gprs;
+logic debug_mainbus_complete, debug_mainbus_write;
+logic [23:0] debug_mainbus_addr;
+logic [15:0] debug_mainbus_data;
+logic [1:0] debug_mainbus_be;
+logic [7:0] debug_mainbus_device;
+logic debug_ifetch_complete;
+logic [23:0] debug_ifetch_addr;
+logic [63:0] debug_ifetch_data;
+logic [31:0] debug_reset_epoch, debug_frame;
+logic [8:0] debug_scanline, debug_hpos;
+logic debug_irq_ack;
+logic [7:0] debug_irq_vector, debug_irq_requested, debug_irq_enabled;
+logic debug_watchdog_kick;
+logic debug_watchdog_reset;
+logic debug_st010_retire, debug_st010_host_access;
+logic debug_st010_fetch_req, debug_st010_fetch_done;
+logic [13:0] debug_st010_pc;
+logic debug_sound_commit, debug_sound_irq_promote;
+logic debug_sound_voice_writeback;
+logic [4:0] debug_sound_voice;
+logic [6:0] debug_sound_page;
+logic [3:0] debug_sound_reg;
+logic [31:0] debug_sound_data;
+logic debug_sample_req, debug_sample_done, debug_sample_tick, debug_sample_underrun;
+logic debug_video_enable, debug_line_boundary, debug_frame_boundary;
+`endif
+
+`ifdef SSV_HEADLESS_DIFF
+always_comb begin
+    headless_rgb = rgb;
+    headless_pixel_valid = ce_pixel && !hb && !vb;
+    headless_audio_l = audio_l;
+    headless_audio_r = audio_r;
+    headless_audio_valid = debug_sample_tick;
+    headless_frame_tick = debug_frame_boundary;
+end
+`endif
 integer visual_width, visual_height, visual_expected_pixels;
 longint unsigned visual_loop_trace_start;
 
@@ -330,6 +388,11 @@ logic [15:0] external_ram [0:229375];
 
 string main_path, sprite_path, crc_path, state_path, scenario;
 string game_name;
+`ifdef SSV_HEADLESS_DIFF
+string input_journal_path, scenario_file_path;
+bit input_journal_enabled, gameplay_entry_reached;
+integer neutral_after_frame, gameplay_entry_frame, input_cursor;
+`endif
 ssv_cfg_t sim_cfg;
 integer selected_game_id;
 integer prog_bytes, gfx_stream_bytes, gfx_quarter_bytes, sample_bytes;
@@ -460,6 +523,10 @@ integer stuck, last_pc_i;
 logic [31:0] last_pc;
 integer bg_overruns, obj_overruns;
 integer watchdog_soft_resets;
+integer expected_watchdog_resets;
+integer expected_watchdog_min_frame;
+integer expected_watchdog_max_frame;
+integer first_watchdog_reset_frame;
 logic wdog_rst_d;
 integer obj_line_cycles, obj_rom_wait_cycles, obj_max_line_cycles;
 integer obj_line_descriptors, obj_line_fetches, obj_line_tilemap_fetches;
@@ -482,6 +549,7 @@ logic [127:0] late_desc;
 logic dump_pixels, dump_frame_diag, dump_ppm_en, dump_ppm_open;
 logic ppm_open_event;
 logic ignore_overrun;
+logic assert_irq_cadence;
 // Diagnostic runs that intentionally stop on a renderer overflow can leave
 // the frame black; allow their allocator census to print without weakening
 // the normal strict attract gate.
@@ -495,6 +563,7 @@ longint unsigned retire_count, next_irq_retire;
 longint unsigned cpu_activity_count;
 longint unsigned last_vb_retire, last_irq_entry_retire;
 integer irq_entries_post_ve, vb_pulses_post_ve;
+integer irq_entries_frame;
 integer diag_i;
 logic [31:0] list_crc, scroll_crc, spr8k_crc, pal_crc;
 
@@ -565,9 +634,90 @@ ssv_core dut (
     .in_coord_x(12'h800), .in_coord_y(12'h800), .in_paddle(8'h80), .in_ball_switch(1'b0),
     .rgb(rgb), .ce_pixel(ce_pixel), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
     .audio_l(audio_l), .audio_r(audio_r),
-    .wdog_rst(wdog_rst),
+    .wdog_rst(wdog_rst), .renderer_overrun(renderer_overrun),
     .debug_pc(debug_pc), .debug_status(debug_status)
+`ifdef SSV_HEADLESS_DIFF
+    , .debug_v60_retire(debug_v60_retire),
+    .debug_v60_retire_pc(debug_v60_retire_pc),
+    .debug_v60_opcode(debug_v60_opcode), .debug_v60_psw(debug_v60_psw),
+    .debug_v60_gprs(debug_v60_gprs),
+    .debug_mainbus_complete(debug_mainbus_complete),
+    .debug_mainbus_write(debug_mainbus_write),
+    .debug_mainbus_addr(debug_mainbus_addr),
+    .debug_mainbus_data(debug_mainbus_data), .debug_mainbus_be(debug_mainbus_be),
+    .debug_mainbus_device(debug_mainbus_device),
+    .debug_ifetch_complete(debug_ifetch_complete),
+    .debug_ifetch_addr(debug_ifetch_addr), .debug_ifetch_data(debug_ifetch_data),
+    .debug_reset_epoch(debug_reset_epoch), .debug_frame(debug_frame),
+    .debug_scanline(debug_scanline), .debug_hpos(debug_hpos),
+    .debug_irq_ack(debug_irq_ack), .debug_irq_vector(debug_irq_vector),
+    .debug_irq_requested(debug_irq_requested), .debug_irq_enabled(debug_irq_enabled),
+    .debug_watchdog_kick(debug_watchdog_kick),
+    .debug_watchdog_reset(debug_watchdog_reset),
+    .debug_st010_retire(debug_st010_retire), .debug_st010_pc(debug_st010_pc),
+    .debug_st010_host_access(debug_st010_host_access),
+    .debug_st010_fetch_req(debug_st010_fetch_req),
+    .debug_st010_fetch_done(debug_st010_fetch_done),
+    .debug_sound_commit(debug_sound_commit), .debug_sound_page(debug_sound_page),
+    .debug_sound_reg(debug_sound_reg), .debug_sound_data(debug_sound_data),
+    .debug_sound_irq_promote(debug_sound_irq_promote),
+    .debug_sound_voice_writeback(debug_sound_voice_writeback),
+    .debug_sound_voice(debug_sound_voice),
+    .debug_sample_req(debug_sample_req), .debug_sample_done(debug_sample_done),
+    .debug_sample_tick(debug_sample_tick),
+    .debug_sample_underrun(debug_sample_underrun),
+    .debug_video_enable(debug_video_enable),
+    .debug_line_boundary(debug_line_boundary),
+    .debug_frame_boundary(debug_frame_boundary)
+`endif
 );
+
+`ifdef SSV_HEADLESS_DIFF
+ssv_diff_probe diff_probe (
+    .clk(clk_sys), .rst(core_rst), .run_done(run_done),
+    .checkpoint_prepare(checkpoint_prepare),
+    .checkpoint_restore(checkpoint_restore), .pc(debug_pc),
+    .reset_epoch(debug_reset_epoch), .frame(debug_frame),
+    .post_epoch_frame(post_ve_frames),
+    .scanline(debug_scanline), .hpos(debug_hpos),
+    .retire(debug_v60_retire), .retire_pc(debug_v60_retire_pc),
+    .retire_opcode(debug_v60_opcode), .retire_psw(debug_v60_psw),
+    .retire_gprs(debug_v60_gprs),
+    .mainbus_complete(debug_mainbus_complete),
+    .mainbus_write(debug_mainbus_write), .mainbus_addr(debug_mainbus_addr),
+    .mainbus_data(debug_mainbus_data), .mainbus_be(debug_mainbus_be),
+    .mainbus_device(debug_mainbus_device),
+    .ifetch_complete(debug_ifetch_complete), .ifetch_addr(debug_ifetch_addr),
+    .ifetch_data(debug_ifetch_data), .irq_ack(debug_irq_ack),
+    .irq_vector(debug_irq_vector), .irq_requested(debug_irq_requested),
+    .irq_enabled(debug_irq_enabled), .watchdog_kick(debug_watchdog_kick),
+    .watchdog_reset(debug_watchdog_reset),
+    .st010_retire(debug_st010_retire), .st010_pc(debug_st010_pc),
+    .st010_host_access(debug_st010_host_access),
+    .st010_fetch_req(debug_st010_fetch_req), .st010_fetch_done(debug_st010_fetch_done),
+    .sound_commit(debug_sound_commit), .sound_page(debug_sound_page),
+    .sound_reg(debug_sound_reg), .sound_data(debug_sound_data),
+    .sound_irq_promote(debug_sound_irq_promote),
+    .sound_voice_writeback(debug_sound_voice_writeback),
+    .sound_voice(debug_sound_voice), .sample_req(debug_sample_req),
+    .sample_done(debug_sample_done), .sample_tick(debug_sample_tick),
+    .sample_underrun(debug_sample_underrun), .video_enable(debug_video_enable),
+    .line_boundary(debug_line_boundary), .frame_boundary(debug_frame_boundary),
+    .renderer_overrun(renderer_overrun)
+);
+`endif
+
+// One immutable gameplay journal is shared by the headless MAME and RTL
+// lanes. This DPI boundary is simulation-only; legacy hard-coded diagnostic
+// scenarios remain available when no journal is supplied.
+`ifdef SSV_HEADLESS_DIFF
+import "DPI-C" function int ssv_headless_input_packet(
+    input int unsigned frame,
+    output int unsigned p1_pressed,
+    output int unsigned p2_pressed,
+    output int unsigned system_pressed
+);
+`endif
 
 // A qualified game must service its descriptor-selected watchdog. Count the
 // actual feedback pulse independently of core_rst so a soft reset cannot erase
@@ -576,11 +726,14 @@ always_ff @(posedge clk_sys) begin
     if (rst) begin
         wdog_rst_d <= 1'b0;
         watchdog_soft_resets <= 0;
+        first_watchdog_reset_frame <= -1;
     end
     else begin
         wdog_rst_d <= wdog_rst;
         if (wdog_rst && !wdog_rst_d) begin
             watchdog_soft_resets <= watchdog_soft_resets + 1;
+            if (first_watchdog_reset_frame < 0)
+                first_watchdog_reset_frame <= post_ve_frames;
             $display("SSV_WATCHDOG_SOFT_RESET count=%0d frame=%0d pc=%08x",
                      watchdog_soft_resets + 1, post_ve_frames, debug_pc);
         end
@@ -673,7 +826,7 @@ always_ff @(posedge clk_sys) begin
         if (obj_cache_busy_d && !dut.obj_cache_busy) begin
             for (occ_i = 0; occ_i < 240; occ_i = occ_i + 1) begin
                 occ_v = int'(dut.sprite_renderer.line_meta[occ_i][
-                    dut.sprite_renderer.LINE_COUNT_WIDTH-1:0]);
+                    SSV_LINE_COUNT_WIDTH-1:0]);
                 if (occ_v >= 0 && occ_v < OCC_BINS)
                     occ_hist[occ_v] = occ_hist[occ_v] + 1;
                 occ_lines_sampled = occ_lines_sampled + 1;
@@ -1164,6 +1317,32 @@ task automatic apply_inputs(input integer f);
     in_extra = 16'hffff;
     in_p1 = 16'hffff;
     in_system = 16'hffff;
+`ifdef SSV_HEADLESS_DIFF
+    if (input_journal_enabled) begin
+        int unsigned journal_p1, journal_p2, journal_system;
+        if (!ssv_headless_input_packet(f, journal_p1, journal_p2, journal_system))
+            $fatal(1, "missing input journal packet frame=%0d path=%s", f,
+                   input_journal_path);
+        if (neutral_after_frame >= 0 && f >= neutral_after_frame &&
+            (journal_p1 != 0 || journal_p2 != 0 || journal_system != 0))
+            $fatal(1, "non-neutral input after gameplay entry frame=%0d p1=%08x p2=%08x system=%08x",
+                   f, journal_p1, journal_p2, journal_system);
+        in_p1 = ~journal_p1[15:0];
+        in_p2 = ~journal_p2[15:0];
+        in_system = ~journal_system[15:0];
+        in_extra = 16'hffff;
+        // The journal uses the MAME port masks.  Survival Arts' live
+        // ADD_BUTTONS window is translated here to the descriptor-selected
+        // active-low extra-input port; other profiles leave it idle.
+        in_extra[0] = ~journal_p1[8];
+        in_extra[1] = ~journal_p1[9];
+        in_extra[2] = ~journal_p1[10];
+        in_extra[4] = ~journal_p2[8];
+        in_extra[5] = ~journal_p2[9];
+        in_extra[6] = ~journal_p2[10];
+        input_cursor = f;
+    end else begin
+`endif
     // Drift Out '94 asks for a driver name before the race. Its accelerator
     // is hardware bit 2 (MAME's P1 Button 2); four separate edges enter the name and
     // leave the entry screen. Keep this in a verification-only scenario so
@@ -1359,6 +1538,9 @@ task automatic apply_inputs(input integer f);
             if (((f - 820 + 1800) % 3600) < 4)   in_system[1] = 1'b0;
         end
     end
+`ifdef SSV_HEADLESS_DIFF
+    end
+`endif
 `ifdef SSV_VISUAL
     // SDL reports active-high pressed controls; the SSV ports are active low.
     // Overlay live controls after any deterministic scenario inputs so the
@@ -1427,6 +1609,7 @@ always_ff @(posedge clk_sys) begin
         last_pc <= 32'hffffffff;
         irq_entries_post_ve <= 0;
         vb_pulses_post_ve <= 0;
+        irq_entries_frame <= 0;
         dump_ppm_open <= 1'b0;
         ppm_pixels <= 0;
         ppm_shots_done <= 0;
@@ -1614,6 +1797,13 @@ always_ff @(posedge clk_sys) begin
                      post_ve_frames, debug_pc, dut.a, dut.m_wdata,
                      dut.m_be, dut.irq_requested, dut.irq_enabled,
                      dut.irq_n);
+        end
+        if ($test$plusargs("LOCKOUT_TRACE") &&
+            dut.m_req && dut.m_we && (dut.a == 24'h21000e)) begin
+            $display("LOCKOUT_BUS_TRACE frame=%0d pc=%08x cycle=%0d req=%0b we=%0b ack=%0b addr=%06x be=%02b data=%04x",
+                     post_ve_frames, debug_pc, cycle_count,
+                     dut.m_req, dut.m_we, dut.m_ack, dut.a, dut.m_be,
+                     dut.m_wdata);
         end
         if ($test$plusargs("BOOT_TRACE") && ce_cpu && dut.cpu.st == 7'd3 &&
             visual_boot_trace_count < 2000 &&
@@ -1980,7 +2170,25 @@ always_ff @(posedge clk_sys) begin
                 // N labels the newly selected input as the already-completed
                 // surface and creates a one-frame visual/input skew as soon
                 // as a non-neutral packet begins.
+`ifdef SSV_HEADLESS_DIFF
+                // The final declared frame has no packet N+1.  Keep legacy
+                // scripted scenarios advancing as before, but stop consuming
+                // the immutable journal once its through-frame is complete.
+                if (!input_journal_enabled ||
+                    (post_ve_frames + 1 < max_frames))
+                    apply_inputs(post_ve_frames + 1);
+`else
                 apply_inputs(post_ve_frames + 1);
+`endif
+`ifdef SSV_HEADLESS_DIFF
+                if (gameplay_entry_frame >= 0 &&
+                    post_ve_frames == gameplay_entry_frame &&
+                    !gameplay_entry_reached) begin
+                    gameplay_entry_reached <= 1'b1;
+                    $display("SSV_GAMEPLAY_ENTRY frame=%0d input_cursor=%0d pc=%08x",
+                             post_ve_frames, post_ve_frames, debug_pc);
+                end
+`endif
 `ifdef SSV_VISUAL
                 // ssv_visual_present caches the completed native surface.
                 // Commit only after the CRC/state streams above are flushed;
@@ -2041,6 +2249,21 @@ always_ff @(posedge clk_sys) begin
         vb_d <= vb;
 
         if (ve_seen && dut.vblank_pulse) begin
+            // The raster IRQ is the VBlank service event for this shared
+            // profile.  Check the completed interval before starting the
+            // next one; the first pulse only establishes the epoch.  This is
+            // simulation-only evidence and must not become a functional IRQ
+            // gate in the synthesised core.
+            if (irq_entries_frame > 1) begin
+                $fatal(1, "IRQ cadence invariant failed before frame %0d: duplicate entries=%0d",
+                       post_ve_frames, irq_entries_frame);
+            end
+            if (assert_irq_cadence && vb_pulses_post_ve > 0 &&
+                irq_entries_frame != 1) begin
+                $fatal(1, "IRQ cadence invariant failed before frame %0d: entries=%0d expected=1",
+                       post_ve_frames, irq_entries_frame);
+            end
+            irq_entries_frame <= 0;
             vb_pulses_post_ve <= vb_pulses_post_ve + 1;
             // Snapshot descriptors at cache_start for the upcoming frame.
             if (dump_frame_diag && post_ve_frames < 3) begin
@@ -2074,6 +2297,8 @@ always_ff @(posedge clk_sys) begin
         if (ce_cpu && dut.cpu.st == 7'd3 && debug_pc == 32'h00f1_1124) begin
             if (ve_seen)
                 irq_entries_post_ve <= irq_entries_post_ve + 1;
+            if (ve_seen)
+                irq_entries_frame <= irq_entries_frame + 1;
             if (dump_frame_diag &&
                 (last_irq_entry_retire == 0 ||
                  retire_count != last_irq_entry_retire)) begin
@@ -2208,8 +2433,8 @@ always_ff @(posedge clk_sys) begin
                     dut.sprite_renderer.line_entries[
                         dut.sprite_renderer.line_meta[
                             dut.sprite_renderer.bucket_y][
-                                dut.sprite_renderer.LINE_META_WIDTH-1:
-                                dut.sprite_renderer.LINE_COUNT_WIDTH] +
+                     SSV_LINE_META_WIDTH-1:
+                                SSV_LINE_COUNT_WIDTH] +
                         overflow_i]
                 };
                 overflow_desc =
@@ -2417,6 +2642,12 @@ begin
                  post_ve_frames, max_frames, max_cycles);
     if (post_ve_frames < soak_frames)
         $fatal(1, "soak frames=%0d need=%0d", post_ve_frames, soak_frames);
+`ifdef SSV_HEADLESS_DIFF
+    if (input_journal_enabled && gameplay_entry_frame >= 0 &&
+        !gameplay_entry_reached)
+        $fatal(1, "gameplay entry barrier was not reached at frame %0d",
+               gameplay_entry_frame);
+`endif
     if (require_attract && !attract_reached)
         $fatal(1, "attract milestone not reached for GAME_ID=%0d", selected_game_id);
     if (require_verilator_screenshot &&
@@ -2429,8 +2660,15 @@ begin
         $fatal(1, "post-VE nonblack too low: %0d", post_ve_nonblack);
     if (!ignore_overrun && debug_status[16])
         $fatal(1, "renderer_overrun sticky set");
-    if (watchdog_soft_resets != 0)
-        $fatal(1, "unexpected watchdog soft resets=%0d", watchdog_soft_resets);
+    if (watchdog_soft_resets != expected_watchdog_resets)
+        $fatal(1, "watchdog reset count=%0d expected=%0d",
+               watchdog_soft_resets, expected_watchdog_resets);
+    if (expected_watchdog_resets != 0 &&
+        (first_watchdog_reset_frame < expected_watchdog_min_frame ||
+         first_watchdog_reset_frame > expected_watchdog_max_frame))
+        $fatal(1, "watchdog reset frame=%0d outside [%0d,%0d]",
+               first_watchdog_reset_frame, expected_watchdog_min_frame,
+               expected_watchdog_max_frame);
     if (require_play && !play_reached)
         $fatal(1, "character select did not reach game intro by frame %0d",
                post_ve_frames);
@@ -2501,8 +2739,8 @@ initial begin
     selected_game_id = 0;
     if (!$value$plusargs("GAME_ID=%d", selected_game_id))
         selected_game_id = 0;
-    if (selected_game_id < 0 || selected_game_id > 9)
-        $fatal(1, "GAME_ID must be in the universal profile range 0..9");
+    if (selected_game_id < 0 || selected_game_id > 8)
+        $fatal(1, "GAME_ID must be in the universal profile range 0..8");
     sim_cfg = cfg_for_game(4'(selected_game_id));
     // visual_width/height feed the +DUMP_PPM header, which is used outside
     // SSV_VISUAL too (e.g. the plain run_gameplay_sims.sh-style build) --
@@ -2549,6 +2787,26 @@ initial begin
     end
     if (!$value$plusargs("SCENARIO=%s", scenario))
         scenario = "attract_idle";
+`ifdef SSV_HEADLESS_DIFF
+    input_journal_enabled = 1'b0;
+    input_journal_path = "";
+    scenario_file_path = "";
+    neutral_after_frame = -1;
+    gameplay_entry_frame = -1;
+    gameplay_entry_reached = 1'b0;
+    input_cursor = 0;
+    expected_watchdog_resets = 0;
+    expected_watchdog_min_frame = 0;
+    expected_watchdog_max_frame = 0;
+    void'($value$plusargs("EXPECTED_WATCHDOG_RESETS=%d", expected_watchdog_resets));
+    void'($value$plusargs("EXPECTED_WATCHDOG_MIN_FRAME=%d", expected_watchdog_min_frame));
+    void'($value$plusargs("EXPECTED_WATCHDOG_MAX_FRAME=%d", expected_watchdog_max_frame));
+    if ($value$plusargs("INPUT_JOURNAL=%s", input_journal_path))
+        input_journal_enabled = 1'b1;
+    void'($value$plusargs("SCENARIO_FILE=%s", scenario_file_path));
+    void'($value$plusargs("NEUTRAL_AFTER_FRAME=%d", neutral_after_frame));
+    void'($value$plusargs("GAMEPLAY_ENTRY_FRAME=%d", gameplay_entry_frame));
+`endif
     if (!$value$plusargs("COIN_FRAME_LO=%d", coin_frame_lo))
         coin_frame_lo = 30;
     if (!$value$plusargs("COIN_FRAME_HI=%d", coin_frame_hi))
@@ -2599,6 +2857,7 @@ initial begin
     dump_frame_diag = $test$plusargs("DUMP_FRAME_DIAG");
     dump_renderer_budget = $test$plusargs("DUMP_RENDERER_BUDGET");
     dump_late_line = $test$plusargs("DUMP_LATE_LINE");
+    assert_irq_cadence = $test$plusargs("ASSERT_IRQ_CADENCE");
     stop_on_renderer_overrun =
         $test$plusargs("STOP_ON_RENDERER_OVERRUN");
     ignore_overrun = $test$plusargs("IGNORE_OVERRUN");
@@ -2918,8 +3177,15 @@ initial begin
         $fatal(1, "post-VE nonblack too low: %0d", post_ve_nonblack);
     if (!ignore_overrun && debug_status[16])
         $fatal(1, "renderer_overrun sticky set");
-    if (watchdog_soft_resets != 0)
-        $fatal(1, "unexpected watchdog soft resets=%0d", watchdog_soft_resets);
+    if (watchdog_soft_resets != expected_watchdog_resets)
+        $fatal(1, "watchdog reset count=%0d expected=%0d",
+               watchdog_soft_resets, expected_watchdog_resets);
+    if (expected_watchdog_resets != 0 &&
+        (first_watchdog_reset_frame < expected_watchdog_min_frame ||
+         first_watchdog_reset_frame > expected_watchdog_max_frame))
+        $fatal(1, "watchdog reset frame=%0d outside [%0d,%0d]",
+               first_watchdog_reset_frame, expected_watchdog_min_frame,
+               expected_watchdog_max_frame);
     if (require_play && !play_reached)
         $fatal(1, "character select did not reach game intro by frame %0d",
                post_ve_frames);
@@ -2987,6 +3253,11 @@ initial begin
               post_ve_nonblack, debug_pc, crc_path,
               bg_overruns, obj_overruns, watchdog_soft_resets,
               obj_max_line_entries);
+    // The legacy timed driver performs the terminal proof gates inline rather
+    // than through finalize_run.  Publish the same stop barrier to the
+    // simulation-only probe before finishing, otherwise its final receipt is
+    // necessarily marked aborted even after every gate passed.
+    run_done = 1'b1;
     $finish;
 `ifdef SSV_VISUAL
     end

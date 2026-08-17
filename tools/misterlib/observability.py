@@ -279,6 +279,24 @@ def validate_input_events(path: Path) -> dict[str, list[str]]:
     warnings: list[str] = []
     if not path.exists():
         return {"errors": [f"Input file does not exist: {path}"], "warnings": []}
+
+    # Gameplay convergence scenarios are a versioned JSON object rather than
+    # the legacy JSONL ``seq/at/action`` stream.  Keep the generic contract
+    # validator aware of that format so project-level doctor/validate-contract
+    # checks exercise the same parser as the headless adapters.
+    try:
+        document = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        document = None
+    if isinstance(document, dict) and document.get("schema") == "ssv-gameplay-scenario-v1":
+        try:
+            from ssv_gameplay_scenario import read_scenario
+
+            read_scenario(path)
+        except Exception as exc:  # noqa: BLE001 - return contract diagnostics
+            errors.append(f"{path}: invalid ssv-gameplay-scenario-v1: {exc}")
+        return {"errors": errors, "warnings": warnings}
+
     seen_seq = -1
     with path.open("r", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, 1):

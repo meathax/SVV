@@ -159,11 +159,9 @@ module crt_adjust #(
     // ------------------------------------------------------------------
     reg [7:0] r_in_q, g_in_q, b_in_q;
     reg       hs_in_q, hb_in_q, vs_in_q, vb_in_q;
-    reg       hs_in_d;
     initial begin
         r_in_q = 0; g_in_q = 0; b_in_q = 0;
         hs_in_q = 0; hb_in_q = 1; vs_in_q = 0; vb_in_q = 0;
-        hs_in_d = 0;
     end
 
     always @(posedge clk) if (pxl_cen) begin
@@ -174,12 +172,14 @@ module crt_adjust #(
         hb_in_q  <= hb_in;
         vs_in_q  <= vs_in;
         vb_in_q  <= vb_in;
-        hs_in_d  <= hs_in;
     end
 
-    // Native HSync rise (used only for the shift register that produces the
-    // shifted reference below).
-    wire hs_rise_native = pxl_cen && (hs_in & ~hs_in_d);
+    // NOTE (local edit): the upstream file also derived a `hs_rise_native`
+    // strobe (and its `hs_in_d` delay) here. Nothing in this module ever read
+    // it — the engine restarts on `hs_rise_in`, which is derived from
+    // `hs_read_ref` below and equals the native HSync rise in
+    // HPOS_CONTENTSHIFT. Removed to keep Quartus warning output clean; purely
+    // dead logic, no functional change.
 
     // ------------------------------------------------------------------
     //  H-Shift shift register (HPOS_SYNCSHIFT). Delays HSync by N pixels
@@ -231,12 +231,16 @@ module crt_adjust #(
     //  WRITE side @ pxl_cen
     // ------------------------------------------------------------------
     reg [AW-1:0] wrp;
-    reg [AW-1:0] hmax;
+    // NOTE (local edit): upstream also latched the measured line length into an
+    // `hmax` register on every HSync rise. No reader exists in this module (the
+    // read side wraps naturally on rdcnt / the 9-bit bank index instead), so the
+    // register and its `hmax <= wrp;` assignment were removed. `wrp` itself is
+    // still read below, so the write-side always block is unchanged otherwise.
     reg [AW-1:0] hb0, hb1;
     reg          lhb_l;
     reg          bank;
     initial begin
-        wrp = 0; hmax = 0;
+        wrp = 0;
         hb0 = 0; hb1 = 0;
         lhb_l = 0;
         bank = 0;
@@ -249,7 +253,6 @@ module crt_adjust #(
         mem[{bank, wrp[AW-2:0]}] <= {r_in, g_in, b_in};
         if (hs_rise_in) begin
             wrp  <= {AW{1'b0}};
-            hmax <= wrp;
             bank <= ~bank;
         end else begin
             wrp <= wrp + 1'b1;
@@ -331,7 +334,18 @@ module crt_adjust #(
     wire signed [AW+1:0] rdcnt_s = $signed({2'b0, rdcnt});
     wire signed [AW+1:0] hb1_s   = $signed({2'b0, hb1});
     wire signed [AW+1:0] hb0_s   = $signed({2'b0, hb0});
-    wire [AW-1:0] rd_addr = (rdcnt_s - hoff_s);
+    // rdcnt_s - hoff_s is computed in AW+2 signed bits purely so the subtract
+    // cannot overflow (rdcnt 0..1023 minus hoffset -256..+255 spans -255..1279).
+    // The line buffer is a ring, so the address is deliberately taken modulo the
+    // buffer: keeping the low AW bits is that wrap, and it is the intended
+    // behaviour for a negative or past-end result. Only rd_addr[AW-2:0] actually
+    // indexes the 512-entry bank below, so the discarded bits carry no address
+    // information. Made an explicit bit-select (identical bits to the previous
+    // implicit truncation) so Quartus no longer reports Warning (10230).
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire signed [AW+1:0] rd_addr_s = rdcnt_s - hoff_s;  // top 2 bits intentionally dropped (ring wrap)
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [AW-1:0] rd_addr = rd_addr_s[AW-1:0];
     always @(posedge clk) if (pxl2_cen) begin
         rd_data <= mem[{~bank, rd_addr[AW-2:0]}];
         pass_q  <= (rdcnt_s >= (hb1_s + hoff_s)) && (rdcnt_s < (hb0_s + hoff_s)) && ~vb_active;

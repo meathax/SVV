@@ -11,7 +11,7 @@ ROM geometry, memory windows, video geometry, watchdog, audio banks, and
 optional ST010 hardware at runtime. There are no per-game Quartus builds.
 
 The core is still a work in progress. The RTL has focused simulation and MAME
-differential evidence, but the complete eight-game qualification matrix and
+differential evidence, but the complete nine-set qualification matrix and
 current physical MiSTer validation are not yet finished.
 
 ## OSD features
@@ -51,9 +51,10 @@ claims are documented elsewhere and are not presented as PCB accuracy here.
 
 ## Supported games
 
-These are the eight qualified parent sets in
+These are the nine supported entries in
 [`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other Sammy Seta Visco entries
-present in MAME are not currently claimed as supported by this core.
+present in MAME are not currently claimed as supported by this core. Survival
+Arts is represented by its USA clone set, `survartsu`.
 
 | Game | Set name | Runtime hardware notes |
 | --- | --- | --- |
@@ -65,6 +66,11 @@ present in MAME are not currently claimed as supported by this core.
 | Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
+| Survival Arts (USA) | `survartsu` | 1 MiB program ROM, 24 MiB graphics, extra RAM, read-kick watchdog, six buttons |
+
+For Survival Arts, the six controls are named Weak Punch, Medium Punch, Strong
+Punch, Weak Kick, Medium Kick, and Strong Kick. The MRA maps them to MiSTer
+`A`, `B`, `X`, `Y`, `L`, and `R` respectively.
 
 ## **Hardware emulated**
 
@@ -123,8 +129,8 @@ are otherwise authorized to use.
 ### Manual installation
 
 1. Download the core RBF and the MRA file or files you want to use.
-2. Copy the RBF to MiSTer at `/media/fat/_Arcade/cores/`.
-3. Copy the matching `.mra` files to `/media/fat/_Arcade/`.
+2. Copy the RBF to MiSTer at `/media/fat/_Arcade/`.
+3. Copy the matching `.mra` files to the same `/media/fat/_Arcade/` folder.
 4. Put your legally obtained game ROM ZIP in the appropriate MiSTer arcade/MAME
    ROM folder, then launch the game from the MiSTer Arcade menu.
 

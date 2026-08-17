@@ -129,8 +129,8 @@ def assemble(setname: str, mra_dir: pathlib.Path, rom_dir: pathlib.Path,
     root = ET.parse(mra_path).getroot()
     cfg_hex = (root.find("rom[@index='1']/part").text or "").strip()
     cfg = bytes.fromhex(cfg_hex)
-    if len(cfg) != 16 or cfg[0:2] != b"S\x02" or sum(cfg) & 0xFF:
-        raise ValueError(f"invalid descriptor in {mra_path}")
+    if len(cfg) != 24 or cfg[0:2] != b"S\x03" or sum(cfg) & 0xFF:
+        raise ValueError(f"invalid release descriptor v3 in {mra_path}")
 
     prog_size = cfg[2] * MB
     gfx_region = cfg[3] * MB

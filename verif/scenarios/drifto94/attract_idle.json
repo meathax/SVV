@@ -1,1 +1,20 @@
-{"id":"attract_idle","set":"drifto94","mame":"0.288","mra":"Drift Out '94 - The Hard Order (Japan).mra","inputs":{"in_p1":"0xFFFF","in_p2":"0xFFFF","in_system":"0xFFFF","in_extra":"0xFFFF"},"geometry":{"active_w":336,"active_h":238}}
+{
+  "id": "attract_idle",
+  "set": "drifto94",
+  "mame": "0.289",
+  "mra": "Drift Out '94 - The Hard Order (Japan).mra",
+  "mra_sha256": "bf5bd75de314af9da9ab06f2ca059f85b833546f78987a91c981b61f15f3197d",
+  "rom_zip": "drifto94.zip",
+  "rom_zip_sha256": "25a3f4e80c9fd9f373ce47765d32f127dada7b73975bbc01021555177a2483d0",
+  "maincpu_sha256": "8f6a19fc0cd59b43df6e130d36fe49eee7354af66172cd4995895c9adb852a34",
+  "sprites_sha256": "3b6f6d2c18d2888595394b5340593709b291990eab287b149f0ed765f176971b",
+  "samples_sha256": "ba425bfba49f2981c8e036d85be34a212d11b054c99f929eb9b05ff1d0b18553",
+  "st010_sha256": "6ccc192e9e965347dda948170f530ced5a63e16dbc87f8c93b3c1f1ad83cdfd6",
+  "dsw1": "0x00FF",
+  "dsw2": "0x00FF",
+  "inputs": {"in_p1": "0xFFFF", "in_p2": "0xFFFF", "in_system": "0xFFFF", "in_extra": "0xFFFF"},
+  "geometry": {"active_w": 336, "active_h": 238, "orientation": "horizontal"},
+  "hardware": {"program_bytes": 4194304, "graphics_bytes": 33554432, "sample_bytes": 8388608, "nvram": "erased", "nvram_bytes": 2048, "st010": true, "es5506_banks": 2},
+  "stop": {"kind": "later_of", "after_video_enable_frames": 360, "after_attract_marker_neutral_frames": 120, "attract_marker": "attract_mode", "barrier": "complete_native_frame"},
+  "outputs": {"native_frames": true, "audio_pcm": true, "state_hashes": true, "canonical_trace": true, "comparator_receipt": true}
+}

@@ -4,7 +4,7 @@
 //
 // MAME wraps a sprite tile code with `code % gfxelement->elements()` -- a true
 // MODULO, not a mask (src/mame/seta/ssv.cpp, ssv_v.cpp). elements() is the
-// declared sprites region divided by 128, and for the ten manifest entries that
+// declared sprites region divided by 128, and for the nine supported entries that
 // is 0x18000, 0x20000, 0x30000 or 0x40000. Two of those are 3*2^k, so the
 // core's original `wrap_code = code[16:0]` mask is wrong for them in both
 // width and wrap rule.
@@ -141,17 +141,21 @@ initial begin
 
     // 5. The optional extra-button window remains descriptor-selected rather
     // than being a global address alias. Supported profiles expose either the
-    // Dyna decoded-idle port or no window at all.
+    // Dyna's decoded-idle port, Survival Arts' live six-button port, or no
+    // window at all.
     begin
         if (extra_input_window_cfg(cfg_dynagear(), 24'h500008) !== 1'b1 ||
             cfg_dynagear().extra_input_mode !== 2'd1 ||
             extra_input_window_cfg(cfg_dynagear(), 24'h50000a) !== 1'b0 ||
             extra_input_window_cfg(cfg_cairblad(), 24'h500008) !== 1'b0 ||
-            extra_input_window_cfg(cfg_vasara(), 24'h500009) !== 1'b0) begin
+            extra_input_window_cfg(cfg_vasara(), 24'h500009) !== 1'b0 ||
+            extra_input_window_cfg(cfg_survarts(), 24'h500008) !== 1'b1 ||
+            cfg_survarts().extra_input_mode !== 2'd2 ||
+            extra_input_window_cfg(cfg_survarts(), 24'h50000a) !== 1'b0) begin
             errors++;
             $display("FAIL descriptor-gated extra-input window");
         end
-        checked += 5;
+        checked += 8;
     end
 
     // 6. The MAME map-specific extra CPU RAM windows are descriptor data:
@@ -211,10 +215,12 @@ initial begin
             active_width_cfg(cfg_stmblade()) !== 9'd352 ||
             active_width_cfg(cfg_twineag2()) !== 9'd336 ||
             active_width_cfg(cfg_ultrax()) !== 9'd336 ||
+            active_width_cfg(cfg_survarts()) !== 9'd336 ||
             // cfg_for_game() is the universal frame/visual bench path. Keep
             // its IDs in parity with the direct descriptor constructors.
             active_width_cfg(cfg_for_game(4'd6)) !== 9'd336 ||
             active_width_cfg(cfg_for_game(4'd7)) !== 9'd336 ||
+            active_width_cfg(cfg_for_game(4'd8)) !== 9'd336 ||
             active_height_cfg(cfg_drifto94()) !== 9'd238 ||
             cfg_vasara().system_input_mode !== 1'b1 ||
             cfg_vasara2().system_input_mode !== 1'b1 ||
@@ -228,7 +234,7 @@ initial begin
             errors++;
             $display("FAIL descriptor geometry/system-input mode");
         end
-        checked += 13;
+        checked += 14;
     end
 
     // 10. Prove this bench DISCRIMINATES. A test that passes against both the

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Validate and stage immutable RTL-owned protocol-v2 input journals.
+"""Validate and stage immutable protocol-v2 input journals.
 
 Checkpoint lockstep cannot ask a restored RTL model to reproduce frames that
 are already inside the archive.  The checkpoint accumulation run therefore
 records the exact active-high input packet committed by RTL for every following
-native frame.  This module gives those packets one canonical semantic digest
-and refuses gaps, renumbering, or non-RTL ownership.
+native frame.  Gameplay scenarios use the same packet shape, but are authored
+before either producer runs and carry ``source=scenario``.  This module gives
+both forms one canonical semantic digest and refuses gaps or renumbering.
 """
 
 from __future__ import annotations
@@ -19,22 +20,28 @@ import tempfile
 
 
 PACKET_KEYS = ("frame", "p1_pressed", "p2_pressed", "system_pressed", "source")
+SCENARIO_SOURCE = "scenario"
 
 
 def packet_path(journal: Path, frame: int) -> Path:
     return journal / f"frame_{frame:06d}.json"
 
 
-def canonical_packet(packet: object, expected_frame: int) -> dict[str, object]:
+def canonical_packet(
+    packet: object, expected_frame: int, *, allow_scenario: bool = True
+) -> dict[str, object]:
     if not isinstance(packet, dict):
         raise ValueError(f"input packet {expected_frame} is not an object")
     frame = packet.get("frame")
     expected_source = "neutral-seed" if expected_frame == 0 else "rtl-owner"
+    actual_source = packet.get("source")
+    if allow_scenario and actual_source == SCENARIO_SOURCE:
+        expected_source = SCENARIO_SOURCE
     if frame != expected_frame:
         raise ValueError(
             f"input packet frame mismatch: expected {expected_frame}, got {frame!r}"
         )
-    if packet.get("source") != expected_source:
+    if actual_source != expected_source:
         raise ValueError(
             f"input packet {expected_frame} source must be {expected_source!r}, "
             f"got {packet.get('source')!r}"
@@ -77,12 +84,17 @@ def inspect_journal(journal: Path, through_frame: int) -> dict[str, object]:
         digest.update(len(data).to_bytes(4, "big"))
         digest.update(data)
     return {
-        "schema": "ssv-rtl-input-journal-v1",
+        "schema": "ssv-input-journal-v2",
         "path": str(journal.resolve()),
         "through_frame": through_frame,
         "packet_count": through_frame + 1,
         "semantic_sha256": digest.hexdigest(),
-        "ownership": "neutral frame 0; RTL owner frames 1..through_frame",
+        "ownership": (
+            "scenario-authored immutable packets"
+            if any(read_packet(journal, frame)["source"] == SCENARIO_SOURCE
+                   for frame in range(through_frame + 1))
+            else "neutral frame 0; RTL owner frames 1..through_frame"
+        ),
     }
 
 

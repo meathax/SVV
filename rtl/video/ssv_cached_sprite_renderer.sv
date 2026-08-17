@@ -427,11 +427,11 @@ endfunction
 // identity (m_tile_code[i] = i << 16), so the high nibble passes through in
 // natural order. One config bit selects between them.
 function automatic logic [19:0] expand_code(
-    input ssv_pkg::ssv_cfg_t cfg,
+    input ssv_pkg::ssv_cfg_t cfg_i,
     input logic [15:0] low,
     input logic [15:0] attr
 );
-    expand_code = cfg.tile_code_identity
+    expand_code = cfg_i.tile_code_identity
                 ? {attr[13:10], low}
                 : {{attr[10], attr[11], attr[12], attr[13]}, low};
 endfunction
@@ -780,14 +780,15 @@ end
 always_comb begin
     line_page_ram_we = 1'b0;
     line_page_ram_wr_addr = line_count_addr;
-    line_page_ram_wr_data = '0;
-    if (state == BUILD_CLEAR_LINES) begin
+    // The two boundary-fill states wrote the identical constant, and the
+    // idle default wrote a third value ('0) that no write port ever commits,
+    // so Quartus built a 3:1 mux across all LINE_PAGE_META_WIDTH bits. The
+    // data bus is a don't-care whenever we==0, so defaulting it to the fill
+    // constant and merging the two fill states leaves a plain 2:1 select.
+    // Every value actually written to the memory is unchanged.
+    line_page_ram_wr_data = {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
+    if ((state == BUILD_CLEAR_LINES) || (state == BUILD_PREFIX_WRITE)) begin
         line_page_ram_we = 1'b1;
-        line_page_ram_wr_data = {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
-    end
-    else if (state == BUILD_PREFIX_WRITE) begin
-        line_page_ram_we = 1'b1;
-        line_page_ram_wr_data = {LINE_PAGE_BOUNDARIES{LINE_SLOTS_VALUE}};
     end
     else if ((state == BUILD_REINDEX_BUCKET_WRITE) && line_page_write) begin
         line_page_ram_we = 1'b1;
@@ -1361,8 +1362,22 @@ always_ff @(posedge clk) begin
                     cache_overflow <= 1'b1;
                 end
                 if (line_count_addr == 8'd239) begin
-                    cache_scan_index <= '0;
-                    state <= BUILD_REINDEX_READ;
+                    // An empty visible list is a valid frame (for example
+                    // during the first post-reset video epoch).  Do not enter
+                    // the reindex pass with cache_scan_index=0: that would
+                    // decode an unwritten descriptor_cache entry and use its
+                    // X/stale Y as a bucket address, producing a false line
+                    // pool overflow and renderer-ownership failure.
+                    if (cache_write_count == 0) begin
+                        cache_count <= '0;
+                        cache_ready <= 1'b1;
+                        cache_busy <= 1'b0;
+                        state <= IDLE;
+                    end
+                    else begin
+                        cache_scan_index <= '0;
+                        state <= BUILD_REINDEX_READ;
+                    end
                 end
                 else begin
                     line_count_addr <= line_count_addr + 1'd1;

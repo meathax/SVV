@@ -26,8 +26,8 @@ from ssv_supported_sets import (SUPPORTED_SETS, SUPPORTED_SET_IDS,
 # Start/Coin/Service/Test. Keep that positional list in every MRA, using '-'
 # for unused game buttons. The <buttons count> is the number of actual game
 # buttons, as required by the MiSTer MRA convention. SSV's P1/P2 ports carry
-# B1-B3 and the $500008 window carries B4-B6 (the retired Survival Arts family
-# used all six). Test and Service reuse R and L, which is what they mapped to
+# B1-B3 and the $500008 window carries B4-B6 (Survival Arts uses all six).
+# Test and Service reuse R and L, which is what they mapped to
 # before the widening.
 BUTTONS_DEFAULT = ('Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,'
                    'Start,Coin,Service,Test',

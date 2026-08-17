@@ -72,6 +72,14 @@ module ssv_core #(
     input       [15:0] in_p2,
     input       [15:0] in_system,
     input       [15:0] in_extra,
+    // UNUSED. The mahjong/Eagle Shot/Sexy Reaction/GDFS optional-I/O family was
+    // pruned from the universal profile (f0622c5): none of the qualified sets in
+    // tools/ssv_supported_sets.py selects it, so nothing inside ssv_core reads
+    // this port and it synthesizes away. Retained only because eight benches
+    // under verif/ bind it by name (tb_ssv_core_memory_windows, tb_ssv_frame_crc,
+    // tb_ssv_hang_watch, tb_ssv_loader_core_boot, tb_ssv_realrom_boot,
+    // tb_ssv_realrom_video, tb_ssv_rom_write_ack, tb_ssv_watchdog); delete the
+    // port and those bindings in one change, not this one.
     input       [23:0] in_mahjong_rows,
     input       [11:0] in_coord_x,
     input       [11:0] in_coord_y,
@@ -112,6 +120,49 @@ module ssv_core #(
 `ifdef SIMULATION
     , output logic [31:0] debug_pc
     , output logic [23:0] debug_status
+    , output logic        debug_v60_retire
+    , output logic [31:0] debug_v60_retire_pc
+    , output logic  [7:0] debug_v60_opcode
+    , output logic [31:0] debug_v60_psw
+    , output logic [1023:0] debug_v60_gprs
+    , output logic        debug_mainbus_complete
+    , output logic        debug_mainbus_write
+    , output logic [23:0] debug_mainbus_addr
+    , output logic [15:0] debug_mainbus_data
+    , output logic  [1:0] debug_mainbus_be
+    , output logic  [7:0] debug_mainbus_device
+    , output logic        debug_ifetch_complete
+    , output logic [23:0] debug_ifetch_addr
+    , output logic [63:0] debug_ifetch_data
+    , output logic [31:0] debug_reset_epoch
+    , output logic [31:0] debug_frame
+    , output logic  [8:0] debug_scanline
+    , output logic  [8:0] debug_hpos
+    , output logic        debug_irq_ack
+    , output logic  [7:0] debug_irq_vector
+    , output logic  [7:0] debug_irq_requested
+    , output logic  [7:0] debug_irq_enabled
+    , output logic        debug_watchdog_kick
+    , output logic        debug_watchdog_reset
+    , output logic        debug_st010_retire
+    , output logic [13:0] debug_st010_pc
+    , output logic        debug_st010_host_access
+    , output logic        debug_st010_fetch_req
+    , output logic        debug_st010_fetch_done
+    , output logic        debug_sound_commit
+    , output logic  [6:0] debug_sound_page
+    , output logic  [3:0] debug_sound_reg
+    , output logic [31:0] debug_sound_data
+    , output logic        debug_sound_irq_promote
+    , output logic        debug_sound_voice_writeback
+    , output logic  [4:0] debug_sound_voice
+    , output logic        debug_sample_req
+    , output logic        debug_sample_done
+    , output logic        debug_sample_tick
+    , output logic        debug_sample_underrun
+    , output logic        debug_video_enable
+    , output logic        debug_line_boundary
+    , output logic        debug_frame_boundary
 `endif
 );
 
@@ -158,6 +209,10 @@ wire         if_ack = if_served;
 
 `ifdef SIMULATION
 logic cpu_halted;
+logic [31:0] cpu_retire_pc;
+logic [7:0] cpu_retire_opcode;
+logic [31:0] cpu_retire_psw;
+logic [1023:0] cpu_gpr_flat;
 `endif
 s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
@@ -168,7 +223,10 @@ s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .irq_n(irq_n), .irq_vector(irq_vector), .irq_ack(cpu_irq_ack),
     .nmi_n(1'b1)
 `ifdef SIMULATION
-    , .dbg_pc(debug_pc), .dbg_halted(cpu_halted), .dbg_retire()
+    , .dbg_pc(debug_pc), .dbg_halted(cpu_halted),
+    .dbg_retire(debug_v60_retire), .dbg_retire_pc(cpu_retire_pc),
+    .dbg_retire_opcode(cpu_retire_opcode), .dbg_retire_psw(cpu_retire_psw),
+    .dbg_gpr_flat(cpu_gpr_flat)
 `endif
 );
 
@@ -210,7 +268,7 @@ wire sel_nvram   = cfg.has_nvram && (cfg.nvram_mode != 2'd0) &&
 // `in_extra` is tied high by the wrapper, which is correct for any game that
 // does not read it. See docs/hardware/SSV_PCB_FINDINGS_ACTION_PLAN.md item 1.
 wire sel_extra   = extra_input_window_cfg(cfg, a);
-// The release profile contains exactly the eight sets in
+// The release profile contains exactly the nine sets in
 // tools/ssv_supported_sets.py. None selects the legacy mahjong, Eagle Shot,
 // Sexy Reaction or GDFS optional-I/O families. Keep those device models and
 // standalone benches as source references, but do not instantiate unreachable
@@ -662,17 +720,30 @@ wire [23:0] core_pixel =
 
 assign rgb = core_pixel;
 
+// Every subtraction below is evaluated at the SDR_AW+1 = 27-bit width of the
+// return value, with cpu_addr zero-extended -- the operands are written 27 bits
+// wide so that is explicit rather than inferred from the assignment context.
+// Widths only; the computed value is unchanged.
+//
+// Range invariant: ext_phys_addr is consumed only where `sel_extmem` qualifies
+// the access (the SDRAM request block below), and sel_extmem is
+// sel_xram|sel_cpuram|sel_extra_wram|sel_nvram. Each branch therefore only ever
+// sees an address inside the window whose base it subtracts -- sel_nvram for
+// $580000, sel_extra_wram for $010000, sel_cpuram for $400000, and sel_xram
+// ($160000-$17ffff) for the fall-through -- so no borrow occurs on a live
+// access. Off-window inputs still produce a defined (wrapped) 27-bit value that
+// no consumer looks at.
 function automatic [SDR_AW:0] external_byte_addr(input [23:0] cpu_addr);
     if (cpu_addr >= 24'h580000)
-        external_byte_addr = SDR_NVRAM_BASE + (cpu_addr - 24'h580000);
+        external_byte_addr = SDR_NVRAM_BASE + (27'(cpu_addr) - 27'h0580000);
     else if ((cfg.extra_ram_mode == 2'd2) &&
              (cpu_addr >= 24'h010000) && (cpu_addr <= 24'h03ffff))
-        external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h010000);
+        external_byte_addr = SDR_CPU_RAM_BASE + (27'(cpu_addr) - 27'h0010000);
     else if ((cfg.extra_ram_mode == 2'd1) &&
              (cpu_addr >= 24'h400000) && (cpu_addr <= 24'h43ffff))
-        external_byte_addr = SDR_CPU_RAM_BASE + (cpu_addr - 24'h400000);
+        external_byte_addr = SDR_CPU_RAM_BASE + (27'(cpu_addr) - 27'h0400000);
     else
-        external_byte_addr = SDR_XRAM_BASE + (cpu_addr - 24'h160000);
+        external_byte_addr = SDR_XRAM_BASE + (27'(cpu_addr) - 27'h0160000);
 endfunction
 
 wire [SDR_AW:0] ext_phys_addr = external_byte_addr(a);
@@ -730,7 +801,17 @@ logic [127:0] icache_valid;
 // to the selected set's full 1/2/4 MB image before indexing the cache. The old
 // Dyna-only path truncated every address to 20 bits, so 2 MB and 4 MB sets
 // fetched their reset stub from offset zero and immediately executed garbage.
-wire [21:0] rom_byte_a = a - rom_window_base;
+// 22 bits is the exact natural width of this offset, not a convenience: the
+// subtraction is only meaningful under `sel_rom` (a >= rom_window_base, decoded
+// above), and rom_window_base = -(cfg.prog_mb << 20) with prog_mb in {1,2,4}
+// puts the window base at $f00000/$e00000/$c00000. The largest live offset is
+// therefore $ffffff - $c00000 = $3fffff, which fills 22 bits exactly and cannot
+// borrow. The cast makes that intent explicit; it drops the same top two bits
+// the implicit assignment already dropped, so the value is unchanged. Every
+// consumer (ic_line/ic_tag/ic_word and the fill path) is gated on sel_rom.
+// NOTE: this width is only correct while prog_mb <= 4. A future 8 MB program
+// would need 23 bits here and in the icache tag.
+wire [21:0] rom_byte_a = 22'(a - rom_window_base);
 wire [6:0]  ic_line    = rom_byte_a[9:3];
 wire [13:0] ic_tag     = rom_byte_a[21:8];
 wire        ic_hit     = icache_valid[ic_line] && (icache_tag[ic_line] == ic_tag);
@@ -739,7 +820,14 @@ wire [15:0] ic_word    = ic_ldata[{rom_byte_a[2:1], 4'b0000} +: 16];
 
 // Instruction-fetch lookup (whole 8-byte line), using the same full-window
 // translation as data accesses. The V60 presents a 24-bit address here.
-wire [21:0] if_byte_a  = if_addr - rom_window_base;
+// Same 22-bit natural width and same rom_window_base derivation as rom_byte_a
+// above; explicit cast, identical bits. Unlike the data path there is no
+// `sel_rom` gate on this expression -- the icache is the V60's only instruction
+// source, so the invariant here is that the prefetch frontier stays inside the
+// program-ROM window, which is a property of SSV code (it executes from ROM),
+// not of a decode. A fetch from outside the window would already read the wrong
+// backing store with or without this cast; the cast changes nothing about that.
+wire [21:0] if_byte_a  = 22'(if_addr - rom_window_base);
 wire [6:0]  if_line_ix = if_byte_a[9:3];
 wire [13:0] if_tag_ix  = if_byte_a[21:8];
 wire        if_hit     = icache_valid[if_line_ix] &&
@@ -951,6 +1039,13 @@ wire [23:0] st010_prg_data;
 wire        st010_prg_valid;
 wire [15:0] st010_rdata;
 logic [1:0] st010_rd_cnt;
+`ifdef SIMULATION
+wire        st010_debug_retire;
+wire [13:0] st010_debug_pc;
+wire [15:0] st010_debug_a, st010_debug_b;
+wire [15:0] st010_debug_dp, st010_debug_dr, st010_debug_sr;
+wire [15:0] st010_debug_k, st010_debug_l, st010_debug_m, st010_debug_n;
+`endif
 
 // The project ships one universal RBF, so this daughterboard must always be
 // present in synthesis. cfg.has_st010 is the only selection mechanism: it
@@ -980,8 +1075,11 @@ upd96050_st010 st010 (
     .int_req(1'b0), .p0(), .p1()
 
 `ifdef SIMULATION
-    , .dbg_retire(), .dbg_pc(), .dbg_a(), .dbg_b(), .dbg_dp(), .dbg_dr(),
-    .dbg_sr(), .dbg_k(), .dbg_l(), .dbg_m(), .dbg_n()
+    , .dbg_retire(st010_debug_retire), .dbg_pc(st010_debug_pc),
+    .dbg_a(st010_debug_a), .dbg_b(st010_debug_b),
+    .dbg_dp(st010_debug_dp), .dbg_dr(st010_debug_dr),
+    .dbg_sr(st010_debug_sr), .dbg_k(st010_debug_k),
+    .dbg_l(st010_debug_l), .dbg_m(st010_debug_m), .dbg_n(st010_debug_n)
 `endif
 );
 
@@ -1308,9 +1406,112 @@ always_ff @(posedge clk_sys) begin
     end
 end
 `ifdef SIMULATION
-always_comb debug_status = {cpu_halted, video_enable, irq_n, vb, hb, ext_busy,
-                            ext_done, renderer_overrun,
-                            irq_requested, irq_enabled};
+logic debug_rst_d;
+logic debug_mainbus_complete_d;
+
+// Stable device identifiers shared with the MAME adapter.  They describe the
+// selected hardware target, not a game name: 0 unmapped, 1 program ROM,
+// 2 work RAM, 3 sprite, 4 palette, 5 extension RAM/NVRAM, 6 scroll,
+// 7 board/extra I/O, 8 IRQ, 9 ES5506, 10 ST010, 11 random-read window.
+always_comb begin
+    debug_status = {cpu_halted, video_enable, irq_n, vb, hb, ext_busy,
+                    ext_done, renderer_overrun, irq_requested, irq_enabled};
+    debug_v60_retire_pc = cpu_retire_pc;
+    debug_v60_opcode = cpu_retire_opcode;
+    debug_v60_psw = cpu_retire_psw;
+    debug_v60_gprs = cpu_gpr_flat;
+    debug_mainbus_complete = m_req && ack_r && !ack_r_d;
+    debug_mainbus_write = m_we;
+    debug_mainbus_addr = a;
+    debug_mainbus_data = m_we ? m_wdata : m_rdata;
+    debug_mainbus_be = m_be;
+    debug_mainbus_device = 8'd0;
+    if (sel_rom) debug_mainbus_device = 8'd1;
+    else if (sel_wram) debug_mainbus_device = 8'd2;
+    else if (sel_sprram) debug_mainbus_device = 8'd3;
+    else if (sel_palette) debug_mainbus_device = 8'd4;
+    else if (sel_extmem) debug_mainbus_device = 8'd5;
+    else if (sel_scroll) debug_mainbus_device = 8'd6;
+    else if (sel_io || sel_extra) debug_mainbus_device = 8'd7;
+    else if (sel_irqvec || sel_irqack || sel_irqen) debug_mainbus_device = 8'd8;
+    else if (sel_sound) debug_mainbus_device = 8'd9;
+    else if (sel_st010) debug_mainbus_device = 8'd10;
+    else if (sel_drifto_unknown) debug_mainbus_device = 8'd11;
+    debug_ifetch_complete = if_req && if_ack;
+    debug_ifetch_addr = if_addr;
+    debug_ifetch_data = if_data;
+    debug_scanline = vcnt;
+    debug_hpos = hcnt;
+    debug_irq_ack = cpu_irq_ack;
+    debug_irq_vector = irq_vector;
+    debug_irq_requested = irq_requested;
+    debug_irq_enabled = irq_enabled;
+    debug_watchdog_kick = wdog_kick;
+    debug_watchdog_reset = wdog_rst;
+    debug_st010_retire = st010_debug_retire;
+    debug_st010_pc = st010_debug_pc;
+    debug_st010_host_access = debug_mainbus_complete && sel_st010;
+    debug_st010_fetch_req = st010_prg_req;
+    debug_st010_fetch_done = st010_prg_valid;
+    debug_sound_commit = sound_commit;
+    debug_sound_page = sound_commit_page;
+    debug_sound_reg = sound_commit_reg;
+    debug_sound_data = sound_commit_data;
+    debug_sound_irq_promote = eng_irq_set;
+    debug_sound_voice_writeback = eng_wr_accum || eng_wr_cr ||
+                                  eng_wr_filt || eng_wr_env;
+    debug_sound_voice = eng_voice;
+    debug_sample_req = sdr_p4_req;
+    debug_sample_done = sdr_p4_req && sdr_p4_ack;
+    debug_sample_tick = sound_sample_tick;
+    debug_sample_underrun = sound_underrun;
+    debug_video_enable = video_enable;
+    debug_line_boundary = ce_pixel && (hcnt == 9'd0);
+    debug_frame_boundary = frame_tick;
+end
+
+always_ff @(posedge clk_sys) begin
+    debug_rst_d <= rst;
+    debug_mainbus_complete_d <= debug_mainbus_complete;
+    if (cold_rst) begin
+        debug_reset_epoch <= 32'd0;
+        debug_frame <= 32'd0;
+        debug_mainbus_complete_d <= 1'b0;
+    end
+    else if (rst && !debug_rst_d) begin
+        debug_reset_epoch <= debug_reset_epoch + 1'd1;
+    end
+    else if (frame_tick) begin
+        debug_frame <= debug_frame + 1'd1;
+    end
+
+    if (!rst && debug_mainbus_complete) begin
+        if (!$onehot0({sel_rom, sel_wram, sel_sprram, sel_palette, sel_extmem,
+                       sel_scroll, (sel_io || sel_extra),
+                       (sel_irqvec || sel_irqack || sel_irqen), sel_sound,
+                       sel_st010, sel_drifto_unknown}))
+            $fatal(1, "SSV_OVERLAPPING_SELECT pc=%08x addr=%06x", debug_pc, a);
+    end
+    if (!rst && sound_underrun)
+        $fatal(1, "SSV_SAMPLE_UNDERRUN pc=%08x frame=%0d scanline=%0d",
+               debug_pc, debug_reset_epoch, vcnt);
+    // The V60 bus adapter holds m_req until its next sparse ce_cpu edge, so
+    // the registered level acknowledgement may remain high for several
+    // clk_sys cycles.  A duplicate *completion* is an additional rising
+    // completion event, not a held level; assert on consecutive completion
+    // pulses while preserving the level handshake required by the adapter.
+    if (!rst && debug_mainbus_complete && debug_mainbus_complete_d)
+        $fatal(1, "SSV_DUPLICATE_ACK pc=%08x addr=%06x", debug_pc, a);
+    // The normal acceptance profile keeps this fatal.  The real-ROM audio
+    // isolation bench may opt into continuing past a known video-cache
+    // deadline so it can inspect ES5506 host writes/sample traffic; that
+    // diagnostic does not relax any audio assertion and is never a release
+    // verdict.
+    if (!rst && renderer_overrun &&
+        !$test$plusargs("ALLOW_RENDERER_OVERRUN_DIAGNOSTIC"))
+        $fatal(1, "SSV_RENDERER_OWNERSHIP pc=%08x frame=%0d scanline=%0d hpos=%0d",
+               debug_pc, debug_frame, vcnt, hcnt);
+end
 `endif
 
 endmodule

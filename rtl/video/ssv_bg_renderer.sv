@@ -80,11 +80,11 @@ logic signed [10:0] global_y_base_s;
 // identity (m_tile_code[i] = i << 16), so the high nibble passes through in
 // natural order. One config bit selects between them.
 function automatic logic [19:0] expand_code(
-    input ssv_pkg::ssv_cfg_t cfg,
+    input ssv_pkg::ssv_cfg_t cfg_i,
     input logic [15:0] low,
     input logic [15:0] attr
 );
-    expand_code = cfg.tile_code_identity
+    expand_code = cfg_i.tile_code_identity
                 ? {attr[13:10], low}
                 : {{attr[10], attr[11], attr[12], attr[13]}, low};
 endfunction

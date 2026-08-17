@@ -568,6 +568,10 @@ wire [31:0] joy_p4 = joystick_3;
 
 wire [15:0] p1_input_port;
 wire [15:0] p2_input_port;
+// Feeds ssv_core's UNUSED in_mahjong_rows port only -- the mahjong/Eagle Shot/
+// Sexy Reaction/GDFS optional-I/O family is not in the universal profile, so
+// this value is discarded inside the core. Kept in step with that port, which
+// eight verif/ benches still bind by name; remove both together.
 wire [23:0] mahjong_rows = {~joy_p4[9:4], ~joy_p3[9:4],
                             ~joy_p2[9:4], ~joy_p1[9:4]};
 wire signed [7:0] analog_x = joystick_l_analog_0[7:0];

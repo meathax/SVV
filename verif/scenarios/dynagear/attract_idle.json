@@ -3,27 +3,17 @@
   "set": "dynagear",
   "mame": "0.289",
   "mra": "Dyna Gear.mra",
-  "mra_sha256": "83d524ad3af62cf958e5ea386184533d64d6b3ee6c5a60d8b6a2f1a69151cebc",
+  "mra_sha256": "6e07c80822bbdcabe08fcc5317de71136462c79d26a0e73ad6103c84c2559084",
+  "rom_zip": "dynagear.zip",
   "rom_zip_sha256": "e0088d91679feaff026de267919700c86243c3823f5a1fb55894e1dbc4f7109d",
   "maincpu_sha256": "c29d3bf37b761aad1f13b01be7da9904c0a975826744b820fdc664c098c66289",
   "sprites_sha256": "5738ad3ac51f70d20702b564169b5516eb475b55af9a656181770461e86eab4f",
+  "samples_sha256": "2f187215970b8a5054de8785d8cf223cbd196c5f5767649576333fc2ee4d31aa",
   "dsw1": "0xFFFF",
   "dsw2": "0xFFFD",
-  "inputs": {
-    "in_p1": "0xFFFF",
-    "in_p2": "0xFFFF",
-    "in_system": "0xFFFF",
-    "in_extra": "0xFFFF"
-  },
-  "geometry": {
-    "active_w": 336,
-    "active_h": 240
-  },
-  "stop": {
-    "after_video_enable_frames": 360,
-    "note": "Current same-run attract and Verilator screenshot gate"
-  },
-  "outputs": {
-    "frame_crc": "sim_output/diff/rtl_attract_idle_frames.crc"
-  }
+  "inputs": {"in_p1": "0xFFFF", "in_p2": "0xFFFF", "in_system": "0xFFFF", "in_extra": "0xFFFF"},
+  "geometry": {"active_w": 336, "active_h": 240, "orientation": "horizontal"},
+  "hardware": {"program_bytes": 1048576, "graphics_bytes": 12582912, "sample_bytes": 4194304, "nvram": "none", "st010": false},
+  "stop": {"kind": "later_of", "after_video_enable_frames": 360, "after_attract_marker_neutral_frames": 120, "attract_marker": "attract_mode", "barrier": "complete_native_frame"},
+  "outputs": {"native_frames": true, "audio_pcm": true, "state_hashes": true, "canonical_trace": true, "comparator_receipt": true}
 }

@@ -1,7 +1,7 @@
--- MiSTer FPGA Ultimate Autopilot v5.1 MAME capture adapter template.
---
--- This is not golden until every AUTO below is replaced from the pinned MAME source
--- and docs/OBSERVABILITY.json is set strict=true for the emitted domain.
+-- SSV fallback main-bus capture adapter for pinned MAME 0.289.
+-- The normal universal supported-set lane uses tools/mame-ssv-headless.lua because that
+-- adapter also owns frame artifacts and journaled inputs. This file remains a
+-- functional bus-only adapter for executor discovery and focused captures.
 
 local trace_path = os.getenv("MISTER_TRACE_OUT")
 if not trace_path or trace_path == "" then
@@ -11,7 +11,6 @@ end
 local trace = assert(io.open(trace_path, "w"))
 local machine = manager.machine
 
--- AUTO: exact device tag and address space.
 local device_tag = ":maincpu"
 local cpu = machine.devices[device_tag]
 assert(cpu, "MAME device not found: " .. device_tag)
@@ -72,44 +71,42 @@ local function close_trace(reason)
     trace_closed = true
 end
 
--- AUTO:
--- - address range
--- - tap callback semantics for the pinned MAME version
--- - address unit (byte/word)
--- - data width
--- - mask-to-byte-enable conversion
--- - whether this hook observes request, accepted or completed transfer
--- - side effects and debugger/access suppression
---
--- Keep each returned tap object alive in `taps`.
---
--- Example shape only:
---
--- taps[#taps + 1] = space:install_read_tap(
---     0x000000, 0xffffff, "mister-mainbus-read",
---     function(offset, data, mask)
---         local byte_enable = AUTO_CONVERT_MASK(mask)
---         emit("mainbus", "bus", "completed", "R", offset, data, byte_enable)
---         return data
---     end
--- )
---
--- taps[#taps + 1] = space:install_write_tap(
---     0x000000, 0xffffff, "mister-mainbus-write",
---     function(offset, data, mask)
---         local byte_enable = AUTO_CONVERT_MASK(mask)
---         emit("mainbus", "bus", "completed", "W", offset, data, byte_enable)
---         return data
---     end
--- )
+local function byte_enable(mask)
+    local mask16 = mask & 0xffff
+    return (((mask16 & 0x00ff) ~= 0) and 1 or 0) |
+           (((mask16 & 0xff00) ~= 0) and 2 or 0)
+end
+
+emit_barrier("adapter_ready", "completed")
+taps[#taps + 1] = space:install_read_tap(
+    0x000000, 0xffffff, "mister-mainbus-read",
+    function(offset, data, mask)
+        local be = byte_enable(mask)
+        local lane_mask = (((be & 1) ~= 0) and 0x00ff or 0) |
+                          (((be & 2) ~= 0) and 0xff00 or 0)
+        emit("mainbus", "bus", "completed", "R", offset & 0xfffffe,
+             data & lane_mask & 0xffff, be)
+    end
+)
+taps[#taps + 1] = space:install_write_tap(
+    0x000000, 0xffffff, "mister-mainbus-write",
+    function(offset, data, mask)
+        local be = byte_enable(mask)
+        local lane_mask = (((be & 1) ~= 0) and 0x00ff or 0) |
+                          (((be & 2) ~= 0) and 0xff00 or 0)
+        emit("mainbus", "bus", "completed", "W", offset & 0xfffffe,
+             data & lane_mask & 0xffff, be)
+    end
+)
 
 local input_path = os.getenv("MISTER_INPUT_FILE")
--- AUTO: parse and replay the v4 semantic input JSONL. Do not translate raw MAME cycles
--- into an allegedly shared timebase. Prefer canonical event or proven video-position anchors.
+if input_path and input_path ~= "" then
+    error("bus-only fallback does not own inputs; use tools/mame-ssv-headless.lua")
+end
 
-emu.register_machine_stop(function()
+emu.add_machine_stop_notifier(function()
     emit_barrier("machine_stop", "completed")
     close_trace("machine_stop")
 end)
 
-print("MiSTer FPGA capture template loaded. It intentionally emits nothing until board hooks are wired.")
+print("SSV bus-only fallback capture loaded for MAME 0.289")

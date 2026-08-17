@@ -26,6 +26,33 @@ It must not be described as measured PCB-cycle accuracy.
 - ST010 DP behavior remains pinned to the current compatibility policy until a
   primary source proves a correction.
 
+### Dyna Gear V60 retirement/IRQ ordering (reviewed 2026-08-16)
+
+The Dyna Gear acceptance record carries one **MAME-reference exception** for
+the natural V60 retirement/level-3-VBlank ordering.  This is an observability
+exception, not a synthesizable game-specific timing patch:
+
+- **KNOWN:** the pinned MAME 0.289 V60 executor charges a flat eight-cycle
+  average and labels the value a placeholder; it is not a board timing model.
+- **KNOWN:** the pinned SSV driver raises level 3 from the raster at physical
+  scanline 240 and clocks the V60 from the 16 MHz master derivative.
+- **KNOWN:** the NEC V60 primary references available to this project do not
+  specify the board's READY wait-state/T-state selection or the VBlank-to-CPU
+  sampling phase.
+- **INFERRED:** the fresh, deterministic Dyna pair first differs at
+  `cpu_data_lane_mask_v1` ordinal `535665` exactly as the natural level-3
+  handler becomes eligible.  A simulation-only IRQ phase perturbation shifts
+  the handler but does not close the stream (`+IRQ3_DELAY_SYS=200` first
+  differs at ordinal `535670`), so no shared RTL value is selected.
+
+The exception is bound to the machine-readable record
+[`DYNAGEAR_MAME_TIMING_EXCEPTION_20260816.json`](debug/DYNAGEAR_MAME_TIMING_EXCEPTION_20260816.json).
+It permits the Dyna Gear behavioral-reference profile to proceed only when
+the complete journaled gameplay receipt, native RGB gameplay/soak window,
+control/watchdog gates, and independent ES5506 zero-underrun gate pass.  It
+does **not** permit masking, resynchronizing, tolerance, or weakening any
+other domain, and it does not claim PCB-cycle equivalence for `cpu_data`.
+
 ## Permanent evidence limits
 
 Unless new primary documentation is found, the following cannot be proven

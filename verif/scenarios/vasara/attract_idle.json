@@ -1,29 +1,19 @@
 {
   "id": "attract_idle",
   "set": "vasara",
-  "mame": "0.288",
+  "mame": "0.289",
   "mra": "Vasara.mra",
-  "mra_sha256": "bc293f1d5c56057d7c09f0b2be837777dbc9da039fa39b280c4e5017388962a3",
+  "mra_sha256": "9a766c37b10f82ce8ca67f44b2217a538291b22e527c84fe0e08f5a177b86dbb",
+  "rom_zip": "vasara.zip",
   "rom_zip_sha256": "982632f39d3f0f1c517ccb856f8f78a6fac34f8f9109926940141479963a4942",
   "maincpu_sha256": "8bc81987f53a5f601ad3e7a75f4c014840f2160a58dc92441580a9b118ff9242",
   "sprites_sha256": "f153a5e87692ef86adbf8e7078c4de9566e7f8c99c8fcf9cc729eb3d6a7d3fe5",
+  "samples_sha256": "9b67bcaa58f14e69e59b5b645a5ae37e9347afad418276e699188fe32dd22c5c",
   "dsw1": "0x00FF",
   "dsw2": "0x007F",
-  "inputs": {
-    "in_p1": "0xFFFF",
-    "in_p2": "0xFFFF",
-    "in_system": "0xFFFF",
-    "in_extra": "0xFFFF"
-  },
-  "geometry": {
-    "active_w": 336,
-    "active_h": 240
-  },
-  "stop": {
-    "after_video_enable_frames": 360,
-    "note": "Current same-run attract and Verilator screenshot gate"
-  },
-  "outputs": {
-    "frame_crc": "sim_output/diff/vasara_attract_idle_frames.crc"
-  }
+  "inputs": {"in_p1": "0xFFFF", "in_p2": "0xFFFF", "in_system": "0xFFFF", "in_extra": "0xFFFF"},
+  "geometry": {"active_w": 336, "active_h": 240, "orientation": "vertical_ccw"},
+  "hardware": {"program_bytes": 4194304, "graphics_bytes": 33554432, "sample_bytes": 8388608, "nvram": "none", "st010": false, "es5506_banks": 2},
+  "stop": {"kind": "later_of", "after_video_enable_frames": 360, "after_attract_marker_neutral_frames": 120, "attract_marker": "attract_mode", "barrier": "complete_native_frame"},
+  "outputs": {"native_frames": true, "audio_pcm": true, "state_hashes": true, "canonical_trace": true, "comparator_receipt": true}
 }

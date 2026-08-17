@@ -43,6 +43,26 @@ logic       irq_state_update;
 logic [7:0] requested_after_events;
 integer i;
 
+`ifdef SIMULATION
+integer irq3_delay_override;
+logic [7:0] irq3_delay_left;
+// Diagnostic-only phase probe.  The default path is bit-identical to the
+// synthesised controller; a nonzero plusarg holds the raw raster event for a
+// bounded number of clk_sys edges before presenting it to the IRQ latch.
+wire irq3_event = (irq3_delay_override == 0) ? vblank_pulse
+                                             : (irq3_delay_left == 8'd1);
+initial begin
+    irq3_delay_override = 0;
+    irq3_delay_left = 8'd0;
+    if ($value$plusargs("IRQ3_DELAY_SYS=%d", irq3_delay_override)) begin
+        if (irq3_delay_override < 0 || irq3_delay_override > 255)
+            $fatal(1, "IRQ3_DELAY_SYS out of range: %0d", irq3_delay_override);
+    end
+end
+`else
+wire irq3_event = vblank_pulse;
+`endif
+
 // MAME's SSV controller refreshes the CPU input line when a cause is raised
 // or acknowledged.  Writing the enable mask alone does not retroactively
 // assert a cause that was already pending.  Vasara relies on this ordering:
@@ -57,7 +77,7 @@ always_comb begin
         irq_state_update = 1'b1;
     end
     // Event set wins over a simultaneous software acknowledge.
-    if (vblank_pulse) begin
+    if (irq3_event) begin
         requested_after_events[3] = 1'b1;
         irq_state_update = 1'b1;
     end
@@ -80,14 +100,28 @@ always_ff @(posedge clk) begin
         requested <= 8'h00;
         enabled   <= 8'h00;
         irq_asserted <= 1'b0;
+`ifdef SIMULATION
+        irq3_delay_left <= 8'd0;
+`endif
         for (i = 0; i < 8; i = i + 1)
             vectors[i] <= 3'd0;
     end
     else if (rst) begin
         requested <= 8'h00;
         irq_asserted <= 1'b0;
+`ifdef SIMULATION
+        irq3_delay_left <= 8'd0;
+`endif
     end
     else begin
+`ifdef SIMULATION
+        if (irq3_delay_override != 0) begin
+            if (vblank_pulse && (irq3_delay_left == 0))
+                irq3_delay_left <= irq3_delay_override[7:0];
+            else if (irq3_delay_left != 0)
+                irq3_delay_left <= irq3_delay_left - 1'b1;
+        end
+`endif
         // Clear first, set second: a $240000 ack that lands on the same
         // clk_sys edge as vblank must not swallow the new frame interrupt.
         // On the board the vblank latch is set by the raster, not by the CPU
@@ -95,7 +129,7 @@ always_ff @(posedge clk) begin
         if (ack_we)
             requested[ack_level] <= 1'b0;
 
-        if (vblank_pulse)
+        if (irq3_event)
             requested[3] <= 1'b1;
 
         // Level 1 at scanline 0, for boards whose init sets

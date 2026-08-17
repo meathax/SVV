@@ -19,12 +19,12 @@ SUPPORTED_SETS = (
     "stmblade",
     "twineag2",
     "ultrax",
+    "survartsu",
 )
 
 # Private archives retained locally for reference, but deliberately excluded
 # from the universal profile and MRA generation.
 RETIRED_LOCAL_SETS = (
-    "survartsu",
     "ultraxg",
 )
 
@@ -45,13 +45,14 @@ DESCRIPTOR_FEATURE_OVERRIDES = {
 # silently change the release profile.
 PARENT_RUN_ORDER = (
     "dynagear",
+    "survartsu",
+    "cairblad",
     "vasara",
     "vasara2",
-    "cairblad",
-    "drifto94",
-    "stmblade",
-    "twineag2",
     "ultrax",
+    "stmblade",
+    "drifto94",
+    "twineag2",
 )
 
 # Lockstep startup surfaces are a protocol property, not a license to skip a

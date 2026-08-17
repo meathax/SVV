@@ -24,7 +24,25 @@ serves the wide `if_*` port from a 32×8B direct-mapped program ROM icache in
 icache line fills and XRAM/Dyna RAM; fills take priority. Override with
 `+define+FAST_IFETCH_EN=1'b0` to A/B-test the legacy ce-gated adapter fetch.
 
-`rtl/cpu/v60/s32_v60_bus.sv` was already identical to s32 and was not changed.
+On 2026-08-17, the V60 bus adapter handshake was adapted from s32 commit
+`93776de9d6afce036ce71d277005bcad15ed16c7`. The SVV copy retains its existing
+lane assembly and physical-cycle datapath, while adopting the donor's
+raw-clock request re-arm and request-held completion acknowledgement. The
+simulation-only reset assertion is guarded with `SIMULATION` because Quartus
+17.0.2 does not define `SYNTHESIS` in this flow.
+
+On 2026-08-17, the V60 execute-retire overlap was adapted from s32 commit
+`8012041d2e2a8d75fc6df64334c86482db92f45d`. Only the evidence-backed
+register-only opcode allowlists, fetch-window handoff, and stale-prefetch
+guard were ported; s32's different runtime fast-ifetch map and loop-hint
+implementation were not copied.
+
+On 2026-08-18, the V60 RSR control-transfer flush was adapted from s32 commit
+`f18618b64eac079a3a79690aabf94d91e0ec3fcd`. The SVV copy now invalidates the
+live and retained prefetch windows when RSR loads a new PC, advances the
+prefetch epoch, clears loop suppression, and rejects a coincident old-stream
+acknowledgement. The existing SVV RSR data-pop and fetch-window interfaces are
+otherwise unchanged.
 
 These sources are GPLv3 and the repository retains the upstream `LICENSE`.
 New SSV-specific RTL is also distributed under GPL-3.0-or-later.

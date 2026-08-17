@@ -1,1 +1,20 @@
-{"id":"attract_idle","set":"stmblade","mame":"0.288","mra":"Storm Blade (Japan).mra","inputs":{"in_p1":"0xFFFF","in_p2":"0xFFFF","in_system":"0xFFFF","in_extra":"0xFFFF"},"geometry":{"active_w":352,"active_h":240}}
+{
+  "id": "attract_idle",
+  "set": "stmblade",
+  "mame": "0.289",
+  "mra": "Storm Blade (US).mra",
+  "mra_sha256": "3ec456c3348bd96fabf807670f6f3f97af318eb49040a88b4d05f0ddfafc2585",
+  "rom_zip": "stmblade.zip",
+  "rom_zip_sha256": "6ba5f76ae39006891d8df5e2d264b980bcac1c0ee13e27162014f198ddd677c1",
+  "maincpu_sha256": "c7f72780022573757b88134cff1a1465462a910ef615f383c51408dcba272b07",
+  "sprites_sha256": "2737affee11c315cfa940c07c2e12dc02a30827c6d0dc823b46d4c97d8c21217",
+  "samples_sha256": "41e28b02226695d4f573098c5b06a3b00d629ca2af84858f65523aa118f335cb",
+  "st010_sha256": "6ccc192e9e965347dda948170f530ced5a63e16dbc87f8c93b3c1f1ad83cdfd6",
+  "dsw1": "0x00BF",
+  "dsw2": "0x00FE",
+  "inputs": {"in_p1": "0xFFFF", "in_p2": "0xFFFF", "in_system": "0xFFFF", "in_extra": "0xFFFF"},
+  "geometry": {"active_w": 352, "active_h": 240, "orientation": "vertical_ccw"},
+  "hardware": {"program_bytes": 4194304, "graphics_bytes": 18874368, "sample_bytes": 4194304, "nvram": "erased", "nvram_bytes": 2048, "st010": true},
+  "stop": {"kind": "later_of", "after_video_enable_frames": 360, "after_attract_marker_neutral_frames": 120, "attract_marker": "attract_mode", "barrier": "complete_native_frame"},
+  "outputs": {"native_frames": true, "audio_pcm": true, "state_hashes": true, "canonical_trace": true, "comparator_receipt": true}
+}

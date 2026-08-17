@@ -74,6 +74,23 @@ def main() -> int:
     assert sum('name="Unknown"' in line for line in lines) == 2, lines
     assert sum('name="Unused"' in line for line in lines) == 1, lines
 
+    # Dyna Gear's two switch banks are a release contract, not merely a
+    # generated-MRA smoke check.  Keep the exact default and all ten fields
+    # pinned to the MAME 0.289 declaration so a generator edit cannot silently
+    # drop the health/free-play or four-way lives choices.
+    dynagear_default, dynagear_lines, dynagear_skipped = generator.dips_to_mra(
+        generator.parse_dips(text, "dynagear")
+    )
+    assert dynagear_default == "FF,FD", dynagear_default
+    assert not dynagear_skipped, dynagear_skipped
+    assert [
+        re.search(r'name="([^"]+)"', line).group(1)
+        for line in dynagear_lines if '<dip ' in line
+    ] == [
+        "Coin A", "Coin B", "Flip Screen", "Demo Sounds", "Difficulty",
+        "Lives", "Free Play", "Health",
+    ], dynagear_lines
+
     for setname, (expected_names, expected_count) in EXPECTED_BUTTONS.items():
         actual_names, _actual_default, actual_count = generator.BUTTONS[setname]
         assert actual_names == expected_names, (setname, actual_names)
@@ -87,6 +104,17 @@ def main() -> int:
     assert "wireservice_button=joy_p1[12]|joy_p2[12];" in compact_wrapper
     assert "wirecoin1_button=joy_p1[11];" in compact_wrapper
     assert "wirecoin2_button=joy_p2[11];" in compact_wrapper
+    mame_lua = (ROOT / "tools" / "mame-ssv-headless.lua").read_text(
+        encoding="utf-8"
+    )
+    assert '[0x10]={"Test"}' in mame_lua
+    assert 'local extra = (setname == "survartsu") and ports[":ADD_BUTTONS"] or nil' in mame_lua
+    assert '[0x100]={"P1 Button 4"}' in mame_lua
+    assert '[0x200]={"P1 Button 5"}' in mame_lua
+    assert '[0x400]={"P1 Button 6"}' in mame_lua
+    assert '[0x100]={"P2 Button 4"}' in mame_lua
+    assert '[0x200]={"P2 Button 5"}' in mame_lua
+    assert '[0x400]={"P2 Button 6"}' in mame_lua
 
     source_rotations = mame_rotations(text)
     checked = []
@@ -119,6 +147,8 @@ def main() -> int:
     print(f"PASS {len(controls_checked)} MRA control declarations match generator")
     print(f"PASS {len(EXPECTED_BUTTONS)} exact control mappings")
     print("PASS wrapper Start/Coin/Service/Test joystick-bit contract")
+    print("PASS Dyna Gear exact DIP default/field contract")
+    print("PASS MAME Test input journal mapping")
     return 0
 
 

@@ -2,49 +2,138 @@
   "schema_version": 4,
   "raw_event_schema": "mister-raw-trace-v4",
   "canonical_event_schema": "mister-canonical-trace-v4",
+  "strict_projection_schema": "ssv-strict-projection-v1",
   "rules": {
     "missing_is_not_zero": true,
     "strict_no_resync": true,
     "raw_cycles_for_cross_side_inputs_forbidden": true,
     "mixed_clock_global_order_forbidden_without_proof": true,
-    "unknown_fields_fail_when_selected": true
-    ,"require_complete_receipt": true
+    "unknown_fields_fail_when_selected": true,
+    "require_complete_receipt": true,
+    "require_stop_barrier": true,
+    "require_zero_drops": true,
+    "mame_coin_impulse": -1
+  },
+  "comparison_tools": {
+    "bounded": "tools/compare_ssv_strict.py",
+    "streaming": "tools/compare_ssv_strict_stream.py",
+    "streaming_contract": "full source hashes, complete receipts, stop barriers, and ordinal no-resync comparison"
+  },
+  "low_volume_mame": {
+    "mode": "run_ssv_mame_headless.ps1 -BarrierSidecar",
+    "record_storage": "one closed JSON file per record",
+    "merge": "post-exit only; malformed or missing records fail closed"
+  },
+  "same_side_assertions": {
+    "vblank_irq_cadence": {
+      "source": "verif/tb_ssv_frame_crc.sv",
+      "default": "duplicate level-3 handler entries per VBlank interval are fatal",
+      "opt_in_plusarg": "+ASSERT_IRQ_CADENCE",
+      "opt_in_contract": "after the first post-reset VBlank, exactly one handler entry per completed VBlank interval",
+      "scope_note": "the exact-one contract is scenario-qualified because some sets can still be in boot/reset at the first post-epoch raster interval",
+      "synthesized_behavior_unchanged": true
+    }
+  },
+  "anchors": {
+    "reset_release": "first completed observation after the core/reference reset interval ends",
+    "first_fetch": "first completed V60 program-ROM fetch after reset release",
+    "first_retirement": "MAME device_debug instruction_hook and RTL V60 S_DECODE architectural boundary, both sampled before execution; focused phase equivalence proven",
+    "irq": "accepted V60 external interrupt acknowledge with requested/enabled/vector context",
+    "vblank": "native raster entry to vertical blank",
+    "frame_complete": "completed native unrotated surface at the producer frame boundary; stop budget begins after the accepted $21000e bit-7 video-enable epoch",
+    "native_rgb_crc": "CRC32 over the completed native 336x240 RGB surface; comparable only within a declared frame window with no resynchronization",
+    "state_crc": "per-frame CRCs of list512, spr8k, scroll63 and pal512 memory ranges at the native frame boundary; diagnostic candidate",
+    "input_consumption": "raw board-input journal frame ordinal applied before the corresponding native frame; MAME frontend coin impulse is disabled with -coin_impulse -1"
+  },
+  "device_ids": {
+    "0": "unmapped",
+    "1": "program_rom",
+    "2": "work_ram",
+    "3": "sprite_ram",
+    "4": "palette_ram",
+    "5": "extension_ram_or_nvram",
+    "6": "scroll_and_crtc",
+    "7": "board_or_extra_io",
+    "8": "irq_controller",
+    "9": "es5506_host",
+    "10": "st010_host",
+    "11": "drifto_random_read"
   },
   "domains": {
+    "cpu_data": {
+    "strict": false,
+      "candidate_strict": true,
+      "promotion_gate": "two byte-identical cold captures per producer with identical scenario journal and no device-1 program-ROM fetches",
+      "bounded_projection": "tools/project_ssv_strict_window.py copies source events for a declared native-frame interval and emits a provenance-bound receipt; it never resynchronizes or rewrites event fields",
+      "normalization": "cpu_data_lane_mask_v1: mask data with active-high byte_enable before ordinal comparison (BE1=0x00ff, BE2=0xff00, BE3=0xffff); source traces remain unchanged",
+      "strict_only_profile": "optional producer output profile strict_only=true emits only canonical mainbus fields; it preserves the real harness, journal, barriers and receipt semantics",
+      "meaning": "strict projection of completed 16-bit CPU data transactions for devices 0 and 2-11; program-ROM instruction fetches are excluded because MAME tap granularity differs from RTL 64-bit fills",
+    "ordering": "domain_seq",
+      "global_order_proven": false,
+      "canonical": {"width_bits": 16, "phase": "completed", "address_unit_bytes": 1},
+    "mame": {
+      "address_unit_bytes": 1,
+      "width_bits": 16,
+      "data_encoding": "lane_numeric",
+      "lane_to_canonical": [0, 1],
+      "byte_enable_polarity": "active_high",
+      "phase": "completed",
+      "source": "tools/mame-ssv-headless.lua full program-space tap projected by tools/compare_ssv_strict.py",
+      "excluded_device": 1,
+      "evidence": "MAME 0.289 program-space callback emits completed 16-bit data-lane events; device 1 is excluded from the strict projection"
+    },
+    "rtl": {
+      "address_unit_bytes": 1,
+      "width_bits": 16,
+      "data_encoding": "lane_numeric",
+      "lane_to_canonical": [0, 1],
+      "byte_enable_polarity": "active_high",
+      "phase": "completed",
+      "source": "ssv_core debug_mainbus_* ports consumed by verif/ssv_diff_probe.sv",
+      "excluded_device": 1,
+      "evidence": "ssv_core debug_mainbus_complete is a completed 16-bit CPU transaction; device 1 is excluded from the strict projection"
+      },
+      "comparable_optional_fields": ["device", "pc", "reset_epoch", "frame", "scanline"]
+    },
     "mainbus": {
       "strict": false,
-      "meaning": "AUTO: define the exact accepted or completed main CPU bus event.",
+      "candidate_strict": false,
+      "promotion_gate": "diagnostic only; use cpu_data for strict acceptance",
+      "meaning": "one completed 16-bit V60 program-space transaction, including ROM data, work RAM and every decoded or unmapped device cycle",
       "ordering": "domain_seq",
       "global_order_proven": false,
-      "canonical": {
-        "width_bits": 16,
-        "phase": "completed"
-      },
+      "canonical": {"width_bits": 16, "phase": "completed", "address_unit_bytes": 1},
       "mame": {
+        "source": "tools/mame-ssv-headless.lua full program-space read/write taps",
         "address_unit_bytes": 1,
         "width_bits": 16,
         "data_encoding": "lane_numeric",
-        "lane_to_canonical": [
-          0,
-          1
-        ],
+        "lane_to_canonical": [0, 1],
         "byte_enable_polarity": "active_high",
         "phase": "completed",
-        "evidence": "AUTO"
+        "evidence": "MAME 0.289 (mame0289) program-space tap callback after access"
       },
       "rtl": {
+        "source": "ssv_core debug_mainbus_* ports consumed by verif/ssv_diff_probe.sv",
         "address_unit_bytes": 1,
         "width_bits": 16,
         "data_encoding": "lane_numeric",
-        "lane_to_canonical": [
-          0,
-          1
-        ],
+        "lane_to_canonical": [0, 1],
         "byte_enable_polarity": "active_high",
         "phase": "completed",
-        "evidence": "AUTO"
+        "evidence": "m_req && ack_r && !ack_r_d with stable read_mux/write data"
       },
-      "comparable_optional_fields": []
-    }
+      "known_sampling_question": "FAST_IFETCH wide instruction fills are diagnostic v60_ifetch events until MAME opcode-fetch granularity is proven equivalent",
+      "comparable_optional_fields": ["device", "pc", "reset_epoch", "frame", "scanline"]
+    },
+    "v60_ifetch": {"strict": false, "meaning": "completed 64-bit RTL program-ROM cache-line fill", "reason_diagnostic": "MAME program tap access width/granularity differs"},
+    "v60_retire": {"strict": false, "meaning": "MAME device_debug instruction hook and RTL S_DECODE boundary before execution, with PC/opcode/PSW and all GPRs", "reason_diagnostic": "focused phase equivalence is proven for 753 boundaries; two corrected cold full-scenario captures remain required before promotion"},
+    "v60_irq_entry": {"strict": false, "meaning": "MAME debugger-trace marker for a configured V60 IRQ handler PC before handler execution", "reason_diagnostic": "diagnostic cadence anchor; not a PCB-cycle equivalent by itself"},
+    "irq": {"strict": false, "meaning": "request/mask state changes and accepted V60 acknowledge/vector events", "reason_diagnostic": "MAME callback phase requires same-side proof"},
+    "st010": {"strict": false, "meaning": "DSP retirement, host access and program-fetch request/completion", "reason_diagnostic": "MAME uPD96050 sampling phase requires proof"},
+    "es5506": {"strict": false, "meaning": "host commit, IRQ promotion, sample request/completion/tick and underrun", "reason_diagnostic": "MAME voice-writeback/sample scheduling is not a bus-level equivalent"},
+    "video": {"strict": false, "meaning": "video enable, native scanline/frame boundaries and renderer ownership violations", "reason_diagnostic": "native boundary semantics must be proven before pixel comparison"},
+    "native_rgb_crc": {"strict": false, "candidate_strict": true, "meaning": "CRC32 of the native unrotated 336x240 RGB frame", "normalization": "native_rgb_crc32_v1", "promotion_gate": "declared frame window, matching frame cursor, no resynchronization, and two cold captures per producer"},
+    "state_crc": {"strict": false, "meaning": "per-frame CRCs for list512, spr8k, scroll63 and pal512", "normalization": "state_crc32_v1", "reason_diagnostic": "frame callback memory sampling is not PCB-cycle equivalence; all fields must match before promotion"}
   }
 }
