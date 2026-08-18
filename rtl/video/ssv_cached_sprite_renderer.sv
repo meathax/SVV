@@ -73,8 +73,8 @@ localparam integer DESC_WIDTH = 88;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_COUNT_VALUE = CACHE_ENTRIES;
 localparam logic [CACHE_ADDR_WIDTH:0] CACHE_LAST_VALUE =
     CACHE_ENTRIES - 1;
-// Dense SSV scenes can exceed 128 real sprite descriptors on one scanline
-// (Survival Arts reaches more than 512 in its title scene). The first pass
+// Dense SSV scenes can exceed 128 real sprite descriptors on one scanline.
+// The first pass
 // counts each visible descriptor occurrence per line; a prefix pass assigns
 // compact bases; and a final pass writes the occurrences into one shared pool.
 // This keeps dense lines possible without reserving a fixed 240*LINE_SLOTS

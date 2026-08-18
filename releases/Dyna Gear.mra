@@ -29,16 +29,16 @@
     <part name="si002-06.u16" crc="0e1f23f6"/>
     <!-- samples -->
     <interleave output="16">
-      <part name="si002-07.u9" crc="30d2bf11" map="21"/>
+      <part name="si002-07.u9" crc="30d2bf11" map="12"/>
     </interleave>
     <interleave output="16">
-      <part name="si002-08.u8" crc="253704ee" map="21"/>
+      <part name="si002-08.u8" crc="253704ee" map="12"/>
     </interleave>
     <interleave output="16">
-      <part name="si002-09.u7" crc="1ea86db7" map="21"/>
+      <part name="si002-09.u7" crc="1ea86db7" map="12"/>
     </interleave>
     <interleave output="16">
-      <part name="si002-10.u6" crc="e369c177" map="21"/>
+      <part name="si002-10.u6" crc="e369c177" map="12"/>
     </interleave>
   </rom>
   <switches default="FF,FD" base="16">
@@ -53,5 +53,5 @@
     <dip bits="14" name="Free Play" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Health" ids="3 Hearts,4 Hearts" values="0,1"/>
   </switches>
-  <buttons names="Jump,Attack,-,-,-,-,Start,Coin,Service,Test" default="A,B,Start,Select,R,L" count="2"/>
+  <buttons names="Jump,Attack,Button 3,-,-,-,Start,Coin,Service,Test" default="A,B,X,Start,Select,R,L" count="3"/>
 </misterromdescription>

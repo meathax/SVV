@@ -51,10 +51,9 @@ claims are documented elsewhere and are not presented as PCB accuracy here.
 
 ## Supported games
 
-These are the nine supported entries in
+These are the eight supported entries in
 [`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other Sammy Seta Visco entries
-present in MAME are not currently claimed as supported by this core. Survival
-Arts is represented by its USA clone set, `survartsu`.
+present in MAME are not currently claimed as supported by this core.
 
 | Game | Set name | Runtime hardware notes |
 | --- | --- | --- |
@@ -66,11 +65,6 @@ Arts is represented by its USA clone set, `survartsu`.
 | Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
-| Survival Arts (USA) | `survartsu` | 1 MiB program ROM, 24 MiB graphics, extra RAM, read-kick watchdog, six buttons |
-
-For Survival Arts, the six controls are named Weak Punch, Medium Punch, Strong
-Punch, Weak Kick, Medium Kick, and Strong Kick. The MRA maps them to MiSTer
-`A`, `B`, `X`, `Y`, `L`, and `R` respectively.
 
 ## **Hardware emulated**
 

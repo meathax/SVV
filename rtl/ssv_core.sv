@@ -278,7 +278,7 @@ wire sel_extra   = extra_input_window_cfg(cfg, a);
 // (the register-built GDFS EEPROM) without touching any supported descriptor.
 // MAME maps the program ROM as `ssv_map(map, rom)` with rom..0xffffff, and in
 // every SSV set rom == 0x1000000 - program_size: $f00000 for a 1 MB program
-// (dynagear, survarts), $e00000 for 2 MB (cairblad, twineag2, ultrax),
+// (dynagear), $e00000 for 2 MB (cairblad, twineag2, ultrax),
 // $c00000 for 4 MB (drifto94, stmblade, vasara, vasara2). So the base is a
 // function of prog_mb and does not need its own config field.
 // 0x1000000 does not fit the 24-bit CPU address, and it does not need to:
@@ -546,12 +546,46 @@ assign renderer_spr_addr = (obj_cache_busy || obj_busy) ? obj_spr_addr : bg_spr_
 // hits it because the behavioural SDRAM is fast enough that lines never
 // overrun; on hardware it paints large parts of the background with sprite
 // tile data until the scene thins out.
-wire p2_owner_obj = obj_busy;
+//
+// Selecting from live obj_busy is not sufficient to prevent that. obj_busy is
+// free to change between the clock that issues a request and the clock its
+// acknowledgement returns, and when it does, the address presented to the
+// controller moves mid-transaction and the returning data is handed to the
+// client that did not ask for it. Ownership is therefore latched for the
+// duration of each outstanding transaction, in the same shape as the V60
+// prefetch transport guard: decide once at issue, hold until acknowledged.
+logic p2_busy_r;
+logic p2_owner_obj_r;
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        p2_busy_r      <= 1'b0;
+        p2_owner_obj_r <= 1'b0;
+    end
+    else if (!p2_busy_r) begin
+        // sdr_p2_req is driven from live obj_busy while no transaction is
+        // outstanding, so the owner captured here is the one that issued.
+        if (sdr_p2_req && !sdr_p2_ack) begin
+            p2_busy_r      <= 1'b1;
+            p2_owner_obj_r <= obj_busy;
+        end
+    end
+    // Release on acknowledge, and also if the owning client withdraws its
+    // request. Both fetchers hold req until ack, so the withdrawal case should
+    // not arise; releasing on it anyway keeps a protocol violation from
+    // latching the port to a client that is no longer asking and starving the
+    // other one for the rest of the frame.
+    else if (sdr_p2_ack ||
+             !(p2_owner_obj_r ? obj_rom_req : bg_rom_req)) begin
+        p2_busy_r <= 1'b0;
+    end
+end
+
+wire p2_owner_obj = p2_busy_r ? p2_owner_obj_r : obj_busy;
 wire bg_rom_ack   = sdr_p2_ack && !p2_owner_obj;
 wire obj_rom_ack  = sdr_p2_ack &&  p2_owner_obj;
 
-assign sdr_p2_req = obj_busy ? obj_rom_req : bg_rom_req;
-assign sdr_p2_addr = obj_busy ? obj_rom_addr : bg_rom_addr;
+assign sdr_p2_req = p2_owner_obj ? obj_rom_req : bg_rom_req;
+assign sdr_p2_addr = p2_owner_obj ? obj_rom_addr : bg_rom_addr;
 
 // verif/ssv_tilemap_page_check.sv binds into this module and still names the
 // graphics port p1. These aliases keep that (shared, not-mine-to-edit) checker
@@ -629,20 +663,52 @@ always_ff @(posedge clk_sys) begin
 end
 
 `ifdef SIMULATION
+// Which producer armed the sticky flag, kept out of synthesis because the
+// hardware indicator is one LED and cannot express a cause anyway.
+logic overrun_cause_deadline, overrun_cause_cache;
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        overrun_cause_deadline <= 1'b0;
+        overrun_cause_cache    <= 1'b0;
+    end
+    else begin
+        if (line_buffer_start && renderer_busy) overrun_cause_deadline <= 1'b1;
+        if (obj_cache_overflow)                 overrun_cause_cache    <= 1'b1;
+    end
+end
+
 // These are deliberately local invariants rather than relaxed scoreboards:
 // a shared p2 acknowledgement must go only to the renderer that owns the
 // outstanding request, and a missed line deadline must never launch a second
 // renderer on top of an in-flight one.  The sticky renderer_overrun above is
 // still the externally reported fault; these checks make a future ownership
 // or scheduling regression fail at its first causal clock.
+//
+// The ownership check is stated as address stability across an outstanding
+// transaction, which is exactly the property the latch above exists to
+// provide and is independent of the steering expressions themselves.
+// Comparing bg_rom_ack against p2_owner_obj, as this invariant previously
+// did, only restated their own definitions and could never fail however badly
+// the port was steered.
+//
+// Two things that look like violations are not. obj_busy legitimately changes
+// while a transaction is outstanding, because the object renderer can finish
+// between issue and acknowledgement; the latched owner is what keeps that
+// harmless. And a client legitimately drops its request on the clock its
+// acknowledgement arrives, so "acknowledged while not requesting" is ordinary
+// completion rather than a misroute.
+logic [SDR_AW:4] p2_addr_r;
+always_ff @(posedge clk_sys) begin
+    if (!p2_busy_r && sdr_p2_req && !sdr_p2_ack) p2_addr_r <= sdr_p2_addr;
+end
+
 always @(posedge clk_sys) begin
     if (!rst) begin
         if (renderer_line_start && renderer_busy)
             $fatal(1, "renderer started while a previous renderer is busy");
-        if (sdr_p2_ack && p2_owner_obj && bg_rom_ack)
-            $fatal(1, "background renderer consumed an object-owned p2 ack");
-        if (sdr_p2_ack && !p2_owner_obj && obj_rom_ack)
-            $fatal(1, "object renderer consumed a background-owned p2 ack");
+        if (p2_busy_r && !sdr_p2_ack && (sdr_p2_addr !== p2_addr_r))
+            $fatal(1, "p2 address moved while a transaction was outstanding: issued=%h now=%h owner_obj=%0d",
+                   p2_addr_r, sdr_p2_addr, p2_owner_obj_r);
     end
 end
 `endif
@@ -979,10 +1045,14 @@ always_ff @(posedge clk_sys) begin
             ext_read_data <= sdr_p0_dout;
             ext_done      <= 1'b1;
         end
+        // Posted write completes in SDRAM: release the request/busy so the
+        // next extmem access can start. The CPU was already acked at accept
+        // time (ext_done pulse in the accept branch below), so no ext_done
+        // here -- a stray pulse now could falsely complete an unrelated
+        // in-progress extmem access.
         if (sdr_wr_ack) begin
             sdr_wr_req <= 1'b0;
             ext_busy   <= 1'b0;
-            ext_done   <= 1'b1;
         end
 
         // Do not start a new SDRAM beat while ack_r is still posted. With a
@@ -999,6 +1069,16 @@ always_ff @(posedge clk_sys) begin
                 sdr_wr_be    <= m_be;
                 ext_is_write <= 1'b1;
                 ext_busy     <= 1'b1;
+                // Posted write: ack the CPU now instead of after the SDRAM
+                // round trip. sdram.sv latches wr_addr/din/be on the wr_req
+                // rising edge and these sdr_wr_* registers hold until then,
+                // so the beat is safely in flight. ext_busy stays set until
+                // sdr_wr_ack, which stalls ANY subsequent extmem access
+                // (read or write) behind the in-flight write -- conservative
+                // full ordering, no address-match forwarding. On the PCB this
+                // RAM was uniform-speed SRAM, so the earlier ack is closer to
+                // real timing, and completed-transaction ORDER is unchanged.
+                ext_done     <= 1'b1;
             end
             else begin
                 ext_p0_req_r  <= 1'b1;
@@ -1220,7 +1300,7 @@ assign m_ack   = ack_r;
 // video cadence and video_enable are unrelated to this physical timer.
 // How it is kicked -- and whether the board has one at all -- is descriptor
 // data, and getting this wrong is not subtle:
-//   mode 1  read-kick   dynagear, survarts, twineag2, ultrax  (reset16_r)
+//   mode 1  read-kick   dynagear, twineag2, ultrax            (reset16_r)
 //   mode 2  write-kick  vasara, vasara2                       (reset16_w)
 //   mode 0  no device   drifto94, stmblade
 // MAME's WATCHDOG_TIMER first appears at ssv.cpp:2513, after the drifto94 and
@@ -1332,7 +1412,19 @@ always_ff @(posedge clk_sys) begin
             end
         end
         else if (sel_extmem) begin
-            if (ext_done) begin
+            // Fast path: capture read data straight off the p0 ack edge,
+            // one clk_sys earlier than waiting for the registered ext_done
+            // pulse. ext_p0_req_r is only ever set for the extmem access the
+            // CPU is currently holding (m_req stays up until ack), so this
+            // tap cannot see someone else's data. The ext_done branch still
+            // covers posted writes (acked at accept) and remains a safe
+            // fallback; when the fast path fires, the following ext_done
+            // pulse lands while ack_r is already high and is ignored.
+            if (ext_p0_req_r && sdr_p0_ack_rise) begin
+                read_mux <= sdr_p0_dout;
+                ack_r    <= 1'b1;
+            end
+            else if (ext_done) begin
                 read_mux <= ext_is_write ? 16'hffff : ext_read_data;
                 ack_r    <= 1'b1;
             end
@@ -1509,9 +1601,17 @@ always_ff @(posedge clk_sys) begin
     // deadline so it can inspect ES5506 host writes/sample traffic; that
     // diagnostic does not relax any audio assertion and is never a release
     // verdict.
+    // The sticky flag has two independent producers -- a missed per-line
+    // renderer deadline and a sprite/tilemap descriptor cache overflow -- and
+    // they call for different investigations. Name which one armed it instead
+    // of making every reader cross-reference separate CACHE_OVR telemetry.
     if (!rst && renderer_overrun &&
         !$test$plusargs("ALLOW_RENDERER_OVERRUN_DIAGNOSTIC"))
-        $fatal(1, "SSV_RENDERER_OWNERSHIP pc=%08x frame=%0d scanline=%0d hpos=%0d",
+        $fatal(1, "SSV_RENDERER_OWNERSHIP cause=%s pc=%08x frame=%0d scanline=%0d hpos=%0d",
+               (overrun_cause_deadline && overrun_cause_cache) ? "deadline+cache" :
+               overrun_cause_cache                             ? "cache_overflow" :
+               overrun_cause_deadline                          ? "line_deadline"  :
+                                                                 "unknown",
                debug_pc, debug_frame, vcnt, hcnt);
 end
 `endif

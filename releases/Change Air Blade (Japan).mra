@@ -26,7 +26,7 @@
     <part name="ac1806m0.u11" crc="816b97dc"/>
     <!-- samples -->
     <interleave output="16">
-      <part name="ac1410m0.u41" crc="ecf1f255" map="21"/>
+      <part name="ac1410m0.u41" crc="ecf1f255" map="12"/>
     </interleave>
   </rom>
   <nvram index="8" size="65536"/>

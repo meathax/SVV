@@ -195,10 +195,10 @@ package ssv_pkg;
     //
     //   ultrax                       0xC00000 -> 0x18000 = 3 * 2^15
     //   dynagear                    0x1000000 -> 0x20000 =     2^17
-    //   survartsu/twineag2/stmblade 0x1800000 -> 0x30000 = 3 * 2^16
+    //   twineag2/stmblade           0x1800000 -> 0x30000 = 3 * 2^16
     //   cairblad/drifto94/vasara*   0x2000000 -> 0x40000 =     2^18
     //
-    // Four of the nine supported entries use a non-power-of-two region, so the
+    // Four of the eight supported entries use a non-power-of-two region, so the
     // `wrap_code = code[16:0]` mask is wrong for them twice over: wrong width
     // and wrong wrap rule. Every case is either 2^k or 3*2^k, and for 3*2^k
     //     code % (3<<k) == ((code >> k) % 3) << k | code[k-1:0]
@@ -280,23 +280,6 @@ package ssv_pkg;
         cfg_dynagear.extra_ram_mode = 2'd1;
         cfg_dynagear.visible_width_half = 8'd168;
         cfg_dynagear.visible_height = 8'd240;
-    endfunction
-
-    // Survival Arts (survarts_map).  Its USA clone shares the one-megabyte
-    // program, watchdog, extra-RAM and ES5506 sample layout with Dyna Gear,
-    // but uses the 24 MiB graphics region and live six-button ADD_BUTTONS
-    // window documented by MAME's map and input declarations.
-    function automatic ssv_cfg_t cfg_survarts();
-        cfg_survarts = cfg_dynagear();
-        cfg_survarts.game_id          = 4'd8;
-        cfg_survarts.gfx_mb           = 6'd24;
-        cfg_survarts.gfx_code_k       = 5'd16;
-        cfg_survarts.gfx_code_mul3    = 1'b1;
-        cfg_survarts.gfx_code_mask    = 20'h0ffff;
-        cfg_survarts.gfx_quarters     = 3'd3;
-        cfg_survarts.bank_map         = 8'h00;
-        cfg_survarts.bank_valid       = 4'b0100;
-        cfg_survarts.extra_input_mode = 2'd2;
     endfunction
 
     // The three requested shooter sets. These records mirror the generated
@@ -409,13 +392,12 @@ package ssv_pkg;
             4'd5:    cfg_for_game = cfg_stmblade();
             4'd6:    cfg_for_game = cfg_twineag2();
             4'd7:    cfg_for_game = cfg_ultrax();
-            4'd8:    cfg_for_game = cfg_survarts();
             default: cfg_for_game = cfg_dynagear();
         endcase
     endfunction
 
     // MAME only decodes the extra-button window for maps that explicitly
-    // expose $500008-$500009 (survarts_map). Keep the address predicate beside
+    // expose $500008-$500009. Keep the address predicate beside
     // the descriptor type so the universal core cannot accidentally turn the
     // window into a global alias when another set is selected.
     function automatic logic extra_input_window_cfg(

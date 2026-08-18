@@ -38,16 +38,54 @@ module s32_v60 #(
     // prefetch pay off on the production (gated-ce) build; the unit testbenches
     // run ce=1 (adapter already fast) and leave it 0 so if_* can stay unconnected.
     parameter        FAST_IFETCH = 1'b0,
+    // SEQ_DISPATCH=1: overlap the sequential fetch-window handoff with the
+    // completing instruction.  This is the donor V60's measured Stage A:
+    // successor length is predecoded without reading registers or touching the
+    // bus, then S_NEXT can shift and dispatch directly when the bytes are ready.
+    // Keep a compile-time A/B switch so the old serialized handoff remains a
+    // reproducible baseline for differential timing evidence.
+`ifdef V60_NO_SEQ_DISPATCH
+    parameter        SEQ_DISPATCH = 1'b0,
+`else
+    parameter        SEQ_DISPATCH = 1'b1,
+`endif
     // EXEC_RETIRE=1: allowlisted register-only operations retire the sequential
     // fetch window on the execute edge. Memory destinations, control transfers,
     // iterative operations, and all external bus transactions retain their
     // existing sequencing. This is the proven S32 V60 overlap contract,
     // adapted to SVV's existing fetch-window implementation.
 `ifdef V60_NO_EXEC_RETIRE
-    parameter        EXEC_RETIRE = 1'b0
+    parameter        EXEC_RETIRE = 1'b0,
 `else
-    parameter        EXEC_RETIRE = 1'b1
+    parameter        EXEC_RETIRE = 1'b1,
 `endif
+    // Microcode cost of accepting an interrupt, in V60 clocks, charged before
+    // any of the entry sequence's bus activity begins.
+    //
+    // NEC's own Table 5 (Komoto/Saito/Mine, "Overview of 32-bit V-Series
+    // Microprocessor", IPSJ Vol. 13 No. 2, Aug 1990, on file at
+    // docs/hardware/refs/) publishes "INT response, until handler executes =
+    // 165 clocks".  docs/hardware/V60_TIMING_EVIDENCE.md establishes that this
+    // is an EXU/microcode step count and therefore transfers directly from the
+    // V70 column to the V60.  Without this charge the FSM reaches the handler
+    // in 71 clocks (measured by verif/v60/tb_v60_irq_latency.sv against a
+    // zero-wait memory), so every interrupt entry ran ahead of the real part.
+    //
+    // The value is calibrated against that bench rather than being the bare
+    // 165-71 difference: the prefetch unit keeps running through the charge,
+    // so some of the refill the entry sequence used to pay for afterwards is
+    // now already done, and the end-to-end response moves by less than the
+    // charge itself.  108 is the value at which the bench measures exactly 165.
+    //
+    // The published figure is an aggregate: how those clocks divide between
+    // microcode that precedes the stack frame pushes and microcode that
+    // follows them is not published.  The whole deficit is charged up front
+    // because a microprogrammed machine must determine the level, build the
+    // new PSW and switch to the interrupt stack before it can push anything --
+    // but that ordering is INFERRED, not measured, and a future PCB capture of
+    // the acknowledge sequence could redistribute it without changing the
+    // total.  Set to 0 to restore the old uncharged entry for A/B evidence.
+    parameter integer INT_RESPONSE_CLOCKS = 108
 )(
     input             clk,
     input             ce,            // 16.108 MHz (V60) / 20 MHz (V70) enable
@@ -204,9 +242,41 @@ reg [7:0]  fb_prev[0:23];   // previous sequential window for tight loops
 reg [31:0] fb_prev_base;
 reg [4:0]  fb_prev_valid;
 reg        fb_realigning;
+// Registered metadata for the sequential successor.  It contains no operand
+// values and is only used to prove that a complete successor is in fb[].
+reg        seq_pd_valid;
+reg [4:0]  seq_pd_start;
+reg [4:0]  seq_pd_need;
 localparam [4:0] FB_THRESH = 5'd20;   // max instruction length
 wire [7:0] opcode = fb[0];
 wire [31:0] fetch_frontier = fb_base + {27'b0, fb_wr};
+// At the reset vector (START_PC = 0xFFFFFFF0) the frontier wraps past the top
+// of the 32-bit address space once the window advances 16 bytes, and the
+// wrapped value of zero fails this ROM-base test. The request then falls to
+// the narrow data-bus path and reads work RAM address 0 -- a bus cycle the
+// real part never performs, and one that shows up as spurious events at the
+// head of every cpu_data trace.
+//
+// Blocking issuance on a wrapped frontier was tried and rejected (2026-08-18):
+// the same condition also carries the "never starves" correctness path, and
+// fb_need can genuinely be its generic 20-byte worst-case default here (the
+// opcode at the reset vector need not match any of the fast-decode cases
+// below), so blocking every wrapped request left S_FILL waiting forever for
+// four bytes that cannot exist past the top of the address space -- the CPU
+// never left the reset vector. See docs/debug/V60_RESET_PROLOGUE_READS_20260818.md.
+//
+// The correct fix caps what the window is allowed to ask for, not whether it
+// may ask: fb_bytes_to_wrap is how many bytes genuinely exist between fb_base
+// and the top of the address space. It is astronomically larger than the
+// 20-byte worst case for every real ROM/RAM address this design ever uses, so
+// this is a no-op outside the one instruction whose fetch window spans the
+// literal top of the address space -- which happens only right after reset.
+// Capping fb_need there matches reality: whatever instruction is encoded in
+// those last 16 bytes must decode using only the bytes that can physically
+// exist, exactly as a real V60 would have to.
+wire [32:0] fb_bytes_to_wrap_full = 33'h1_0000_0000 - {1'b0, fb_base};
+wire [4:0]  fb_bytes_to_wrap = (fb_bytes_to_wrap_full > 33'd31) ? 5'd31
+                                                                 : fb_bytes_to_wrap_full[4:0];
 wire        fetch_is_rom = fetch_frontier[23:0] >= rom_base;
 wire        use_fast_ifetch = FAST_IFETCH && fast_ifetch && fetch_is_rom;
 wire        fetch_ack = pf_fast ? if_ack_i : pf_ack;  // ack from the issued transport
@@ -239,6 +309,132 @@ always @* begin
         endcase
     end
 end
+// Capped to what the window can physically obtain; see fb_bytes_to_wrap above.
+// A no-op everywhere except the reset vector's fetch window.
+wire [4:0] fb_need_capped = (fb_need > fb_bytes_to_wrap) ? fb_bytes_to_wrap : fb_need;
+wire [4:0] pf_high_capped = (PF_HIGH > fb_bytes_to_wrap) ? fb_bytes_to_wrap : PF_HIGH;
+
+// ---------------------------------------------------------------------------
+// Stage A sequential successor predecode.  This intentionally mirrors only
+// lengths that can be established from bytes already in fb[].  Unknown or
+// variable-length forms retain the conservative 20-byte requirement and fall
+// through the existing S_FILL path.
+// ---------------------------------------------------------------------------
+function automatic [4:0] seq_need(input [7:0] op);
+    casez (op)
+        8'h00,
+        8'hc8, 8'hc9, 8'hca, 8'hcd: seq_need = 5'd1;
+        8'b0110_????:               seq_need = 5'd2;
+        8'b0111_????, 8'h48:        seq_need = 5'd3;
+        8'hc6, 8'hc7:               seq_need = 5'd4;
+        default:                    seq_need = FB_THRESH;
+    endcase
+endfunction
+
+function automatic [4:0] common_am_len_at(input [4:0] o, input modm);
+    logic [2:0] top;
+    logic [4:0] mr;
+    begin
+        top = fb[o][7:5];
+        mr  = fb[o][4:0];
+        common_am_len_at = 5'd0;
+        if (!modm) begin
+            case (top)
+                3'd0: common_am_len_at = 5'd2;
+                3'd1: common_am_len_at = 5'd3;
+                3'd2: common_am_len_at = 5'd5;
+                3'd3: common_am_len_at = 5'd1;
+                3'd4: common_am_len_at = 5'd2;
+                3'd5: common_am_len_at = 5'd3;
+                3'd6: common_am_len_at = 5'd5;
+                default: begin
+                    case (mr)
+                        5'h00,5'h01,5'h02,5'h03,5'h04,5'h05,5'h06,5'h07,
+                        5'h08,5'h09,5'h0a,5'h0b,5'h0c,5'h0d,5'h0e,5'h0f:
+                            common_am_len_at = 5'd1;
+                        5'h10,5'h18: common_am_len_at = 5'd2;
+                        5'h11,5'h19: common_am_len_at = 5'd3;
+                        5'h12,5'h1a: common_am_len_at = 5'd5;
+                        5'h13,5'h1b: common_am_len_at = 5'd5;
+                        5'h1c:       common_am_len_at = 5'd3;
+                        5'h1d:       common_am_len_at = 5'd5;
+                        5'h1e:       common_am_len_at = 5'd9;
+                        default:     common_am_len_at = 5'd0;
+                    endcase
+                end
+            endcase
+        end
+        else begin
+            case (top)
+                3'd0: common_am_len_at = 5'd3;
+                3'd1: common_am_len_at = 5'd5;
+                3'd2: common_am_len_at = 5'd9;
+                3'd3,3'd4,3'd5: common_am_len_at = 5'd1;
+                default:       common_am_len_at = 5'd0;
+            endcase
+        end
+    end
+endfunction
+
+function automatic is_f12_primary(input [7:0] op);
+    begin
+        case (op)
+            8'h01,8'h02,8'h08,8'h09,8'h0a,8'h0b,8'h0c,8'h0d,8'h12,8'h13,
+            8'h19,8'h1b,8'h1c,8'h1d,8'h20,8'h21,8'h22,8'h23,8'h24,8'h25,
+            8'h29,8'h2b,8'h2c,8'h2d,8'h38,8'h39,8'h3a,8'h3b,8'h3c,8'h3d,
+            8'h3f,8'h40,8'h41,8'h42,8'h43,8'h44,8'h45,8'h47,8'h49,8'h4a,
+            8'h4b,8'h4d,8'h4e,8'h4f,8'h50,8'h51,8'h52,8'h53,8'h54,8'h55,
+            8'h80,8'h81,8'h82,8'h83,8'h84,8'h85,8'h86,8'h87,8'h88,8'h89,
+            8'h8a,8'h8b,8'h8c,8'h8d,8'h90,8'h91,8'h92,8'h93,8'h94,8'h95,
+            8'h96,8'h97,8'h98,8'h99,8'h9a,8'h9b,8'h9c,8'h9d,8'ha0,8'ha1,
+            8'ha2,8'ha3,8'ha4,8'ha5,8'ha6,8'ha7,8'ha8,8'ha9,8'haa,8'hab,
+            8'hac,8'had,8'hb0,8'hb1,8'hb2,8'hb3,8'hb4,8'hb5,8'hb6,8'hb7,
+            8'hb8,8'hb9,8'hba,8'hbb,8'hbc,8'hbd: is_f12_primary = 1'b1;
+            default: is_f12_primary = 1'b0;
+        endcase
+    end
+endfunction
+
+function automatic is_short_primary(input [7:0] op);
+    begin
+        case (op)
+            8'hd0,8'hd1,8'hd2,8'hd3,8'hd4,8'hd5,8'hd6,8'hd7,
+            8'hd8,8'hd9,8'hda,8'hdb,8'hdc,8'hdd,8'hde,8'hdf,
+            8'he0,8'he1,8'he2,8'he3,8'he4,8'he5,8'he6,8'he7,
+            8'he8,8'he9,8'hea,8'heb,8'hec,8'hed,8'hee,8'hef,
+            8'hf0,8'hf1,8'hf2,8'hf3,8'hf4,8'hf5,8'hf6,8'hf7,
+            8'hf8,8'hf9,8'hfa,8'hfb,8'hfc,8'hfd,8'hfe,8'hff:
+                is_short_primary = 1'b1;
+            default: is_short_primary = 1'b0;
+        endcase
+    end
+endfunction
+
+function automatic [4:0] exact_need_at(input [4:0] o);
+    logic [4:0] alen;
+    begin
+        exact_need_at = FB_THRESH;
+        if (fb_valid > o) begin
+            casez (fb[o])
+                8'h00,8'h10,8'hc8,8'hc9,8'hca,8'hcb,8'hcd:
+                    exact_need_at = 5'd1;
+                8'b0110_????: exact_need_at = 5'd2;
+                8'b0111_????,8'h48: exact_need_at = 5'd3;
+                8'hc6,8'hc7: exact_need_at = 5'd4;
+                default: begin
+                    if (is_f12_primary(fb[o]) && fb_valid >= o + 5'd3 && !fb[o+1][7]) begin
+                        alen = common_am_len_at(o + 5'd2, fb[o+1][6]);
+                        if (alen != 0) exact_need_at = 5'd2 + alen;
+                    end
+                    else if (is_short_primary(fb[o]) && fb_valid >= o + 5'd2) begin
+                        alen = common_am_len_at(o + 5'd1, fb[o][0]);
+                        if (alen != 0) exact_need_at = 5'd1 + alen;
+                    end
+                end
+            endcase
+        end
+    end
+endfunction
 
 function automatic [31:0] fb32(input [4:0] o);
     fb32 = {fb[o+3], fb[o+2], fb[o+1], fb[o]};
@@ -379,6 +575,7 @@ typedef enum logic [6:0] {
     S_BS_SCH1, S_BS_SCHRD, S_BS_SCHB, S_BS_SCHW,
     S_BS_MOV1, S_BS_MOV2, S_BS_MOVS, S_BS_MOVD, S_BS_MOVB, S_BS_MOVF,
     S_FP_OP2, S_FP_LD, S_FP_EXEC, S_FP_DIV, S_FP_WB,
+    S_EXC_INTWAIT,
     S_EXC_PUSH1, S_EXC_EXTRA, S_EXC_CODE, S_EXC_PUSH2, S_EXC_VEC, S_EXC_JMP,
     S_TASK_LD_NEXT, S_TASK_LD_ACK, S_TASK_ST_NEXT, S_TASK_ST_ACK,
     S_TASI1, S_TASI2,
@@ -462,6 +659,24 @@ wire [4:0] exec_retire_valid_after = fb_valid - exec_retire_len;
 wire       exec_retire_dispatch_now = exec_retire_shift_ok &&
                                       (exec_retire_len <= 5'd4) &&
                                       (exec_retire_valid_after >= FB_THRESH);
+
+// Stage A sequential window handoff.  The shift remains capped at four bytes
+// for the same timing-closure reason as S_FILL's realign path; longer
+// instructions fall through to the existing second S_FILL step.
+wire [4:0] next_shift_s = (total_len >= 5'd4) ? 5'd4 : total_len;
+wire       next_shift_ok = (fb_base == pc) && (total_len != 5'd0)
+                          && (total_len < fb_valid);
+wire       seq_shift_ok = SEQ_DISPATCH && next_shift_ok;
+wire [4:0] seq_valid_after = fb_valid - total_len;
+wire [4:0] seq_required = (seq_pd_valid && seq_pd_start == total_len)
+                          ? seq_pd_need : seq_need(fb[total_len[2:0]]);
+wire       seq_dispatch_now = seq_shift_ok && (total_len <= 5'd4)
+                            && (seq_valid_after >= seq_required);
+// A prefetch response landing on any window-shift edge must be discarded; its
+// append indexes the pre-shift frontier and would race the shift's fb[] writes.
+wire       win_shift_now = (st == S_FILL && fb_base != pc)
+                         || (st == S_NEXT && next_shift_ok)
+                         || exec_retire_shift_ok;
 
 // Consolidate every dynamic general-register read onto two explicit ports.
 // The architectural register array remains flip-flop based with its existing
@@ -608,6 +823,46 @@ task automatic write_psw(input [31:0] v);
     f_cy <= v[3];
 endtask
 
+// Retire an already-resolved EA directly from its producer state.  This is
+// the exact architectural work of the S_EA_DONE handoff, expressed with
+// explicit current-cycle values so no stale ea_out/ea_addr NBA value can be
+// observed.  Deferred/indirect modes that issued a bus read keep the
+// fallback S_EA_DONE state.
+task automatic complete_ea_now(
+    input [31:0] value,
+    input        value_is_reg,
+    input        value_is_immediate,
+    input [4:0]  encoded_len
+);
+    begin
+        if (!ea_target2) begin
+            op1   <= value;
+            flag1 <= value_is_reg;
+            len1  <= encoded_len;
+        end
+        else begin
+            op2   <= value;
+            flag2 <= value_is_reg;
+            len2  <= encoded_len;
+            if (value_is_immediate) begin
+                op2val   <= value;
+                op2val_v <= 1'b1;
+            end
+        end
+        // continuation: ea_ret==1 -> decode operand 2 (F1)
+        if (ea_ret == 3'd1) begin
+            ea_ret       <= 3'd0;
+            ea_modm      <= instflags[5];
+            ea_ofs       <= 5'd2 + encoded_len;
+            ea_target2   <= 1'b1;
+            ea_want_addr <= 1'b1;   // op2 default = address (write target)
+            ea_dim       <= f12_dim2(cur_op);
+            st           <= S_EA_MODE;
+        end
+        else st <= st_after_ea;
+    end
+endtask
+
 // ---------------------------------------------------------------------------
 // EA engine (combinational mode/extension parse; sequential memory derefs)
 //   Implements s_AMTable1/2/3 dispatch:
@@ -739,6 +994,10 @@ endfunction
 
 reg [3:0] fill_lo;
 reg nmi_r, nmi_seen;
+// Remaining microcode clocks of the interrupt-acceptance charge above.
+// Eight bits bound INT_RESPONSE_CLOCKS to 255; the published figure it is
+// calibrated against is well inside that.
+reg [7:0] int_wait;
 
 always @(posedge clk) begin
 if (rst) begin
@@ -746,6 +1005,7 @@ if (rst) begin
     dbus_req <= 0; dbus_we <= 0; irq_ack <= 0;
     dbus_addr <= 0; dbus_size <= 0; dbus_wdata <= 0;
     halted <= 0;
+    int_wait <= 8'd0;
 `ifdef SIMULATION
     dbg_pc <= START_PC;
 `endif
@@ -761,6 +1021,9 @@ if (rst) begin
     pf_iss_epoch <= 0;
     pf_fast <= 0;
     pf_suppress <= 0;
+    seq_pd_valid <= 1'b0;
+    seq_pd_start <= 5'd0;
+    seq_pd_need  <= FB_THRESH;
 end
 else if (ce) begin
     // bus ownership: grant per-transaction, data priority, hold until ack.  A
@@ -870,8 +1133,12 @@ else if (ce) begin
         else begin
             // window aligned (fb_base==pc): dispatch once the PFU has fetched
             // enough bytes, else wait here while the prefetch fills the window.
+            // fb_need_capped, not fb_need: at the reset vector no more than
+            // fb_bytes_to_wrap bytes can ever exist in this window, so this
+            // must release once everything obtainable has arrived, not stall
+            // waiting for a raw 20-byte worst case that can never be reached.
             fb_realigning <= 0;
-            if (fb_valid >= fb_need)
+            if (fb_valid >= fb_need_capped)
                 st <= st_after_fill;
         end
     end
@@ -889,6 +1156,7 @@ else if (ce) begin
 `ifdef SIMULATION
         dbg_pc <= pc;
 `endif
+        seq_pd_valid <= 1'b0;
         cur_op <= opcode;
         total_len <= 5'd2;      // default for F12 base
         // exception-frame defaults (A8): 2-word frame returning to current PC;
@@ -901,6 +1169,11 @@ else if (ce) begin
         rmw_kind     <= 3'd7;   // sentinel: not an RMW writeback
         op2val_v     <= 1'b0;
         // interrupts sampled at instruction boundary
+        // Asynchronous entries pay the published microcode response cost
+        // (INT_RESPONSE_CLOCKS) before the entry sequence's first bus cycle.
+        // Synchronous trap-class exceptions elsewhere in this file keep going
+        // straight to S_EXC_PUSH1: Table 5 gives them a different figure (trap
+        // = 195) and none of them is measured here.
         if (nmi_seen) begin
             nmi_seen <= 0;
             exc_vector <= 8'd2;
@@ -908,7 +1181,8 @@ else if (ce) begin
             exc_retpc <= pc;
             exc_has_code <= 1'b0;      // NMI: 2-word frame (v60_do_irq)
             exc_is_interrupt <= 1'b1;
-            st <= S_EXC_PUSH1;
+            int_wait <= INT_RESPONSE_CLOCKS[7:0];
+            st <= (INT_RESPONSE_CLOCKS == 0) ? S_EXC_PUSH1 : S_EXC_INTWAIT;
         end
         else if (!irq_n && psw_ie) begin
             irq_ack <= 1'b1;
@@ -917,7 +1191,8 @@ else if (ce) begin
             exc_retpc <= pc;
             exc_has_code <= 1'b0;      // IRQ: 2-word frame
             exc_is_interrupt <= 1'b1;
-            st <= S_EXC_PUSH1;
+            int_wait <= INT_RESPONSE_CLOCKS[7:0];
+            st <= (INT_RESPONSE_CLOCKS == 0) ? S_EXC_PUSH1 : S_EXC_INTWAIT;
         end
         else if (halted) st <= S_HALT;
         else begin
@@ -1409,14 +1684,29 @@ else if (ce) begin
                 d1t = disp_of(ea_ofs+1, modtop[1:0]);
                 ea_addr <= rf_rdata_a + d1t;
                 ea_len  <= 5'd1 + disp_len(modtop[1:0]);
-                if (ea_want_addr) st <= S_EA_DONE;
-                else              st <= S_EA_VAL;
+                if (ea_want_addr)
+                    complete_ea_now(rf_rdata_a + d1t, 1'b0, 1'b0,
+                                    5'd1 + disp_len(modtop[1:0]));
+                else begin
+                    dbus_req  <= 1'b1;
+                    dbus_we   <= 1'b0;
+                    dbus_size <= ea_dim;
+                    dbus_addr <= rf_rdata_a + d1t;
+                    st        <= S_EA_VAL;
+                end
             end
             3'd3: begin             // Register Indirect
                 ea_addr <= rf_rdata_a;
                 ea_len  <= 5'd1;
-                if (ea_want_addr) st <= S_EA_DONE;
-                else              st <= S_EA_VAL;
+                if (ea_want_addr)
+                    complete_ea_now(rf_rdata_a, 1'b0, 1'b0, 5'd1);
+                else begin
+                    dbus_req  <= 1'b1;
+                    dbus_we   <= 1'b0;
+                    dbus_size <= ea_dim;
+                    dbus_addr <= rf_rdata_a;
+                    st        <= S_EA_VAL;
+                end
             end
             3'd4, 3'd5, 3'd6: begin // Displacement Indirect (deferred)
                 d1t = disp_of(ea_ofs+1, modtop - 3'd4);
@@ -1432,21 +1722,36 @@ else if (ce) begin
                     ea_len <= 5'd1;
                     ea_flag <= 1'b0;
                     ea_isval <= 1'b1;
-                    st <= S_EA_DONE;  // value already
+                    complete_ea_now({28'b0, modreg[3:0]}, 1'b0, 1'b1, 5'd1);
                 end
                 5'h10, 5'h11, 5'h12: begin // PC displacement
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
                     ea_addr <= pc + d1t;
                     ea_len  <= 5'd1 + disp_len(modreg[1:0]);
-                    if (ea_want_addr) st <= S_EA_DONE;
-                    else              st <= S_EA_VAL;
+                    if (ea_want_addr)
+                        complete_ea_now(pc + d1t, 1'b0, 1'b0,
+                                        5'd1 + disp_len(modreg[1:0]));
+                    else begin
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= ea_dim;
+                        dbus_addr <= pc + d1t;
+                        st        <= S_EA_VAL;
+                    end
                 end
                 5'h13: begin        // direct address
                     d1t = fb32(ea_ofs+1);
                     ea_addr <= d1t;
                     ea_len  <= 5'd5;
-                    if (ea_want_addr) st <= S_EA_DONE;
-                    else              st <= S_EA_VAL;
+                    if (ea_want_addr)
+                        complete_ea_now(d1t, 1'b0, 1'b0, 5'd5);
+                    else begin
+                        dbus_req  <= 1'b1;
+                        dbus_we   <= 1'b0;
+                        dbus_size <= ea_dim;
+                        dbus_addr <= d1t;
+                        st        <= S_EA_VAL;
+                    end
                 end
                 5'h14: begin        // immediate full
                     d1t = fb32(ea_ofs+1);
@@ -1458,7 +1763,11 @@ else if (ce) begin
                     endcase
                     ea_len <= 5'd1 + imm_len(ea_dim);
                     ea_isval <= 1'b1;
-                    st <= S_EA_DONE;
+                    case (ea_dim)
+                        2'd0: complete_ea_now({24'b0, fb[ea_ofs+1]}, 1'b0, 1'b1, 5'd2);
+                        2'd1: complete_ea_now(d2t, 1'b0, 1'b1, 5'd3);
+                        default: complete_ea_now(d1t, 1'b0, 1'b1, 5'd5);
+                    endcase
                 end
                 5'h18, 5'h19, 5'h1a: begin // PC displacement indirect
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
@@ -1505,24 +1814,37 @@ else if (ce) begin
                 if (ea_want_addr) begin
                     ea_out  <= {27'b0, modreg};
                     ea_flag <= 1'b1;
+                    complete_ea_now({27'b0, modreg}, 1'b1, 1'b0, 5'd1);
                 end
-                else ea_out <= dimext(rf_rdata_a, ea_dim);
+                else begin
+                    ea_out <= dimext(rf_rdata_a, ea_dim);
+                    complete_ea_now(dimext(rf_rdata_a, ea_dim), 1'b0, 1'b0, 5'd1);
+                end
                 ea_len <= 5'd1;
-                st <= S_EA_DONE;
             end
             3'd4: begin             // Autoincrement
                 ea_addr <= rf_rdata_a;
                 queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                if (ea_want_addr) st <= S_EA_DONE;
-                else              st <= S_EA_VAL;
+                if (ea_want_addr)
+                    complete_ea_now(rf_rdata_a, 1'b0, 1'b0, 5'd1);
+                else begin
+                    dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                    dbus_addr <= rf_rdata_a;
+                    st <= S_EA_VAL;
+                end
             end
             3'd5: begin             // Autodecrement
                 ea_addr <= rf_rdata_a - dim_step(ea_dim);
                 queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                if (ea_want_addr) st <= S_EA_DONE;
-                else              st <= S_EA_VAL;
+                if (ea_want_addr)
+                    complete_ea_now(rf_rdata_a - dim_step(ea_dim), 1'b0, 1'b0, 5'd1);
+                else begin
+                    dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                    dbus_addr <= rf_rdata_a - dim_step(ea_dim);
+                    st <= S_EA_VAL;
+                end
             end
             3'd6: begin             // Group 6: indexed, second mode byte
                 case (modval2[7:5])
@@ -1530,14 +1852,26 @@ else if (ce) begin
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
                     ea_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
-                    if (ea_want_addr) st <= S_EA_DONE;
-                    else              st <= S_EA_VAL;
+                    if (ea_want_addr)
+                        complete_ea_now(rf_rdata_b + d1t + (rf_rdata_a << ea_dim),
+                                        1'b0, 1'b0, 5'd2 + disp_len(modval2[6:5]));
+                    else begin
+                        dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                        dbus_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
+                        st <= S_EA_VAL;
+                    end
                 end
                 3'd3: begin            // Register indirect indexed
                     ea_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2;
-                    if (ea_want_addr) st <= S_EA_DONE;
-                    else              st <= S_EA_VAL;
+                    if (ea_want_addr)
+                        complete_ea_now(rf_rdata_b + (rf_rdata_a << ea_dim),
+                                        1'b0, 1'b0, 5'd2);
+                    else begin
+                        dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                        dbus_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
+                        st <= S_EA_VAL;
+                    end
                 end
                 3'd4, 3'd5, 3'd6: begin // Displacement indirect indexed
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
@@ -1556,15 +1890,27 @@ else if (ce) begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
                         ea_addr <= pc + d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
-                        if (ea_want_addr) st <= S_EA_DONE;
-                        else              st <= S_EA_VAL;
+                        if (ea_want_addr)
+                            complete_ea_now(pc + d1t + (rf_rdata_a << ea_dim),
+                                            1'b0, 1'b0, 5'd2 + disp_len(modval2[1:0]));
+                        else begin
+                            dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                            dbus_addr <= pc + d1t + (rf_rdata_a << ea_dim);
+                            st <= S_EA_VAL;
+                        end
                     end
                     4'h3: begin
                         d1t = fb32(ea_ofs+2);
                         ea_addr <= d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd6;
-                        if (ea_want_addr) st <= S_EA_DONE;
-                        else              st <= S_EA_VAL;
+                        if (ea_want_addr)
+                            complete_ea_now(d1t + (rf_rdata_a << ea_dim),
+                                            1'b0, 1'b0, 5'd6);
+                        else begin
+                            dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
+                            dbus_addr <= d1t + (rf_rdata_a << ea_dim);
+                            st <= S_EA_VAL;
+                        end
                     end
                     4'h8, 4'h9, 4'ha: begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
@@ -1620,7 +1966,11 @@ else if (ce) begin
         else if (dack) begin
             dbus_req <= 0;
             ea_out <= dimext(bus_rdata, ea_dim);
-            st <= S_EA_DONE;
+            // A completed value read already has the final operand, flag and
+            // length. Retire the EA here instead of paying an otherwise
+            // copy-only S_EA_DONE cycle. (S_EA_VAL is only entered with
+            // !ea_want_addr, so the S_EA_DONE hand-back would be ea_out.)
+            complete_ea_now(dimext(bus_rdata, ea_dim), 1'b0, 1'b0, ea_len);
         end
     end
     S_EA_DONE: begin
@@ -1662,6 +2012,11 @@ else if (ce) begin
     // ------------------------------------------------------------------
     // EXEC: per-opcode semantics on op1/op2
     S_EXEC: begin
+        if (cls == C_F12) begin
+            seq_pd_start <= 5'd2 + len1 + len2;
+            seq_pd_need  <= exact_need_at(5'd2 + len1 + len2);
+            seq_pd_valid <= 1'b1;
+        end
         if (cls == C_F12 && !flag2 && !op2val_v && f12_reads_dest(cur_op)) begin
             st <= S_OP2_LD;   // V60-1: load memory destination before exec
         end
@@ -1986,20 +2341,14 @@ else if (ce) begin
 
     // advance PC and refill
     S_NEXT: begin
-        // Fuse the first (at most four-byte) sequential window realignment
-        // into the otherwise-idle retirement state.  S_FILL previously spent
-        // a full extra V60 enable doing this exact 5:1 shift after every normal
-        // instruction.  Twin Eagle II's RAM-test boot averaged 10.9 enables per
-        // instruction and missed its physical three-second watchdog even though
-        // execution was correct.  The shift width remains capped at four—the
-        // established timing-closure guard—while longer instructions finish in
-        // S_FILL exactly as before.
+        // The first window realignment is performed here for every sequential
+        // retirement. With SEQ_DISPATCH, a successor whose conservative length
+        // is already resident enters S_DECODE directly; otherwise this falls
+        // through to the unchanged S_FILL completion path.
+        logic [4:0] remaining, next_need;
+        logic [7:0] next_opcode;
         st <= S_FILL;
-        if (fb_base == pc && total_len < fb_valid) begin
-            logic [2:0] s;
-            logic [4:0] remaining, next_need;
-            logic [7:0] next_opcode;
-            s = (total_len >= 5'd4) ? 3'd4 : total_len[2:0];
+        if (next_shift_ok) begin
             remaining = fb_valid - total_len;
             next_opcode = fb[total_len];
             next_need = FB_THRESH;
@@ -2024,16 +2373,13 @@ else if (ce) begin
                 fb_prev_valid <= fb_valid;
             end
             for (int i = 0; i < 24; i++)
-                if (i + s < 24) fb[i] <= fb[i + s];
-            fb_base  <= fb_base + {29'b0, s};
-            fb_valid <= fb_valid - {2'b0, s};
-            fb_wr    <= fb_wr - {2'b0, s};
+                if (i + next_shift_s < 24) fb[i] <= fb[i + next_shift_s];
+            fb_base  <= fb_base + {27'b0, next_shift_s};
+            fb_valid <= fb_valid - next_shift_s;
+            fb_wr    <= fb_wr - next_shift_s;
             fb_realigning <= (total_len > 5'd4);
-            // With the next instruction already complete in the shifted
-            // window, enter decode directly.  This removes the former
-            // aligned S_FILL dispatch bubble; conservative variable-EA
-            // instructions still require the full 20-byte frontier.
-            if (total_len <= 5'd4 && remaining >= next_need)
+            if ((SEQ_DISPATCH && seq_dispatch_now) ||
+                (!SEQ_DISPATCH && total_len <= 5'd4 && remaining >= next_need))
                 st <= S_DECODE;
         end
         pc <= pc + total_len;
@@ -3172,6 +3518,15 @@ else if (ce) begin
     // ------------------------------------------------------------------
     // exception / interrupt entry (MAME v60_do_irq):
     //   switch to interrupt context, push old PSW, push PC, PC = vector
+    // Microcode response time for an accepted interrupt.  The vector, the
+    // pushed PSW and the return PC are already latched; the prefetch unit is
+    // deliberately left running, because on the real part the fetch queue is
+    // filled from idle bus periods and interrupt microcode does not stall it.
+    S_EXC_INTWAIT: begin
+        if (int_wait <= 8'd1) st <= S_EXC_PUSH1;
+        else                  int_wait <= int_wait - 8'd1;
+    end
+
     S_EXC_PUSH1: begin
         // Synchronous exceptions preserve IS; IRQ/NMI force the interrupt
         // stack. CHLVL supplies a nonzero target execution level.
@@ -3295,13 +3650,25 @@ else if (ce) begin
     // in those cases the bytes are discarded and the frontier is simply refetched.
     if (!pf_busy) begin
         // Issue while the window is aligned and either the current instruction
-        // still lacks bytes (fb_wr < fb_need -- correctness, never starves) or we
-        // want lookahead up to PF_HIGH.  Lookahead is skipped inside an
-        // fb_prev-cached loop (pf_suppress): the loop cache already serves those
-        // bytes with zero bus traffic, so prefetching them just thrashes SDRAM.
-        // fb_wr<=20 keeps the append within the 24-byte window.
-        if (fb_base == pc && !fb_realigning && fb_wr <= 5'd20
-            && (fb_wr < fb_need || (fb_wr < PF_HIGH && !pf_suppress))) begin
+        // still lacks bytes (fb_wr < fb_need_capped -- correctness, never
+        // starves within what can physically exist) or we want lookahead up to
+        // pf_high_capped.  Lookahead is skipped inside an fb_prev-cached loop
+        // (pf_suppress): the loop cache already serves those bytes with zero
+        // bus traffic, so prefetching them just thrashes SDRAM.  fb_wr<=20
+        // keeps the append within the 24-byte window.
+        // S_RESET is excluded because the reset PC has not been applied yet on
+        // the edge that state runs: fb_base and pc are both still zero, so the
+        // frontier is zero and the window looks legitimately fillable. The part
+        // does not prefetch before it has a reset vector, and issuing here put
+        // a read at address 0 on the bus. That was invisible while the
+        // transport was a compile-time constant, because the request went out
+        // on the wide ROM port; once the transport is qualified per request
+        // against the descriptor's ROM base, a frontier of zero fails that test
+        // and the read appears on the CPU data bus as a work-RAM access.
+        // The capped thresholds handle the separate reset-vector wrap case:
+        // see fb_bytes_to_wrap above.
+        if (st != S_RESET && fb_base == pc && !fb_realigning && fb_wr <= 5'd20
+            && (fb_wr < fb_need_capped || (fb_wr < pf_high_capped && !pf_suppress))) begin
             pf_addr      <= fetch_frontier;
             pf_iss_epoch <= pf_epoch;
             pf_busy      <= 1'b1;
@@ -3316,9 +3683,7 @@ else if (ce) begin
         pf_busy <= 1'b0;
         if (pf_iss_epoch == pf_epoch
             && pf_addr == fb_base + {27'b0, fb_wr}
-            && !(st == S_FILL && fb_base != pc)
-            && st != S_NEXT
-            && !exec_retire_shift_ok
+            && !win_shift_now
             && !pf_decode_redirect
             && !rsr_rebase_now) begin
             if (pf_fast) begin
@@ -3377,6 +3742,12 @@ else if (ce) begin
 `ifdef SIMULATION
     if (exec_retire_candidate && dbus_req)
         $fatal(1, "V60 execute-retire: data transaction outstanding in S_EXEC (pc=%08x)", pc);
+    if (st == S_NEXT && seq_shift_ok && dbus_req && dbus_we) begin
+        $display("V60 seq-dispatch hazard pc=%08x op=%02x st=%0d total=%0d fb_base=%08x fb_valid=%0d dbus_addr=%08x owner=%0d dack=%0d",
+                 pc, cur_op, st, total_len, fb_base, fb_valid, dbus_addr,
+                 bus_owner, dack);
+        $fatal(1, "V60 seq-dispatch: data write outstanding in S_NEXT (pc=%08x)", pc);
+    end
 `endif
 
     // Port 1 is applied second so the final queued write retains the original
