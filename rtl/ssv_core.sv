@@ -601,7 +601,13 @@ assign renderer_busy = bg_busy | obj_busy;
 assign renderer_done = obj_done;
 
 ssv_line_buffer4 line_buffer (
-    .clk(clk_sys), .rst(rst), .line_start(line_buffer_start),
+    .clk(clk_sys), .rst(rst),
+    // Same edge that re-arms the descriptor cache build (cache_start below):
+    // once per frame, during vblank, strictly before this frame's first
+    // active-line line_start. See ssv_line_buffer4's frame_sync handling for
+    // why the line buffer needs its own once-per-frame resync as well.
+    .frame_sync(video_enable && vblank_pulse),
+    .line_start(line_buffer_start),
     .line_ready(!renderer_busy),
     .render_start(renderer_line_start),
     .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),

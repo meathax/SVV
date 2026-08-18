@@ -112,7 +112,7 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # Both failing corners show TNS == Slack, i.e. exactly ONE failing endpoint per
 # corner, and both are inside sys/ascal. Next step is a fresh sweep on the
 # current netlist.
-set_global_assignment -name SEED 4
+set_global_assignment -name SEED 1
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

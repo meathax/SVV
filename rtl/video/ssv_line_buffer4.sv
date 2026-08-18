@@ -5,6 +5,9 @@
 module ssv_line_buffer4 (
     input  logic        clk,
     input  logic        rst,
+    // Pulses once per frame, during vblank and before the first active-line
+    // line_start. See the frame_sync handling below for why this exists.
+    input  logic        frame_sync,
     input  logic        line_start,
     input  logic        line_ready,
     input  logic        render_start,
@@ -172,6 +175,31 @@ always_ff @(posedge clk) begin
             bank_pen_q[bank_ff_i] <= 8'd0;
             bypass_value_q[bank_ff_i] <= 15'd0;
         end
+    end
+    else if (frame_sync) begin
+        // front_select only toggles on a completed swap (the branch below),
+        // never on a missed-deadline freeze or its drain -- both hold the
+        // producer bank steady on purpose, so it can be reclaimed without
+        // publishing a half-written line. That is correct for the frame the
+        // overrun happened in, but it means a stall lasting an EVEN number
+        // of lines leaves an ODD number of un-toggled line_starts behind it:
+        // front_select keeps its pre-stall value while raster position has
+        // moved on, so the scanline-to-buffer mapping is inverted from that
+        // point on. Nothing else in this module ever corrects it -- there is
+        // no periodic resync -- so it stays inverted for the rest of the
+        // session, one raster line out of true, and a second even-length
+        // stall inverts it back by accident rather than by design.
+        //
+        // Force a known-good mapping once per frame instead, at the one
+        // point it costs nothing: during vblank, before any active-line
+        // line_start of the new frame has fired. Confirmed against a
+        // standalone parity model (tb_line_buffer_parity.sv): an odd total
+        // of held (non-toggling) line_starts across a stall inverts
+        // front_select's raster-line parity, and this resync bounds that
+        // inversion to at most the one frame it happened in.
+        front_select <= 1'b0;
+        render_valid <= 1'b0;
+        render_missed <= 1'b0;
     end
     else begin
         plot_pending <= bank_req;
