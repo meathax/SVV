@@ -216,6 +216,8 @@ logic [1023:0] cpu_gpr_flat;
 `endif
 s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
+    .fast_ifetch(1'b1),
+    .rom_base(-(24'(cfg.prog_mb) << 20)),
     .if_req(if_req), .if_addr(if_addr), .if_data(if_data), .if_ack(if_ack),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr),
     .bus_size(c_size), .bus_wdata(c_wdata),

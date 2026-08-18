@@ -53,6 +53,12 @@ module s32_v60 #(
     input             ce,            // 16.108 MHz (V60) / 20 MHz (V70) enable
     input             rst,
 
+    // Runtime transport select and active program-ROM base. FAST_IFETCH is
+    // only a compiled capability; the board can execute from a RAM window, so
+    // each prefetch must still choose the physical transport from its address.
+    input             fast_ifetch,
+    input      [23:0] rom_base,
+
     // dedicated instruction-fetch port (used only when FAST_IFETCH=1): request an
     // 8-byte line at if_addr; if_data/if_ack return it.  Left unconnected when
     // FAST_IFETCH=0 (the internal reads are forced to 0 so no X propagates).
@@ -173,6 +179,7 @@ wire pf_ack = bus_ack && (bus_owner == OWN_PF);
 reg        pf_busy;           // 0 = idle, 1 = awaiting pf_ack (pf_addr drives the bus)
 reg  [3:0] pf_epoch;          // bumped on every window rebase/flush
 reg  [3:0] pf_iss_epoch;      // epoch captured when the in-flight fetch issued
+reg        pf_fast;           // transport latched for the in-flight request
 reg        pf_suppress;       // 1 while in an fb_prev-cached loop: skip lookahead
 localparam [4:0] PF_HIGH = 5'd20;   // lookahead fill target (bytes ahead of PC)
 // dedicated fast-fetch port: line address of the in-flight prefetch; ack/data
@@ -180,7 +187,6 @@ localparam [4:0] PF_HIGH = 5'd20;   // lookahead fill target (bytes ahead of PC)
 assign      if_addr   = pf_addr[23:0];   // full byte address; s32_core aligns by [2:0]
 wire        if_ack_i  = FAST_IFETCH ? if_ack  : 1'b0;
 wire [63:0] if_data_i = FAST_IFETCH ? if_data : 64'b0;
-wire        fetch_ack = FAST_IFETCH ? if_ack_i : pf_ack;  // ack from the active port
 
 // ---------------------------------------------------------------------------
 // fetch buffer: 16 bytes from PC, filled before each decode
@@ -200,6 +206,10 @@ reg [4:0]  fb_prev_valid;
 reg        fb_realigning;
 localparam [4:0] FB_THRESH = 5'd20;   // max instruction length
 wire [7:0] opcode = fb[0];
+wire [31:0] fetch_frontier = fb_base + {27'b0, fb_wr};
+wire        fetch_is_rom = fetch_frontier[23:0] >= rom_base;
+wire        use_fast_ifetch = FAST_IFETCH && fast_ifetch && fetch_is_rom;
+wire        fetch_ack = pf_fast ? if_ack_i : pf_ack;  // ack from the issued transport
 
 // Conservative early-decode threshold.  Complex addressing modes keep the
 // 20-byte worst-case requirement; only fixed encodings used heavily in branch
@@ -749,6 +759,7 @@ if (rst) begin
     pf_busy <= 0;
     pf_epoch <= 0;
     pf_iss_epoch <= 0;
+    pf_fast <= 0;
     pf_suppress <= 0;
 end
 else if (ce) begin
@@ -3291,11 +3302,12 @@ else if (ce) begin
         // fb_wr<=20 keeps the append within the 24-byte window.
         if (fb_base == pc && !fb_realigning && fb_wr <= 5'd20
             && (fb_wr < fb_need || (fb_wr < PF_HIGH && !pf_suppress))) begin
-            pf_addr      <= fb_base + {27'b0, fb_wr};
+            pf_addr      <= fetch_frontier;
             pf_iss_epoch <= pf_epoch;
             pf_busy      <= 1'b1;
-            if (FAST_IFETCH) if_req <= 1'b1;   // wide 8-byte icache line via if_addr
-            else             pf_req <= 1'b1;    // 32-bit read via the shared adapter
+            pf_fast      <= use_fast_ifetch;
+            if (use_fast_ifetch) if_req <= 1'b1; // wide 8-byte icache line via if_addr
+            else                 pf_req <= 1'b1; // 32-bit read via the shared adapter
         end
     end
     else if (fetch_ack) begin
@@ -3309,7 +3321,7 @@ else if (ce) begin
             && !exec_retire_shift_ok
             && !pf_decode_redirect
             && !rsr_rebase_now) begin
-            if (FAST_IFETCH) begin
+            if (pf_fast) begin
                 // append the 8-byte line from the frontier offset to the line end
                 // (1..8 bytes).  s32_core has ALREADY aligned if_data so byte 0 is
                 // the frontier byte (the >>foff barrel shift lives there, off this
