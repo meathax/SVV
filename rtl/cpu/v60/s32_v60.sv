@@ -823,46 +823,6 @@ task automatic write_psw(input [31:0] v);
     f_cy <= v[3];
 endtask
 
-// Retire an already-resolved EA directly from its producer state.  This is
-// the exact architectural work of the S_EA_DONE handoff, expressed with
-// explicit current-cycle values so no stale ea_out/ea_addr NBA value can be
-// observed.  Deferred/indirect modes that issued a bus read keep the
-// fallback S_EA_DONE state.
-task automatic complete_ea_now(
-    input [31:0] value,
-    input        value_is_reg,
-    input        value_is_immediate,
-    input [4:0]  encoded_len
-);
-    begin
-        if (!ea_target2) begin
-            op1   <= value;
-            flag1 <= value_is_reg;
-            len1  <= encoded_len;
-        end
-        else begin
-            op2   <= value;
-            flag2 <= value_is_reg;
-            len2  <= encoded_len;
-            if (value_is_immediate) begin
-                op2val   <= value;
-                op2val_v <= 1'b1;
-            end
-        end
-        // continuation: ea_ret==1 -> decode operand 2 (F1)
-        if (ea_ret == 3'd1) begin
-            ea_ret       <= 3'd0;
-            ea_modm      <= instflags[5];
-            ea_ofs       <= 5'd2 + encoded_len;
-            ea_target2   <= 1'b1;
-            ea_want_addr <= 1'b1;   // op2 default = address (write target)
-            ea_dim       <= f12_dim2(cur_op);
-            st           <= S_EA_MODE;
-        end
-        else st <= st_after_ea;
-    end
-endtask
-
 // ---------------------------------------------------------------------------
 // EA engine (combinational mode/extension parse; sequential memory derefs)
 //   Implements s_AMTable1/2/3 dispatch:
@@ -1684,29 +1644,14 @@ else if (ce) begin
                 d1t = disp_of(ea_ofs+1, modtop[1:0]);
                 ea_addr <= rf_rdata_a + d1t;
                 ea_len  <= 5'd1 + disp_len(modtop[1:0]);
-                if (ea_want_addr)
-                    complete_ea_now(rf_rdata_a + d1t, 1'b0, 1'b0,
-                                    5'd1 + disp_len(modtop[1:0]));
-                else begin
-                    dbus_req  <= 1'b1;
-                    dbus_we   <= 1'b0;
-                    dbus_size <= ea_dim;
-                    dbus_addr <= rf_rdata_a + d1t;
-                    st        <= S_EA_VAL;
-                end
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd3: begin             // Register Indirect
                 ea_addr <= rf_rdata_a;
                 ea_len  <= 5'd1;
-                if (ea_want_addr)
-                    complete_ea_now(rf_rdata_a, 1'b0, 1'b0, 5'd1);
-                else begin
-                    dbus_req  <= 1'b1;
-                    dbus_we   <= 1'b0;
-                    dbus_size <= ea_dim;
-                    dbus_addr <= rf_rdata_a;
-                    st        <= S_EA_VAL;
-                end
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd4, 3'd5, 3'd6: begin // Displacement Indirect (deferred)
                 d1t = disp_of(ea_ofs+1, modtop - 3'd4);
@@ -1722,36 +1667,21 @@ else if (ce) begin
                     ea_len <= 5'd1;
                     ea_flag <= 1'b0;
                     ea_isval <= 1'b1;
-                    complete_ea_now({28'b0, modreg[3:0]}, 1'b0, 1'b1, 5'd1);
+                    st <= S_EA_DONE;  // value already
                 end
                 5'h10, 5'h11, 5'h12: begin // PC displacement
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
                     ea_addr <= pc + d1t;
                     ea_len  <= 5'd1 + disp_len(modreg[1:0]);
-                    if (ea_want_addr)
-                        complete_ea_now(pc + d1t, 1'b0, 1'b0,
-                                        5'd1 + disp_len(modreg[1:0]));
-                    else begin
-                        dbus_req  <= 1'b1;
-                        dbus_we   <= 1'b0;
-                        dbus_size <= ea_dim;
-                        dbus_addr <= pc + d1t;
-                        st        <= S_EA_VAL;
-                    end
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 5'h13: begin        // direct address
                     d1t = fb32(ea_ofs+1);
                     ea_addr <= d1t;
                     ea_len  <= 5'd5;
-                    if (ea_want_addr)
-                        complete_ea_now(d1t, 1'b0, 1'b0, 5'd5);
-                    else begin
-                        dbus_req  <= 1'b1;
-                        dbus_we   <= 1'b0;
-                        dbus_size <= ea_dim;
-                        dbus_addr <= d1t;
-                        st        <= S_EA_VAL;
-                    end
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 5'h14: begin        // immediate full
                     d1t = fb32(ea_ofs+1);
@@ -1763,11 +1693,7 @@ else if (ce) begin
                     endcase
                     ea_len <= 5'd1 + imm_len(ea_dim);
                     ea_isval <= 1'b1;
-                    case (ea_dim)
-                        2'd0: complete_ea_now({24'b0, fb[ea_ofs+1]}, 1'b0, 1'b1, 5'd2);
-                        2'd1: complete_ea_now(d2t, 1'b0, 1'b1, 5'd3);
-                        default: complete_ea_now(d1t, 1'b0, 1'b1, 5'd5);
-                    endcase
+                    st <= S_EA_DONE;
                 end
                 5'h18, 5'h19, 5'h1a: begin // PC displacement indirect
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
@@ -1814,37 +1740,24 @@ else if (ce) begin
                 if (ea_want_addr) begin
                     ea_out  <= {27'b0, modreg};
                     ea_flag <= 1'b1;
-                    complete_ea_now({27'b0, modreg}, 1'b1, 1'b0, 5'd1);
                 end
-                else begin
-                    ea_out <= dimext(rf_rdata_a, ea_dim);
-                    complete_ea_now(dimext(rf_rdata_a, ea_dim), 1'b0, 1'b0, 5'd1);
-                end
+                else ea_out <= dimext(rf_rdata_a, ea_dim);
                 ea_len <= 5'd1;
+                st <= S_EA_DONE;
             end
             3'd4: begin             // Autoincrement
                 ea_addr <= rf_rdata_a;
                 queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                if (ea_want_addr)
-                    complete_ea_now(rf_rdata_a, 1'b0, 1'b0, 5'd1);
-                else begin
-                    dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                    dbus_addr <= rf_rdata_a;
-                    st <= S_EA_VAL;
-                end
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd5: begin             // Autodecrement
                 ea_addr <= rf_rdata_a - dim_step(ea_dim);
                 queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
-                if (ea_want_addr)
-                    complete_ea_now(rf_rdata_a - dim_step(ea_dim), 1'b0, 1'b0, 5'd1);
-                else begin
-                    dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                    dbus_addr <= rf_rdata_a - dim_step(ea_dim);
-                    st <= S_EA_VAL;
-                end
+                if (ea_want_addr) st <= S_EA_DONE;
+                else              st <= S_EA_VAL;
             end
             3'd6: begin             // Group 6: indexed, second mode byte
                 case (modval2[7:5])
@@ -1852,26 +1765,14 @@ else if (ce) begin
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
                     ea_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
-                    if (ea_want_addr)
-                        complete_ea_now(rf_rdata_b + d1t + (rf_rdata_a << ea_dim),
-                                        1'b0, 1'b0, 5'd2 + disp_len(modval2[6:5]));
-                    else begin
-                        dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                        dbus_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
-                        st <= S_EA_VAL;
-                    end
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 3'd3: begin            // Register indirect indexed
                     ea_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
                     ea_len  <= 5'd2;
-                    if (ea_want_addr)
-                        complete_ea_now(rf_rdata_b + (rf_rdata_a << ea_dim),
-                                        1'b0, 1'b0, 5'd2);
-                    else begin
-                        dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                        dbus_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
-                        st <= S_EA_VAL;
-                    end
+                    if (ea_want_addr) st <= S_EA_DONE;
+                    else              st <= S_EA_VAL;
                 end
                 3'd4, 3'd5, 3'd6: begin // Displacement indirect indexed
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
@@ -1890,27 +1791,15 @@ else if (ce) begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
                         ea_addr <= pc + d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
-                        if (ea_want_addr)
-                            complete_ea_now(pc + d1t + (rf_rdata_a << ea_dim),
-                                            1'b0, 1'b0, 5'd2 + disp_len(modval2[1:0]));
-                        else begin
-                            dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                            dbus_addr <= pc + d1t + (rf_rdata_a << ea_dim);
-                            st <= S_EA_VAL;
-                        end
+                        if (ea_want_addr) st <= S_EA_DONE;
+                        else              st <= S_EA_VAL;
                     end
                     4'h3: begin
                         d1t = fb32(ea_ofs+2);
                         ea_addr <= d1t + (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd6;
-                        if (ea_want_addr)
-                            complete_ea_now(d1t + (rf_rdata_a << ea_dim),
-                                            1'b0, 1'b0, 5'd6);
-                        else begin
-                            dbus_req <= 1'b1; dbus_we <= 1'b0; dbus_size <= ea_dim;
-                            dbus_addr <= d1t + (rf_rdata_a << ea_dim);
-                            st <= S_EA_VAL;
-                        end
+                        if (ea_want_addr) st <= S_EA_DONE;
+                        else              st <= S_EA_VAL;
                     end
                     4'h8, 4'h9, 4'ha: begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
@@ -1966,11 +1855,7 @@ else if (ce) begin
         else if (dack) begin
             dbus_req <= 0;
             ea_out <= dimext(bus_rdata, ea_dim);
-            // A completed value read already has the final operand, flag and
-            // length. Retire the EA here instead of paying an otherwise
-            // copy-only S_EA_DONE cycle. (S_EA_VAL is only entered with
-            // !ea_want_addr, so the S_EA_DONE hand-back would be ea_out.)
-            complete_ea_now(dimext(bus_rdata, ea_dim), 1'b0, 1'b0, ea_len);
+            st <= S_EA_DONE;
         end
     end
     S_EA_DONE: begin
