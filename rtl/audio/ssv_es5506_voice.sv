@@ -72,7 +72,14 @@ module ssv_es5506_voice (
     output logic signed [15:0] audio_l,
     output logic signed [15:0] audio_r,
     output logic        sample_tick,
-    output logic        underrun
+    output logic        underrun,
+
+    // Pulses for exactly the cycle this voice's registers are snapshotted
+    // from the register file (S_START). Lets the register file clear its
+    // "host wrote a fresher value since this voice's snapshot" tracking at
+    // the one instant that tracking is known correct -- see
+    // docs/debug/ES5506_WARPED_NOTES_ROOT_CAUSE_20260819.md.
+    output logic        eng_snap
 );
 
 import ssv_pkg::*;
@@ -220,6 +227,12 @@ function automatic logic signed [15:0] lerp(
 endfunction
 
 assign eng_voice = voice_i;
+// `state` holds S_START across every clk cycle until the next `ce` edge
+// consumes it (S_START never self-loops), and ce is a sparse ~16 MHz
+// enable -- so "state==S_START" alone can stay high for several clk
+// cycles. Gate on ce too: the snapshot only actually latches (cr <= ...
+// etc., in the S_START case below) on the one edge where both are true.
+assign eng_snap  = ce && (state == S_START);
 
 // Sample SDRAM handshake is independent of ce_snd. Production ce_snd is a
 // sparse ~16 MHz enable; acks arrive on clk_sys and must not be dropped.

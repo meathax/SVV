@@ -44,6 +44,10 @@ module ssv_es5506_regs (
 
     // Voice-engine port (registered read of current voice; writeback next state).
     input  logic [4:0]  eng_voice,
+    // Pulses the one cycle the engine actually latches eng_voice's
+    // registers (S_START). Marks the instant it is safe to forget any
+    // earlier "host wrote a fresher value" tracking for that voice.
+    input  logic         eng_snap,
     output logic [15:0] eng_cr,
     output logic        eng_cr_valid,
     output logic [16:0] eng_fc,
@@ -207,6 +211,78 @@ logic [17:0] pend_o2n1_w, pend_o2n2_w, pend_o1n1_w;
 
 wire eng_write_any = eng_wr_accum | eng_wr_cr | eng_wr_filt | eng_wr_env;
 
+// The voice engine is a single sequential state machine: it snapshots one
+// voice's registers at S_START and writes derived state back several ce
+// ticks later at S_MIX. The pend_*/eng_pending scaffolding above only
+// protects a host commit that lands on the *same* clock cycle as an engine
+// writeback -- nothing previously protected a host write landing a few
+// cycles into that in-flight window, so the engine's stale writeback would
+// silently clobber a fresh host register write (e.g. a note-on rewriting
+// ACCUM/K1/K2 while that voice was already mid-scan). One bit per voice per
+// register group tracks "host wrote a fresher value since this voice's
+// snapshot"; set on any host commit to that field, cleared only at the next
+// snapshot of that voice (eng_snap), and consulted by every engine
+// writeback path before it is allowed to touch the register file. See
+// docs/debug/ES5506_WARPED_NOTES_ROOT_CAUSE_20260819.md.
+logic [31:0] host_fresh_control, host_fresh_accum;
+logic [31:0] host_fresh_lvol, host_fresh_rvol, host_fresh_k1, host_fresh_k2;
+logic [31:0] host_fresh_ecount;
+logic [31:0] host_fresh_o4n1, host_fresh_o3n1, host_fresh_o3n2;
+logic [31:0] host_fresh_o2n1, host_fresh_o2n2, host_fresh_o1n1;
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        host_fresh_control <= '0;
+        host_fresh_accum   <= '0;
+        host_fresh_lvol    <= '0;
+        host_fresh_rvol    <= '0;
+        host_fresh_k1      <= '0;
+        host_fresh_k2      <= '0;
+        host_fresh_ecount  <= '0;
+        host_fresh_o4n1    <= '0;
+        host_fresh_o3n1    <= '0;
+        host_fresh_o3n2    <= '0;
+        host_fresh_o2n1    <= '0;
+        host_fresh_o2n2    <= '0;
+        host_fresh_o1n1    <= '0;
+    end else begin
+        // Clear first, then let a same-cycle host commit for this same
+        // voice re-set the field it targets -- the later nonblocking
+        // assignment in program order wins, so "set" always beats "clear"
+        // on a same-cycle race. Never lose a fresh host write.
+        if (eng_snap) begin
+            host_fresh_control[eng_voice] <= 1'b0;
+            host_fresh_accum[eng_voice]   <= 1'b0;
+            host_fresh_lvol[eng_voice]    <= 1'b0;
+            host_fresh_rvol[eng_voice]    <= 1'b0;
+            host_fresh_k1[eng_voice]      <= 1'b0;
+            host_fresh_k2[eng_voice]      <= 1'b0;
+            host_fresh_ecount[eng_voice]  <= 1'b0;
+            host_fresh_o4n1[eng_voice]    <= 1'b0;
+            host_fresh_o3n1[eng_voice]    <= 1'b0;
+            host_fresh_o3n2[eng_voice]    <= 1'b0;
+            host_fresh_o2n1[eng_voice]    <= 1'b0;
+            host_fresh_o2n2[eng_voice]    <= 1'b0;
+            host_fresh_o1n1[eng_voice]    <= 1'b0;
+        end
+        if (host_commit) begin
+            if (we_control) host_fresh_control[voice] <= 1'b1;
+            if (we_accum)   host_fresh_accum[voice]   <= 1'b1;
+            if (we_lvol)    host_fresh_lvol[voice]    <= 1'b1;
+            if (we_rvol)    host_fresh_rvol[voice]    <= 1'b1;
+            if (we_k1)      host_fresh_k1[voice]      <= 1'b1;
+            if (we_k2)      host_fresh_k2[voice]      <= 1'b1;
+            if (we_ecount)  host_fresh_ecount[voice]  <= 1'b1;
+            if (we_o4n1)    host_fresh_o4n1[voice]    <= 1'b1;
+            if (we_o3n1)    host_fresh_o3n1[voice]    <= 1'b1;
+            if (we_o3n2)    host_fresh_o3n2[voice]    <= 1'b1;
+            if (we_o2n1)    host_fresh_o2n1[voice]    <= 1'b1;
+            if (we_o2n2)    host_fresh_o2n2[voice]    <= 1'b1;
+            if (we_o1n1)    host_fresh_o1n1[voice]    <= 1'b1;
+        end
+    end
+end
+
 assign eng_cr       = eng_hold ? eng_cr_h       : q_control;
 assign eng_cr_valid = (eng_hold ? eng_cr_valid_h : voice_control_valid[eng_voice]) &&
                       !cold_init_active;
@@ -350,23 +426,27 @@ always_comb begin
         w_o1n1 = pend_o1n1_w;
     end
     else begin
+        // Each `!host_fresh_*[eng_voice]` guard drops exactly the fields a
+        // host write has already refreshed since this voice's snapshot --
+        // never the whole writeback -- so an unrelated field on the same
+        // voice still commits normally this cycle.
         wr_addr = eng_voice;
-        if (eng_wr_accum) we_accum = 1'b1;
-        if (eng_wr_cr)    we_control = 1'b1;
+        if (eng_wr_accum && !host_fresh_accum[eng_voice]) we_accum = 1'b1;
+        if (eng_wr_cr    && !host_fresh_control[eng_voice]) we_control = 1'b1;
         if (eng_wr_filt) begin
-            we_o4n1 = 1'b1;
-            we_o3n1 = 1'b1;
-            we_o3n2 = 1'b1;
-            we_o2n1 = 1'b1;
-            we_o2n2 = 1'b1;
-            we_o1n1 = 1'b1;
+            if (!host_fresh_o4n1[eng_voice]) we_o4n1 = 1'b1;
+            if (!host_fresh_o3n1[eng_voice]) we_o3n1 = 1'b1;
+            if (!host_fresh_o3n2[eng_voice]) we_o3n2 = 1'b1;
+            if (!host_fresh_o2n1[eng_voice]) we_o2n1 = 1'b1;
+            if (!host_fresh_o2n2[eng_voice]) we_o2n2 = 1'b1;
+            if (!host_fresh_o1n1[eng_voice]) we_o1n1 = 1'b1;
         end
         if (eng_wr_env) begin
-            we_lvol = 1'b1;
-            we_rvol = 1'b1;
-            we_k1 = 1'b1;
-            we_k2 = 1'b1;
-            we_ecount = 1'b1;
+            if (!host_fresh_lvol[eng_voice])   we_lvol = 1'b1;
+            if (!host_fresh_rvol[eng_voice])   we_rvol = 1'b1;
+            if (!host_fresh_k1[eng_voice])     we_k1 = 1'b1;
+            if (!host_fresh_k2[eng_voice])     we_k2 = 1'b1;
+            if (!host_fresh_ecount[eng_voice]) we_ecount = 1'b1;
         end
     end
 
@@ -699,19 +779,19 @@ always_ff @(posedge clk) begin
                 eng_pending <= eng_write_any;
                 if (eng_write_any) begin
                     pend_voice <= eng_voice;
-                    pend_control <= eng_wr_cr;
-                    pend_accum <= eng_wr_accum;
-                    pend_lvol <= eng_wr_env;
-                    pend_rvol <= eng_wr_env;
-                    pend_k1 <= eng_wr_env;
-                    pend_k2 <= eng_wr_env;
-                    pend_ecount <= eng_wr_env;
-                    pend_o4n1 <= eng_wr_filt;
-                    pend_o3n1 <= eng_wr_filt;
-                    pend_o3n2 <= eng_wr_filt;
-                    pend_o2n1 <= eng_wr_filt;
-                    pend_o2n2 <= eng_wr_filt;
-                    pend_o1n1 <= eng_wr_filt;
+                    pend_control <= eng_wr_cr && !host_fresh_control[eng_voice];
+                    pend_accum <= eng_wr_accum && !host_fresh_accum[eng_voice];
+                    pend_lvol <= eng_wr_env && !host_fresh_lvol[eng_voice];
+                    pend_rvol <= eng_wr_env && !host_fresh_rvol[eng_voice];
+                    pend_k1 <= eng_wr_env && !host_fresh_k1[eng_voice];
+                    pend_k2 <= eng_wr_env && !host_fresh_k2[eng_voice];
+                    pend_ecount <= eng_wr_env && !host_fresh_ecount[eng_voice];
+                    pend_o4n1 <= eng_wr_filt && !host_fresh_o4n1[eng_voice];
+                    pend_o3n1 <= eng_wr_filt && !host_fresh_o3n1[eng_voice];
+                    pend_o3n2 <= eng_wr_filt && !host_fresh_o3n2[eng_voice];
+                    pend_o2n1 <= eng_wr_filt && !host_fresh_o2n1[eng_voice];
+                    pend_o2n2 <= eng_wr_filt && !host_fresh_o2n2[eng_voice];
+                    pend_o1n1 <= eng_wr_filt && !host_fresh_o1n1[eng_voice];
                     pend_control_w <= eng_cr_w;
                     pend_accum_w <= eng_accum_w;
                     pend_lvol_w <= eng_lvol_w;
@@ -730,31 +810,44 @@ always_ff @(posedge clk) begin
             else if (host_commit && !eng_pending && eng_write_any) begin
                 pend_voice <= eng_voice;
                 pend_control <= eng_wr_cr &&
-                    !((voice == eng_voice) && we_control);
+                    !((voice == eng_voice) && we_control) &&
+                    !host_fresh_control[eng_voice];
                 pend_accum <= eng_wr_accum &&
-                    !((voice == eng_voice) && we_accum);
+                    !((voice == eng_voice) && we_accum) &&
+                    !host_fresh_accum[eng_voice];
                 pend_lvol <= eng_wr_env &&
-                    !((voice == eng_voice) && we_lvol);
+                    !((voice == eng_voice) && we_lvol) &&
+                    !host_fresh_lvol[eng_voice];
                 pend_rvol <= eng_wr_env &&
-                    !((voice == eng_voice) && we_rvol);
+                    !((voice == eng_voice) && we_rvol) &&
+                    !host_fresh_rvol[eng_voice];
                 pend_k1 <= eng_wr_env &&
-                    !((voice == eng_voice) && we_k1);
+                    !((voice == eng_voice) && we_k1) &&
+                    !host_fresh_k1[eng_voice];
                 pend_k2 <= eng_wr_env &&
-                    !((voice == eng_voice) && we_k2);
+                    !((voice == eng_voice) && we_k2) &&
+                    !host_fresh_k2[eng_voice];
                 pend_ecount <= eng_wr_env &&
-                    !((voice == eng_voice) && we_ecount);
+                    !((voice == eng_voice) && we_ecount) &&
+                    !host_fresh_ecount[eng_voice];
                 pend_o4n1 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o4n1);
+                    !((voice == eng_voice) && we_o4n1) &&
+                    !host_fresh_o4n1[eng_voice];
                 pend_o3n1 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o3n1);
+                    !((voice == eng_voice) && we_o3n1) &&
+                    !host_fresh_o3n1[eng_voice];
                 pend_o3n2 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o3n2);
+                    !((voice == eng_voice) && we_o3n2) &&
+                    !host_fresh_o3n2[eng_voice];
                 pend_o2n1 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o2n1);
+                    !((voice == eng_voice) && we_o2n1) &&
+                    !host_fresh_o2n1[eng_voice];
                 pend_o2n2 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o2n2);
+                    !((voice == eng_voice) && we_o2n2) &&
+                    !host_fresh_o2n2[eng_voice];
                 pend_o1n1 <= eng_wr_filt &&
-                    !((voice == eng_voice) && we_o1n1);
+                    !((voice == eng_voice) && we_o1n1) &&
+                    !host_fresh_o1n1[eng_voice];
                 pend_control_w <= eng_cr_w;
                 pend_accum_w <= eng_accum_w;
                 pend_lvol_w <= eng_lvol_w;
@@ -769,13 +862,21 @@ always_ff @(posedge clk) begin
                 pend_o2n2_w <= eng_o2n2_w;
                 pend_o1n1_w <= eng_o1n1_w;
                 eng_pending <=
-                    (eng_wr_cr && !((voice == eng_voice) && we_control)) |
-                    (eng_wr_accum && !((voice == eng_voice) && we_accum)) |
+                    (eng_wr_cr && !((voice == eng_voice) && we_control) &&
+                        !host_fresh_control[eng_voice]) |
+                    (eng_wr_accum && !((voice == eng_voice) && we_accum) &&
+                        !host_fresh_accum[eng_voice]) |
                     (eng_wr_env && !((voice == eng_voice) &&
-                        we_lvol && we_rvol && we_k1 && we_k2 && we_ecount)) |
+                        we_lvol && we_rvol && we_k1 && we_k2 && we_ecount) &&
+                        !(host_fresh_lvol[eng_voice] && host_fresh_rvol[eng_voice] &&
+                          host_fresh_k1[eng_voice] && host_fresh_k2[eng_voice] &&
+                          host_fresh_ecount[eng_voice])) |
                     (eng_wr_filt && !((voice == eng_voice) &&
                         we_o4n1 && we_o3n1 && we_o3n2 &&
-                        we_o2n1 && we_o2n2 && we_o1n1));
+                        we_o2n1 && we_o2n2 && we_o1n1) &&
+                        !(host_fresh_o4n1[eng_voice] && host_fresh_o3n1[eng_voice] &&
+                          host_fresh_o3n2[eng_voice] && host_fresh_o2n1[eng_voice] &&
+                          host_fresh_o2n2[eng_voice] && host_fresh_o1n1[eng_voice]));
             end
 
 `ifdef SIMULATION
