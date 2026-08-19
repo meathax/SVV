@@ -244,6 +244,14 @@ s32_v60_bus bus_adapter (
 wire [23:0] a = {m_addr, 1'b0};
 wire sel_wram    = (a <= 24'h00ffff);
 wire sel_sprram  = (a >= 24'h100000) && (a <= 24'h13ffff);
+// The descriptor cache build only walks the global sprite list, which lives in
+// the first 0x1000 words (0x2000 bytes) of sprite RAM -- see LAST_GLOBAL in
+// ssv_cached_sprite_renderer.sv. Everything above that is tile/local sprite
+// payload the games stream continuously during active display (measured in
+// MAME 0.289 on vasara: offsets 0x08000-0x1806e written on every raster line
+// 0..239 and 250..261). Restarting the build on those writes would rewind it
+// forever, so the restart trigger is scoped to the range the walk depends on.
+wire sel_sprlist = sel_sprram && (a <= 24'h101fff);
 wire sel_palette = (a >= 24'h140000) && (a <= 24'h15ffff);
 wire sel_xram    = (a >= 24'h160000) && (a <= 24'h17ffff);
 wire sel_scroll  = (a >= 24'h1c0000) && (a <= 24'h1c007f);
@@ -690,20 +698,27 @@ ssv_cached_sprite_renderer sprite_renderer (
     // RAM or the video registers during a build abandons it and rebuilds, so
     // the commit reflects post-write state.
     //
-    // The +5 line window is the largest that still guarantees the restarted
-    // build can finish, not a guess:
+    // Window sizing, and why it is +9 rather than the original +5:
     //   one line   = SSV_HTOTAL 454 px x (48.317/7.159) ~= 3064 clk_sys
     //   vblank     = lines 240..260 (cache_deadline) = 20 lines ~= 61.3k
     //   worst build= 46,852 clk_sys measured (CACHE_BUILD max, frame 526)
-    //               ~= 15.3 lines, so 16 lines must remain after a restart.
-    // Restarting at line 244 leaves 16 lines (~49.0k) and fits; line 245
-    // would leave 15 (~46.0k) and would not. Hence vcnt < active_height + 5.
-    // Beyond that the existing cache_deadline containment is the lesser evil,
-    // and repeated writes simply degrade to today's partial-cache behaviour.
-    .cache_restart(m_req && m_we && (sel_sprram || sel_scroll) &&
+    //               ~= 15.3 lines.
+    // The original +5 was derived from that worst-case build alone: restart at
+    // 244 leaves 16 lines and fits, 245 leaves 15 and does not. What it did not
+    // account for is when the games actually stop writing the list. Measured in
+    // MAME 0.289 (vasara, write taps on 0x100000-0x13ffff bucketed by beam
+    // line, 240 frames): the global-list writes land on raster lines 240-247
+    // only, at offsets 0x00002-0x000be. Lines 245, 246 and 247 therefore wrote
+    // descriptors straight into an in-flight build with no restart, so the
+    // committed cache mixed two frames' lists and sprites appeared for one
+    // frame and vanished the next -- the flicker reported on vasara/vasara2.
+    // Covering through 248 closes that hole. It is affordable only because the
+    // trigger is now scoped to sel_sprlist: the payload streaming that resumes
+    // on line 250 is excluded, so a wider window cannot livelock the build.
+    .cache_restart(m_req && m_we && (sel_sprlist || sel_scroll) &&
                    ack_r && !ack_r_d &&
                    (vcnt >= active_height) &&
-                   (vcnt < active_height + 9'd5)),
+                   (vcnt < active_height + 9'd9)),
     .cache_deadline(cache_deadline),
     .start(bg_done),
     .target_y(render_line_y),

@@ -1145,7 +1145,17 @@ always_ff @(posedge clk) begin
         // existing cache_pending path -- the rebuild re-reads everything, so
         // it reflects the post-write state. Deadline containment above wins
         // if both fire on the same edge.
-        else if (cache_busy && cache_restart) begin
+        //
+        // BUILD_CLEAR_LINES is excluded because it has read no descriptor yet:
+        // it only walks line_count clearing counters, so no CPU write can have
+        // torn anything it holds, and rewinding it just repeats the 240-cycle
+        // clear. That mattered more than it looks -- measured on vasara, every
+        // one of the 2255 restarts seen across 90 frames (~25 per frame) was in
+        // this state, so the build spent the whole protected window restarting
+        // its clear phase instead of making progress. Letting the clear run to
+        // completion leaves the descriptor walk itself protected exactly as
+        // before, since cache_restart still aborts every state after this one.
+        else if (cache_busy && cache_restart && (state != BUILD_CLEAR_LINES)) begin
 `ifdef SIMULATION
             $display("CACHE_RESTART state=%0d writes=%0d", state,
                      cache_write_count);
