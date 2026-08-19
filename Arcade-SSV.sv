@@ -114,9 +114,11 @@ localparam CONF_STR = {
     "O[6],Service Mode,Off,On;",
     "H1O[48],Autosave Hiscores,Off,On;",
     // Flip Screen, Demo Sounds, Difficulty, Lives, Free Play, Health and both
-    // coinage nibbles are DIP switches and now live in the MRA's <switches>
-    // block, which the framework renders as its own OSD page. status bits
-    // 8..23 are free as a result.
+    // coinage nibbles are DIP switches and live in the MRA's <switches> block.
+    // The framework only renders that as an OSD page when CONF_STR carries the
+    // "DIP;" token below -- without it the switches are parsed and delivered to
+    // sw[] but have no menu entry, which is why the DIP page was missing.
+    // status bits 8..23 are free as a result.
     "-;",
     // CRT Adjust (rtl/crt_adjust.sv). Off is a pure passthrough; the three
     // amounts are hidden until it is On (status_menumask bit 2 below).
@@ -129,6 +131,11 @@ localparam CONF_STR = {
     "H2P1O[29:25],H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
     "H2P1O[35:30],H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
     "H2P1O[40:36],V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "-;",
+    // Renders the MRA <switches> block as its own OSD page. Flip Screen lives
+    // there; it is the board's own 180-degree flip, so it runs at native rate
+    // and works on a 15 kHz CRT (unlike the framebuffer Rotation option above).
+    "DIP;",
     "-;",
     "R[0],Reset;",
     // Six game buttons: SSV's P1/P2 ports carry B1-B3 and the
