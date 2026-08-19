@@ -890,6 +890,43 @@ always_ff @(posedge clk) begin
             if (host_commit && eng_pending && eng_write_any)
                 $fatal(1, "ES5506 writeback skid overflow");
 
+            // Invariant the host_fresh_* flags exist to establish: no engine
+            // writeback path -- plain or deferred -- may ever write a field of
+            // a voice the host has refreshed since that voice's snapshot.
+            // Checked at wr_addr, which is eng_voice on the plain path and
+            // pend_voice on the replay path, so one test covers both. The host
+            // commit path legitimately writes those fields (it is what sets the
+            // flags), and the cold-init sweep deliberately rewrites everything,
+            // so both are excluded.
+            if (!cold_init_active && !host_commit) begin
+                if (we_control && host_fresh_control[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host CONTROL, voice %0d", wr_addr);
+                if (we_accum && host_fresh_accum[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host ACCUM, voice %0d", wr_addr);
+                if (we_lvol && host_fresh_lvol[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host LVOL, voice %0d", wr_addr);
+                if (we_rvol && host_fresh_rvol[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host RVOL, voice %0d", wr_addr);
+                if (we_k1 && host_fresh_k1[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host K1, voice %0d", wr_addr);
+                if (we_k2 && host_fresh_k2[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host K2, voice %0d", wr_addr);
+                if (we_ecount && host_fresh_ecount[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host ECOUNT, voice %0d", wr_addr);
+                if (we_o4n1 && host_fresh_o4n1[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O4N1, voice %0d", wr_addr);
+                if (we_o3n1 && host_fresh_o3n1[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O3N1, voice %0d", wr_addr);
+                if (we_o3n2 && host_fresh_o3n2[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O3N2, voice %0d", wr_addr);
+                if (we_o2n1 && host_fresh_o2n1[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O2N1, voice %0d", wr_addr);
+                if (we_o2n2 && host_fresh_o2n2[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O2N2, voice %0d", wr_addr);
+                if (we_o1n1 && host_fresh_o1n1[wr_addr])
+                    $fatal(1, "ES5506 engine clobbered fresh host O1N1, voice %0d", wr_addr);
+            end
+
 `endif
 
             if (!host_commit && !eng_pending && eng_wr_cr)
