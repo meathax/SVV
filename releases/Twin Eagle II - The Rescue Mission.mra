@@ -50,5 +50,5 @@
     <dip bits="14" name="Flip Screen" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Service Mode" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test" default="A,B,X,Start,Select,R,L" count="3"/>
+  <buttons names="Cannon,Ground Attack,Bomb,-,-,-,Service,Coin,Start,Test" default="A,B,X,R,Select,Start,L" count="3"/>
 </misterromdescription>

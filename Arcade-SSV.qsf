@@ -54,7 +54,10 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # (-0.411 ns at the slow -40 C corner) while clk_sys/clk_ram/SDRAM all pass.
 # Spend more Fast-Fit placement search globally without enabling Standard Fit
 # or dense packing, both of which are documented below as unsafe on this host.
-set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 2.0
+# Raised 2.0 -> 4.0 on 19 Aug 2026: seeds 1/2/6 under 2.0 all miss only
+# sys/ascal's pixel-fetch stage (best seed 2, -0.082 ns). Untried lever per
+# this file's own history; single-variable test against seed 2.
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
 set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
@@ -112,7 +115,7 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # Both failing corners show TNS == Slack, i.e. exactly ONE failing endpoint per
 # corner, and both are inside sys/ascal. Next step is a fresh sweep on the
 # current netlist.
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 2
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two
