@@ -115,7 +115,18 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # Both failing corners show TNS == Slack, i.e. exactly ONE failing endpoint per
 # corner, and both are inside sys/ascal. Next step is a fresh sweep on the
 # current netlist.
-set_global_assignment -name SEED 2
+#
+# 19 Aug 2026 (post ssv_mlab88_sdp fix): the resource landscape changed a lot
+# since the above measurements (line_buffer4's 16 arrays moved from ~745 LABs
+# of raw logic into explicit altsyncram MLAB primitives), so the old seed
+# results are stale placement-lottery data, not a like-for-like comparison.
+# Seed 2 on the NEW netlist: -0.397 ns / 100C, -0.569 ns / -40C, single
+# endpoint each corner, both on pll_hdmi|...counter[0].output_counter|divclk
+# (sys/ framework HDMI PLL domain, not core RTL). Seed 19 (flagged above as
+# queued but never measured) is CLEAN on all 4 corners: +0.172 ns / Slow
+# 100C, +0.016 ns / Slow -40C (thin but positive), +2.529 ns / Fast 100C,
+# +2.587 ns / Fast -40C. Kept as the known-good seed for this netlist.
+set_global_assignment -name SEED 19
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

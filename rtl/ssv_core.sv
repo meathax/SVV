@@ -483,37 +483,79 @@ wire cache_deadline = (vcnt > SSV_VTOTAL - 2) ||
 wire obj_cache_busy, obj_cache_ready, obj_cache_overflow;
 wire renderer_busy;
 
-// Swap completed lines as active display enters horizontal blank. The extra
-// target_y==240 swap exposes the already-rendered final visible line; it must
-// not launch another renderer. Lines 0 and 1 are prepared at vblank's tail.
+// Advance scanout to the next completed ring line as active display enters
+// horizontal blank. renderer_target_y here is purely the raster-derived
+// consumption schedule; the renderers themselves are driven by the queue
+// counter below. The target_y==0 pulse (end of raster line VTOTAL-2) exposes
+// nothing -- the first line consumed is line 0, at the target_y==1 pulse --
+// so it is excluded from consumption.
 wire line_buffer_start = video_enable && ce_pixel &&
                          (hcnt == active_width - 1'd1) &&
                          (renderer_target_y <= active_height) &&
                          !obj_cache_busy;
-// ...and never while either renderer is still working on the previous line.
+wire line_buffer_consume = line_buffer_start &&
+                           (renderer_target_y != 9'd0);
+
+// Ring-buffer producer handshake (driven by the line buffer below).
+wire line_render_ready, line_render_go, line_underrun;
+
+// Queue-based renderer kicking into the four-line ring. next_render_y counts
+// this frame's lines in order; a render is kicked whenever the renderer is
+// idle, the ring has a clean slot, and visible lines remain -- so the
+// renderer runs up to three lines ahead of the beam and a sprite-dense line
+// can borrow the headroom instead of missing its deadline. The kick is
+// registered so render_line_y is stable when the start pulse reaches the
+// renderers (the object renderer samples target_y at bg_done, well after the
+// pulse). Kicking only while idle keeps the p2 ownership rules and the
+// renderer-overlap assertion below intact: bg and obj never overlap a new
+// start.
 //
-// renderer_line_start starts the BACKGROUND renderer; the object renderer is
-// started by bg_done. So a line that misses its deadline used to start bg
-// while obj was still fetching, and because p2_owner_obj is obj_busy, bg's
-// spr_addr and rom_ack are both withheld -- it latches the OBJECT renderer's
-// tile code and attribute and paints the background with sprite graphics.
-// (See the p2_owner_obj comment below.)
+// KNOWN APPROXIMATION: the background renderer samples its scroll registers
+// (and row-scroll RAM) live, so a line rendered up to three lines ahead
+// samples them up to three lines early. The cached sprite renderer already
+// freezes per-frame state during vblank, and bg scroll is static per frame
+// on these games, so the head start is accepted rather than pipelining the
+// scroll values.
 //
-// Skipping the start instead costs the late line its background and its
-// objects, so it shows the cleared backdrop: a flat line rather than a band of
-// another renderer's tiles. There is no lockup risk -- the swap itself is
-// still driven by line_buffer_start, and the busy renderer is not prolonged by
-// skipping a start, so the next line starts normally.
-wire renderer_line_start = line_buffer_start &&
-                           (renderer_target_y < active_height) &&
-                           !renderer_busy;
+// The kick window opens four lines before the visible frame (matching the
+// old scheme's vblank-tail preparation, a little earlier so the ring can
+// fill) and stays shut through early vblank, where the descriptor cache
+// build and its CPU-write restart window own the sprite RAM port.
+logic [8:0] next_render_y;
+logic [8:0] render_line_y;
+logic       render_kick_q;
+wire render_window = (vcnt >= SSV_VTOTAL - 9'd4) || (vcnt < active_height);
+wire render_kick_ok = video_enable && render_window && !obj_cache_busy &&
+                      line_render_ready && !renderer_busy && !render_kick_q &&
+                      (next_render_y < active_height);
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        next_render_y <= 9'd0;
+        render_line_y <= 9'd0;
+        render_kick_q <= 1'b0;
+    end
+    else if (video_enable && vblank_pulse) begin
+        // Same edge as the line buffer's frame_sync: both ring pointers and
+        // the line counter restart from one deterministic aligned state.
+        next_render_y <= 9'd0;
+        render_kick_q <= 1'b0;
+    end
+    else begin
+        render_kick_q <= 1'b0;
+        if (render_kick_ok) begin
+            render_kick_q <= 1'b1;
+            render_line_y <= next_render_y;
+            next_render_y <= next_render_y + 1'd1;
+        end
+    end
+end
+wire renderer_line_start = render_kick_q;
 
 // Look ahead one address to cover the line-buffer/palette read pipeline.  The
 // output observed at coordinate x is the value requested on the preceding
 // pixel clock; x=0 is preloaded throughout horizontal blank.
 wire [8:0] scan_x_ahead = (hcnt < active_width - 1'd1)
                           ? hcnt + 1'd1 : 9'd0;
-wire line_clear_busy, line_clear_done;
 wire [3:0] renderer_plot_we;
 wire renderer_plot_shadow, renderer_shadow_4bit;
 wire [35:0] renderer_plot_x;
@@ -602,24 +644,27 @@ assign renderer_done = obj_done;
 
 ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst),
-    // Same edge that re-arms the descriptor cache build (cache_start below):
-    // once per frame, during vblank, strictly before this frame's first
-    // active-line line_start. See ssv_line_buffer4's frame_sync handling for
-    // why the line buffer needs its own once-per-frame resync as well.
+    // Same edge that re-arms the descriptor cache build (cache_start below)
+    // and resets next_render_y above: once per frame, during vblank, strictly
+    // before this frame's first consumption. It resets both ring pointers to
+    // one deterministic aligned state.
     .frame_sync(video_enable && vblank_pulse),
-    .line_start(line_buffer_start),
-    .line_ready(!renderer_busy),
+    .line_start(line_buffer_consume),
     .render_start(renderer_line_start),
+    .render_done(renderer_done),
     .plot_we(renderer_plot_we), .plot_x(renderer_plot_x),
     .plot_color(renderer_plot_color), .plot_shadow(renderer_plot_shadow),
     .plot_pen(renderer_plot_pen), .shadow_4bit(renderer_shadow_4bit),
     .scan_x(scan_x_ahead), .scan_color(line_color),
-    .clear_busy(line_clear_busy), .clear_done(line_clear_done)
+    .render_ready(line_render_ready), .render_go(line_render_go),
+    .scan_underrun(line_underrun)
 );
 
 ssv_bg_renderer background_renderer (
     .clk(clk_sys), .rst(rst), .cfg(cfg), .line_start(renderer_line_start),
-    .target_y(renderer_target_y), .clear_done(line_clear_done),
+    // render_go replaces the old post-swap clear_done pulse: the ring slot
+    // handed to this render was cleared before the kick was allowed.
+    .target_y(render_line_y), .clear_done(line_render_go),
     .scroll_x(scroll[0]), .scroll_y(scroll[1]), .scroll_mode(scroll[3]),
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
     .flip_control(scroll[58]), .shadow_4bit(scroll[59][7]),
@@ -637,9 +682,31 @@ ssv_bg_renderer background_renderer (
 ssv_cached_sprite_renderer sprite_renderer (
     .clk(clk_sys), .rst(rst), .cfg(cfg),
     .cache_start(video_enable && vblank_pulse),
+    // The build starts at vblank_pulse (end of active line 239) but the
+    // game's level-3 handler does not run until irq3_pulse at line 240, so
+    // the build is reading the sprite list exactly while the handler rewrites
+    // it. The committed cache is then a mix of two frames -- the diagonal
+    // seam and HUD shimmer seen on hardware. A completed CPU write to sprite
+    // RAM or the video registers during a build abandons it and rebuilds, so
+    // the commit reflects post-write state.
+    //
+    // The +5 line window is the largest that still guarantees the restarted
+    // build can finish, not a guess:
+    //   one line   = SSV_HTOTAL 454 px x (48.317/7.159) ~= 3064 clk_sys
+    //   vblank     = lines 240..260 (cache_deadline) = 20 lines ~= 61.3k
+    //   worst build= 46,852 clk_sys measured (CACHE_BUILD max, frame 526)
+    //               ~= 15.3 lines, so 16 lines must remain after a restart.
+    // Restarting at line 244 leaves 16 lines (~49.0k) and fits; line 245
+    // would leave 15 (~46.0k) and would not. Hence vcnt < active_height + 5.
+    // Beyond that the existing cache_deadline containment is the lesser evil,
+    // and repeated writes simply degrade to today's partial-cache behaviour.
+    .cache_restart(m_req && m_we && (sel_sprram || sel_scroll) &&
+                   ack_r && !ack_r_d &&
+                   (vcnt >= active_height) &&
+                   (vcnt < active_height + 9'd5)),
     .cache_deadline(cache_deadline),
     .start(bg_done),
-    .target_y(renderer_target_y),
+    .target_y(render_line_y),
     .local_control(scroll[59]), .flip_control(scroll[58]),
     .coordinate_control(scroll[61]),
     .global_y_base(scroll[56]), .global_y_adjust(scroll[53]),
@@ -664,7 +731,9 @@ assign frame_tick = vblank_pulse;
 always_ff @(posedge clk_sys) begin
     if (rst)
         renderer_overrun <= 1'b0;
-    else if ((line_buffer_start && renderer_busy) || obj_cache_overflow)
+    // A renderer busy at a line boundary is normal ring pipelining now; the
+    // fault is scanout finding no completed line (line_underrun).
+    else if (line_underrun || obj_cache_overflow)
         renderer_overrun <= 1'b1;
 end
 
@@ -678,8 +747,8 @@ always_ff @(posedge clk_sys) begin
         overrun_cause_cache    <= 1'b0;
     end
     else begin
-        if (line_buffer_start && renderer_busy) overrun_cause_deadline <= 1'b1;
-        if (obj_cache_overflow)                 overrun_cause_cache    <= 1'b1;
+        if (line_underrun)      overrun_cause_deadline <= 1'b1;
+        if (obj_cache_overflow) overrun_cause_cache    <= 1'b1;
     end
 end
 

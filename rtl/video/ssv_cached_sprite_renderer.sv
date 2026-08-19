@@ -17,6 +17,12 @@ module ssv_cached_sprite_renderer #(
     input  logic         rst,
     input  ssv_pkg::ssv_cfg_t cfg,
     input  logic         cache_start,
+    // One-cycle pulse: the CPU completed a write to sprite RAM or the video
+    // registers while the build was reading them. The build must restart or
+    // it captures a mix of two frames' state -- the torn-frame seam and HUD
+    // shimmer observed on hardware. The core gates this to early vblank so a
+    // late write cannot push the rebuild past the raster deadline.
+    input  logic         cache_restart,
     // Asserted once the raster reaches the lines where the first display rows
     // must be prepared. The vblank descriptor build must give up by then --
     // see the BUILD_ADVANCE abort for why overrunning is unrecoverable.
@@ -1131,6 +1137,20 @@ always_ff @(posedge clk) begin
             cache_count <= cache_write_count;
             cache_ready <= 1'b1;
             cache_overflow <= 1'b1;
+            cache_busy <= 1'b0;
+            state <= IDLE;
+        end
+        // A CPU write landed in the state this build is reading: the capture
+        // is torn between two frames. Abandon and rebuild from IDLE via the
+        // existing cache_pending path -- the rebuild re-reads everything, so
+        // it reflects the post-write state. Deadline containment above wins
+        // if both fire on the same edge.
+        else if (cache_busy && cache_restart) begin
+`ifdef SIMULATION
+            $display("CACHE_RESTART state=%0d writes=%0d", state,
+                     cache_write_count);
+`endif
+            cache_pending <= 1'b1;
             cache_busy <= 1'b0;
             state <= IDLE;
         end

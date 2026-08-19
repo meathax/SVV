@@ -133,7 +133,7 @@ localparam CONF_STR = {
     "R[0],Reset;",
     // Six game buttons: SSV's P1/P2 ports carry B1-B3 and the
     // $500008 window carries B4-B6.
-    "J1,Fire,Jump,Button 3,Button 4,Button 5,Button 6,Start,Coin,Service,Test;",
+    "J1,Fire,Jump,Button 3,Button 4,Button 5,Button 6,Coin,Start,Service,Test;",
     "V,v",`BUILD_DATE
 };
 
@@ -581,15 +581,19 @@ wire [11:0] optional_coord_y = 12'h800 + (12'($signed(analog_y)) <<< 3);
 wire [7:0] optional_paddle = 8'h80 + 8'($signed(analog_x));
 
 wire test_button = status[6] | joy_p1[13] | joy_p2[13];
-// Bit 12 is Start (read directly by ssv_input_ports.sv's player_port() as the
-// last bit of the P1/P2 port). Wiring service_button to the same bit made
-// pressing Service also assert Start in every game. Bit 10 is otherwise
-// unused across every input_layout this core selects (quiz_port uses 4-7,
-// six_button_port uses 7-9, player_port uses 0-6 and 12) -- confirmed by
-// grepping for joy[10]/joy_p1[10]/joy_p2[10] before picking it.
-wire service_button = joy_p1[10] | joy_p2[10];
-wire coin1_button = joy_p1[11];
-wire coin2_button = joy_p2[11];
+// OSD assign-button prompt order for the standard 10-slot layout follows
+// fixed joystick bits per slot position (4..13), not the MRA's <buttons>
+// name text -- see docs/debug/... (2026-08-19 reorder). To get the desired
+// on-screen prompt order Coin,Start,Service,Test, the CORE must read those
+// functions from bits 10,11,12,13 in that same order; Start moved out of
+// player_port() in ssv_input_ports.sv from bit 12 to bit 11 to match (grep
+// that file for the companion change). Bit 12 was Start until this change --
+// wiring service_button to a bit still read as Start elsewhere caused the
+// 2026-08-19 Service/Start cross-firing bug; keep this comment in sync with
+// player_port() if either side is touched again.
+wire coin1_button = joy_p1[10];
+wire coin2_button = joy_p2[10];
+wire service_button = joy_p1[12] | joy_p2[12];
 wire [15:0] system_port;
 wire [15:0] extra_input_port;
 wire core_frame_tick;
