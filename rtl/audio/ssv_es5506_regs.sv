@@ -397,20 +397,27 @@ always_comb begin
         end
     end
     else if (eng_pending) begin
+        // pend_* recorded a decision taken when the transaction was captured.
+        // A host commit landing after that capture but before this replay
+        // would otherwise still be overwritten here -- the same stale-writeback
+        // class of bug the host_fresh_* flags exist to stop, just displaced
+        // into the deferred path. Re-test the flag at the point of use, against
+        // pend_voice (the engine may have moved on to another voice since).
+        // This can only ever drop a write the host has already superseded.
         wr_addr = pend_voice;
-        we_control = pend_control;
-        we_accum = pend_accum;
-        we_lvol = pend_lvol;
-        we_rvol = pend_rvol;
-        we_k1 = pend_k1;
-        we_k2 = pend_k2;
-        we_ecount = pend_ecount;
-        we_o4n1 = pend_o4n1;
-        we_o3n1 = pend_o3n1;
-        we_o3n2 = pend_o3n2;
-        we_o2n1 = pend_o2n1;
-        we_o2n2 = pend_o2n2;
-        we_o1n1 = pend_o1n1;
+        we_control = pend_control && !host_fresh_control[pend_voice];
+        we_accum = pend_accum && !host_fresh_accum[pend_voice];
+        we_lvol = pend_lvol && !host_fresh_lvol[pend_voice];
+        we_rvol = pend_rvol && !host_fresh_rvol[pend_voice];
+        we_k1 = pend_k1 && !host_fresh_k1[pend_voice];
+        we_k2 = pend_k2 && !host_fresh_k2[pend_voice];
+        we_ecount = pend_ecount && !host_fresh_ecount[pend_voice];
+        we_o4n1 = pend_o4n1 && !host_fresh_o4n1[pend_voice];
+        we_o3n1 = pend_o3n1 && !host_fresh_o3n1[pend_voice];
+        we_o3n2 = pend_o3n2 && !host_fresh_o3n2[pend_voice];
+        we_o2n1 = pend_o2n1 && !host_fresh_o2n1[pend_voice];
+        we_o2n2 = pend_o2n2 && !host_fresh_o2n2[pend_voice];
+        we_o1n1 = pend_o1n1 && !host_fresh_o1n1[pend_voice];
         w_control = pend_control_w;
         w_accum = pend_accum_w;
         w_lvol = pend_lvol_w;
@@ -882,6 +889,7 @@ always_ff @(posedge clk) begin
 `ifdef SIMULATION
             if (host_commit && eng_pending && eng_write_any)
                 $fatal(1, "ES5506 writeback skid overflow");
+
 `endif
 
             if (!host_commit && !eng_pending && eng_wr_cr)
