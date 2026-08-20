@@ -17,7 +17,7 @@
   <rom index="3">
     <part>00000000FFFF004001000001000F0400000000AF2C805000000000FD01040400</part>
   </rom>
-  <rom index="0" zip="dynagear.zip">
+  <rom index="0" zip="dynagear.zip" address="0x30000000">
     <!-- program -->
     <interleave output="16">
       <part name="si002-prl.u4" crc="71ba29c6" map="01"/>

@@ -143,6 +143,9 @@ run_one tb_ssv_input_matrix \
 run_one tb_ssv_nvram_bridge \
   rtl/mem/ssv_nvram_bridge.sv verif/tb_ssv_nvram_bridge.sv
 
+run_one tb_ssv_ddr_rom_loader \
+  rtl/mem/ssv_ddr_rom_loader.sv verif/tb_ssv_ddr_rom_loader.sv
+
 run_one tb_ssv_gfx_row_fetch \
   rtl/ssv_pkg.sv rtl/video/ssv_gfx_row_fetch.sv \
   verif/tb_ssv_gfx_row_fetch.sv

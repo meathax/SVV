@@ -17,7 +17,7 @@
   <rom index="3">
     <part>00000000FFFF004001000001000F040000005302EB010A00</part>
   </rom>
-  <rom index="0" zip="vasara2.zip">
+  <rom index="0" zip="vasara2.zip" address="0x30000000">
     <!-- program -->
     <part name="data.u34" crc="493d0103"/>
     <interleave output="16">

@@ -386,7 +386,13 @@ ssv_host_guard u_host_guard (
     // in clk_sys through hps_io and must retain their existing phase.
     .reset_async(RESET), .reset_request(status[0] | buttons[1]),
     .sdram_ready_async(sdram_ready),
-    .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload),
+    // The replay-extended download view, not the raw HPS one: during a DDR3
+    // fast-load replay the guard must keep core_cold_reset held exactly as if
+    // the ioctl stream were still running, or a game switch would release the
+    // core between the real download falling and the first replayed byte
+    // (rom_loaded is still high from the previous game at that point) and the
+    // adaptor's core_cold_reset port gate would deadlock the load.
+    .ioctl_download(loader_ioctl_download), .ioctl_upload(ioctl_upload),
     .ioctl_index(ioctl_index),
     .rom_loaded(rom_loaded),
     .nv_init_done(nv_init_done), .nv_init_busy(nv_init_busy),
@@ -468,7 +474,7 @@ wire  [7:0] ddr_ld_burstcnt;
 wire [28:0] ddr_ld_addr;
 
 ssv_ddr_rom_loader #(.DDR_BASE_BYTES(32'h3000_0000)) u_ddr_rom_loader (
-    .clk(clk_sys), .reset(loader_reset), .video_reset(video_reset),
+    .clk(clk_sys), .reset(loader_reset), .core_cold_reset(core_cold_reset),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
     .loader_wait(ld_ioctl_wait),
@@ -1166,8 +1172,9 @@ screen_rotate u_screen_rotate (
 // clk_ram here advertised unrelated sampling edges for clk_sys-owned payload.
 //
 // DDR3 port arbitration with the ROM-load adaptor (u_ddr_rom_loader above):
-// ddr_ld_acquire is only ever asserted while video_reset holds screen_rotate
-// idle (see ssv_ddr_rom_loader.sv), so this reduces to the original direct
+// ddr_ld_acquire is only ever asserted while core_cold_reset holds ssv_core's
+// video timing -- and with it screen_rotate's write stream -- idle (see
+// ssv_ddr_rom_loader.sv), so this reduces to the original direct
 // screen_rotate wiring whenever a load isn't in flight. The adaptor is
 // read-only -- it never drives DIN and DDRAM_WE is forced low while it owns
 // the port so a stale screen_rotate write can never land during a load.

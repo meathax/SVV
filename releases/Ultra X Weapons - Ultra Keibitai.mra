@@ -19,7 +19,7 @@
   <rom index="3">
     <part>00000000FFFF004001000001000F04000001AC8E284004000000E23C03400F00</part>
   </rom>
-  <rom index="0" zip="ultrax.zip">
+  <rom index="0" zip="ultrax.zip" address="0x30000000">
     <!-- program -->
     <interleave output="16">
       <part name="71047-11.u64" crc="593b2678" map="01"/>

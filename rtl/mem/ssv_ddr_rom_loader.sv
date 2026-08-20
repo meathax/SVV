@@ -30,23 +30,26 @@
 //     ioctl_dout inputs with no changes to ssv_rom_loader itself.
 //
 // DDR3 port ownership: ddr_acquire is only ever asserted while the caller's
-// video_reset is also asserted (AND'd in here, not left to the caller to
-// remember). screen_rotate is the only other DDRAM_* consumer in this core
-// and is not producing meaningful framebuffer traffic while video is held
-// in reset, so acquiring the port during that window cannot contend with a
-// live rotate transaction. If video_reset is not asserted when a
-// address-mode index-0 download completes (should not happen -- ROM load
-// only ever happens while the core is held in reset -- but this is a
-// hardware-visible DDR3 port-sharing change and is called out explicitly
-// per the project's hardware-hazard rules), this module simply never
-// acquires the port and the load stalls (rom_loaded never asserts, LED_USER
-// stays lit) rather than silently corrupting screen_rotate's traffic.
+// core_cold_reset is also asserted (AND'd in here, not left to the caller to
+// remember). screen_rotate is the only other DDRAM_* consumer in this core,
+// and its write traffic is driven entirely by the DE/sync stream out of
+// ssv_core's video timing, which core_cold_reset holds in reset -- so while
+// the gate is high, rotate cannot start a transaction and acquiring the port
+// cannot contend with one. core_cold_reset is the right gate (an earlier
+// revision used video_reset, which ssv_host_guard only asserts for PLL loss
+// or an explicit host reset -- it is LOW during a normal MRA load, so the
+// adaptor could never acquire the port and the load hung with rom_loaded
+// low). core_cold_reset is guaranteed high for the whole replay because the
+// guard folds ~rom_loaded into it, and rom_loaded stays low until
+// ssv_rom_loader has consumed the final replayed byte. If the gate ever
+// dropped mid-load anyway, this module releases the port and stalls
+// (LED_USER stays lit) rather than silently corrupting rotate traffic.
 module ssv_ddr_rom_loader #(
     parameter [31:0] DDR_BASE_BYTES = 32'h3000_0000  // must match the MRA's address=
 )(
     input                clk,
     input                reset,
-    input                video_reset,   // DDR3 port may only be acquired while this is high
+    input                core_cold_reset, // DDR3 port may only be acquired while this is high
 
     // Real HPS ioctl bus (only the index-0 window is acted on).
     input                ioctl_download,
@@ -98,11 +101,22 @@ logic [63:0] buffer;
 wire sel = (ioctl_index == ROM_INDEX);
 
 assign ddr_burstcnt  = 8'd1;
-assign replay_active = (state != S_IDLE);
-// AND with video_reset every cycle, not just at the moment of acquisition:
-// if video_reset were ever to drop mid-load this releases the port
+// replay_active anticipates the S_IDLE->S_ISSUE transition combinationally
+// instead of waiting for the state register. The caller ORs this into the
+// loader's ioctl_download view AND (via ssv_host_guard) into core_cold_reset;
+// if it only rose a cycle after the real ioctl_download fell, a game switch
+// (rom_loaded still high from the previous game, no ioctl_wr in address mode
+// to clear it) would see core_cold_reset drop for that one cycle, release the
+// core, and -- because this module's port gate is core_cold_reset -- deadlock
+// with the replay pending and the gate permanently low. Anticipating the
+// transition keeps the download view and the reset hold seamless.
+assign replay_active = (state != S_IDLE) ||
+                       (sel && prev_download && !ioctl_download &&
+                        !wr_seen && ioctl_addr != 27'd0);
+// AND with core_cold_reset every cycle, not just at the moment of
+// acquisition: if the gate were ever to drop mid-load this releases the port
 // immediately rather than trusting a stale decision from load-start.
-assign ddr_acquire   = (state != S_IDLE) && video_reset;
+assign ddr_acquire   = (state != S_IDLE) && core_cold_reset;
 
 always_ff @(posedge clk) begin
     if (reset) begin
@@ -140,9 +154,10 @@ always_ff @(posedge clk) begin
             end
 
             S_ISSUE: begin
-                // Only issue once the port is actually granted (video_reset
-                // asserted) and the previous transaction has drained.
-                if (video_reset && !ddr_busy) begin
+                // Only issue once the port is actually granted
+                // (core_cold_reset asserted) and the previous transaction
+                // has drained.
+                if (core_cold_reset && !ddr_busy) begin
                     // 8-byte-aligned word address for the current byte
                     // offset, expressed the same way the top-level's other
                     // DDRAM_ADDR producer (screen_rotate) does: a byte
@@ -157,30 +172,51 @@ always_ff @(posedge clk) begin
                 if (!ddr_busy)
                     ddr_rd <= 1'b0;
                 if (ddr_dout_ready) begin
-                    buffer <= ddr_dout;
-                    state  <= S_DRAIN;
+                    buffer      <= ddr_dout;
+                    // Present the first byte of the word straight away; the
+                    // strobe for it is raised on the next cycle in S_DRAIN.
+                    replay_addr <= offset;
+                    replay_dout <= ddr_dout[7:0];
+                    state       <= S_DRAIN;
                 end
             end
 
             S_DRAIN: begin
-                // One byte per cycle, MSB-first out of the 64-bit word --
-                // this must match the byte order Main used when it wrote
-                // the blob into DDR3 (sequential stream byte 0 is the top
-                // byte of the first 64-bit word), same convention
-                // MiSTer-devel/Arcade-IGSPGM_MiSTer's adaptor uses.
-                // Gated on loader_wait exactly like hps_io gates ioctl_wr
-                // on ioctl_wait for the real bus, so this never outruns
-                // ssv_rom_loader's SDRAM-write pipeline.
-                if (!loader_wait) begin
-                    replay_wr   <= 1'b1;
-                    replay_addr <= offset;
-                    replay_dout <= buffer[63:56];
-                    buffer      <= {buffer[55:0], 8'h00};
+                // One byte per cycle, LSB-first out of the 64-bit word.
+                // Stream byte N of the blob Main placed in DDR3 sits at
+                // ddr_dout[8*(N%8) +: 8]: the DDR3 port is little-endian, as
+                // this core's only other DDRAM_* client shows directly --
+                // sys/arcade_video.v's screen_rotate drives
+                //   DDRAM_BE = ram_addr[2] ? 8'hF0 : 8'h0F;
+                // so byte offsets 0-3 of a word are DIN/DOUT[31:0]. The
+                // adaptor this was ported from indexes the same way
+                // (buffer[(offset[2:0]*8) +: 8] over an unswapped copy of the
+                // read data). Draining from the top of the word instead
+                // reversed every group of eight bytes.
+                //
+                // The strobe is held until ssv_rom_loader actually takes the
+                // byte, rather than being raised one cycle after a loader_wait
+                // sample. The loader has no input buffer -- it accepts on
+                // (ioctl_wr && !busy) and drives ioctl_wait from busy -- so a
+                // strobe landing on a stale sample is dropped outright, and
+                // because the loader pairs bytes by ioctl_addr[0] a single
+                // lost byte mis-pairs the whole rest of the stream.
+                // replay_wr is the registered output, so testing it here means
+                // testing whether the byte was visible on the bus this cycle.
+                replay_wr <= 1'b1;
+                if (replay_wr && !loader_wait) begin
+                    buffer      <= {8'h00, buffer[63:8]};
                     offset      <= offset + 27'd1;
-                    if (offset + 27'd1 == length)
-                        state <= S_IDLE;
-                    else if (offset[2:0] == 3'd7)
-                        state <= S_ISSUE;
+                    replay_addr <= offset + 27'd1;
+                    replay_dout <= buffer[15:8];
+                    if (offset + 27'd1 == length) begin
+                        state     <= S_IDLE;
+                        replay_wr <= 1'b0;
+                    end
+                    else if (offset[2:0] == 3'd7) begin
+                        state     <= S_ISSUE;
+                        replay_wr <= 1'b0;
+                    end
                     // else: stay in S_DRAIN, next byte comes from the
                     // buffer already latched -- no new DDR read needed.
                 end

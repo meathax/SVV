@@ -41,15 +41,22 @@ DESCRIPTOR_FEATURE_OVERRIDES = {
 
 # Sets whose <rom index="0"> element carries address=DDR_FAST_LOAD_ADDR, so
 # MiSTer Main places the ROM blob directly in DDR3 instead of streaming it
-# over ioctl (rtl/mem/ssv_ddr_rom_loader.sv consumes it from there). Deliberately
-# empty: the RTL side is implemented and lints clean, but has no functional
-# simulation coverage (verif/ has no model of DDRAM_DOUT/DDRAM_DOUT_READY read
-# timing) and has not been hardware-verified per
-# ~/.claude/reference/mister-hardware-hazards.md ("hardware-visible changes
-# require hardware verification" -- this touches a top-level DDRAM_* pin and
-# arbitrates it against screen_rotate). Add a setname here only after a
-# focused sim/hardware test of that game's load confirms correct behaviour.
-DDR_FAST_LOAD_SETS = ()
+# over ioctl (rtl/mem/ssv_ddr_rom_loader.sv consumes it from there).
+#
+# Enabled for every supported set on 2026-08-20 after the adaptor gained
+# functional coverage: verif/tb_ssv_ddr_rom_loader.sv models the DDRAM_*
+# read handshake with randomized latency and free-running loader
+# back-pressure, and caught (fixes now in the RTL) an MSB-first byte-order
+# reversal, a dropped-byte wait-handshake race, and a core_cold_reset/
+# video_reset port-gate deadlock. Byte order was independently confirmed
+# against MiSTer-devel/Arcade-IGSPGM_MiSTer's ddr_rom_loader_adaptor
+# (buffer[(offset[2:0]*8) +: 8], LSB-first) and this core's own screen_rotate
+# BE mapping. Still not hardware-verified per
+# ~/.claude/reference/mister-hardware-hazards.md; the first hardware boot of
+# each game should confirm the load completes (LED_USER goes out) and the
+# game matches the ioctl-streamed load. Reverting a set to the legacy path
+# is deleting it from this tuple and regenerating MRAs -- no RTL change.
+DDR_FAST_LOAD_SETS = SUPPORTED_SETS
 DDR_FAST_LOAD_ADDR = "0x30000000"
 
 # Execution scope for the current source-exhaustion/real-game proof pass.
