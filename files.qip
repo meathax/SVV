@@ -51,5 +51,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/upd96050/upd96050_st010.s
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/upd96050/ssv_st010_prg_fetch.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_rom_loader.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_ddr_rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_nvram_bridge.sv
 set_global_assignment -name QIP_FILE rtl/pll/pll.qip

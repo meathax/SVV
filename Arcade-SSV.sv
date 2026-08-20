@@ -429,13 +429,48 @@ ssv_pkg::ssv_cfg_t game_cfg;
 wire               game_cfg_valid;
 wire               game_cfg_commit;
 
+// DDR3 fast-load adaptor for the index-0 ROM stream (see
+// rtl/mem/ssv_ddr_rom_loader.sv). Dormant unless an MRA's index-0 <rom>
+// carries address="0x30000000": with no address= attribute, Main streams
+// data over ioctl as it always has, ddr_replay_active never asserts, and
+// every wire below reduces to the original direct connection to `loader`.
+// UNVERIFIED ON HARDWARE -- see docs/debug/DDR_FAST_ROM_LOAD_STATUS_20260820.md.
+wire        ddr_replay_active, ddr_replay_wr;
+wire [26:0] ddr_replay_addr;
+wire  [7:0] ddr_replay_dout;
+wire        ddr_ld_acquire, ddr_ld_rd;
+wire  [7:0] ddr_ld_burstcnt;
+wire [28:0] ddr_ld_addr;
+
+ssv_ddr_rom_loader #(.DDR_BASE_BYTES(32'h3000_0000)) u_ddr_rom_loader (
+    .clk(clk_sys), .reset(loader_reset), .video_reset(video_reset),
+    .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
+    .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
+    .loader_wait(ld_ioctl_wait),
+    .replay_active(ddr_replay_active), .replay_wr(ddr_replay_wr),
+    .replay_addr(ddr_replay_addr), .replay_dout(ddr_replay_dout),
+    .ddr_acquire(ddr_ld_acquire), .ddr_burstcnt(ddr_ld_burstcnt),
+    .ddr_addr(ddr_ld_addr), .ddr_rd(ddr_ld_rd), .ddr_busy(DDRAM_BUSY),
+    .ddr_dout(DDRAM_DOUT), .ddr_dout_ready(DDRAM_DOUT_READY)
+);
+
+// Only ssv_rom_loader's index-0 path reacts to ioctl_wr/ioctl_addr/
+// ioctl_dout, and ddr_replay_active is only ever high while real
+// ioctl_index==0 traffic is in play (ssv_ddr_rom_loader gates internally on
+// ioctl_index), so muxing all four unconditionally is safe: with replay
+// inactive every one of these equals the raw hps_io signal, unchanged.
+wire        loader_ioctl_download = ioctl_download | ddr_replay_active;
+wire        loader_ioctl_wr       = ddr_replay_active ? ddr_replay_wr   : ioctl_wr;
+wire [26:0] loader_ioctl_addr     = ddr_replay_active ? ddr_replay_addr : ioctl_addr;
+wire  [7:0] loader_ioctl_dout     = ddr_replay_active ? ddr_replay_dout : ioctl_dout;
+
 ssv_rom_loader loader (
     .cfg(game_cfg), .cfg_valid(game_cfg_valid),
     .cfg_commit(game_cfg_commit),
     .clk(clk_sys), .rst(loader_reset), .mem_ready(sdram_ready_sys),
-    .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
-    .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
-    .ioctl_dout(ioctl_dout), .ioctl_wait(ld_ioctl_wait),
+    .ioctl_download(loader_ioctl_download), .ioctl_index(ioctl_index[7:0]),
+    .ioctl_wr(loader_ioctl_wr), .ioctl_addr(loader_ioctl_addr),
+    .ioctl_dout(loader_ioctl_dout), .ioctl_wait(ld_ioctl_wait),
     .sdr_wr_req(ld_wr_req), .sdr_wr_addr(ld_wr_addr),
     .sdr_wr_din(ld_wr_din), .sdr_wr_be(ld_wr_be),
     .sdr_wr_ack(ld_wr_ack), .rom_loaded(rom_loaded),
@@ -1072,13 +1107,20 @@ screen_rotate u_screen_rotate (
 
 // Keep the entire screen_rotate write bundle in its producer domain. Driving
 // clk_ram here advertised unrelated sampling edges for clk_sys-owned payload.
+//
+// DDR3 port arbitration with the ROM-load adaptor (u_ddr_rom_loader above):
+// ddr_ld_acquire is only ever asserted while video_reset holds screen_rotate
+// idle (see ssv_ddr_rom_loader.sv), so this reduces to the original direct
+// screen_rotate wiring whenever a load isn't in flight. The adaptor is
+// read-only -- it never drives DIN and DDRAM_WE is forced low while it owns
+// the port so a stale screen_rotate write can never land during a load.
 assign DDRAM_CLK      = rotate_ddram_clk;
-assign DDRAM_BURSTCNT = rotate_ddram_burstcnt;
-assign DDRAM_ADDR     = rotate_ddram_addr;
+assign DDRAM_BURSTCNT = ddr_ld_acquire ? ddr_ld_burstcnt : rotate_ddram_burstcnt;
+assign DDRAM_ADDR     = ddr_ld_acquire ? ddr_ld_addr     : rotate_ddram_addr;
 assign DDRAM_DIN      = rotate_ddram_din;
-assign DDRAM_BE       = rotate_ddram_be;
-assign DDRAM_WE       = rotate_ddram_we;
-assign DDRAM_RD       = rotate_ddram_rd;
+assign DDRAM_BE       = ddr_ld_acquire ? 8'hFF           : rotate_ddram_be;
+assign DDRAM_WE       = ddr_ld_acquire ? 1'b0            : rotate_ddram_we;
+assign DDRAM_RD       = ddr_ld_acquire ? ddr_ld_rd       : rotate_ddram_rd;
 
 video_freak u_video_freak (
     .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL), .VGA_VS(VGA_VS),
@@ -1098,9 +1140,10 @@ assign AUDIO_MIX = status[47:46];
 // hardware even though debug_status itself is simulation-only.
 assign LED_DISK = {1'b1, renderer_overrun};
 
+// DDRAM_BUSY, DDRAM_DOUT and DDRAM_DOUT_READY are now genuinely consumed by
+// u_ddr_rom_loader above and must not be folded into this sink.
 wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,
-                       DDRAM_BUSY, DDRAM_DOUT,
-                       DDRAM_DOUT_READY, clk_aux};
+                       clk_aux};
 
 endmodule
