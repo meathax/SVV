@@ -57,6 +57,23 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # Raised 2.0 -> 4.0 on 19 Aug 2026: seeds 1/2/6 under 2.0 all miss only
 # sys/ascal's pixel-fetch stage (best seed 2, -0.082 ns). Untried lever per
 # this file's own history; single-variable test against seed 2.
+#
+# 20 Aug 2026: on the post-area-reduction netlist (V60 datapath sharing,
+# DDR3 loader fixes; see s32_v60.sv/ssv_ddr_rom_loader.sv history), swept
+# seed at 4.0 per this file's own "sweep seed instead" policy before
+# touching a fitter option twice: 19 misses only Slow -40C by -0.022 ns
+# (single domain, 2 endpoints); 3 is far worse (-1.522/-1.199 ns, both slow
+# corners); 11 is also worse than 19 (-0.032/-0.116 ns, both slow corners).
+# 19 remains the best measured seed on this netlist. Raised 4.0 -> 6.0 as the
+# untried single-variable lever, back on seed 19: made it WORSE (-0.106 /
+# -0.100 ns, both slow corners fail, vs 4.0's -0.022 ns on -40C only).
+# Confirms this domain is placement-lottery noise, not something effort
+# tuning fixes -- reverted to 4.0. Real lever found instead: sys/sys_top.v's
+# `ifdef MISTER_FB guard only forced PALETTE2 false, leaving ascal's PALETTE
+# generic at its "true" default, which elaborates a dead pal1_mem plus a
+# second copy of the o_acpt4/o_format mux inside the exact failing o_clk
+# stage. Fixed there (see that file's comment); this core's FB_FORMAT is a
+# constant RGB code, so pal1 was never reachable. Retrying fit on 4.0 first.
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
@@ -122,10 +139,17 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # results are stale placement-lottery data, not a like-for-like comparison.
 # Seed 2 on the NEW netlist: -0.397 ns / 100C, -0.569 ns / -40C, single
 # endpoint each corner, both on pll_hdmi|...counter[0].output_counter|divclk
-# (sys/ framework HDMI PLL domain, not core RTL). Seed 19 (flagged above as
-# queued but never measured) is CLEAN on all 4 corners: +0.172 ns / Slow
-# 100C, +0.016 ns / Slow -40C (thin but positive), +2.529 ns / Fast 100C,
-# +2.587 ns / Fast -40C. Kept as the known-good seed for this netlist.
+# (sys/ framework HDMI PLL domain, not core RTL). Seed 19 was CLEAN on that
+# netlist: +0.172 ns / Slow 100C, +0.016 ns / Slow -40C (thin but positive),
+# +2.529 ns / Fast 100C, +2.587 ns / Fast -40C.
+#
+# 20 Aug 2026: netlist changed again (V60 datapath sharing cut ~900 ALMs,
+# DDR3 fast-load fixes). Seed 19 on THIS netlist: Slow 100C +0.064 ns, Fast
+# 100C/-40C both positive, but Slow -40C misses by -0.022 ns / TNS -0.031 ns
+# (2 endpoints), same pll_hdmi divclk domain as always -- another placement-
+# lottery result, not a regression from the area work (which only touched
+# s32_v60 and the DDR3 loader, neither in this clock domain). Sweeping seed
+# per this file's own policy before touching RTL.
 set_global_assignment -name SEED 19
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
