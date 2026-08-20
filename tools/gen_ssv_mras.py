@@ -19,6 +19,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ssv_cfg_block as cfgblk
+import ssv_hiscore
 from ssv_supported_sets import (SUPPORTED_SETS, SUPPORTED_SET_IDS,
                                 DESCRIPTOR_FEATURE_OVERRIDES,
                                 DDR_FAST_LOAD_SETS, DDR_FAST_LOAD_ADDR)
@@ -31,26 +32,26 @@ from ssv_supported_sets import (SUPPORTED_SETS, SUPPORTED_SET_IDS,
 # Test and Service reuse R and L, which is what they mapped to
 # before the widening.
 BUTTONS_DEFAULT = ('Button 1,Button 2,Button 3,Button 4,Button 5,Button 6,'
-                   'Start,Coin,Service,Test',
-                   'A,B,X,Y,L,R,R,L,Start,Select',
+                   'Coin,Start,Service,Test',
+                   'A,B,X,Y,L,R,Select,Start,R,L',
                    6)
 BUTTONS = {
-    'dynagear': ('Jump,Attack,-,-,-,-,Start,Coin,Service,Test',
-                 'A,B,Start,Select,R,L', 2),
-    'cairblad': ('Fire,Bomb,Special,-,-,-,Start,Coin,Service,Test',
-                 'A,B,X,Start,Select,R,L', 3),
-    'vasara': ('Attack,Bomb,Rapid Fire,-,-,-,Start,Coin,Service,Test',
-               'A,B,X,Start,Select,R,L', 3),
-    'vasara2': ('Attack,Vasara Attack,Rapid Fire,-,-,-,Start,Coin,Service,Test',
-                'A,B,X,Start,Select,R,L', 3),
-    'drifto94': ('Brake,Accelerate,-,-,-,-,Start,Coin,Service,Test',
-                 'A,B,Start,Select,R,L', 2),
-    'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Start,Coin,Service,Test',
-                 'A,B,X,Start,Select,R,L', 3),
-    'stmblade': ('Fire,Bomb,-,-,-,-,Start,Coin,Service,Test',
-                 'A,B,Start,Select,R,L', 2),
-    'ultrax': ('Fire,Grenade,Bomb,-,-,-,Start,Coin,Service,Test',
-               'A,B,X,Start,Select,R,L', 3),
+    'dynagear': ('Attack,Jump,-,-,-,-,Coin,Start,Service,Test',
+                 'A,B,Select,Start,R,L', 2),
+    'cairblad': ('Fire,Bomb,Special,-,-,-,Coin,Start,Service,Test',
+                 'A,B,X,Select,Start,R,L', 3),
+    'vasara': ('Attack,Bomb,Rapid Fire,-,-,-,Coin,Start,Service,Test',
+               'A,B,X,Select,Start,R,L', 3),
+    'vasara2': ('Attack,Vasara Attack,Rapid Fire,-,-,-,Coin,Start,Service,Test',
+                'A,B,X,Select,Start,R,L', 3),
+    'drifto94': ('Brake,Accelerate,-,-,-,-,Coin,Start,Service,Test',
+                 'A,B,Select,Start,R,L', 2),
+    'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Coin,Start,Service,Test',
+                 'A,B,X,Select,Start,R,L', 3),
+    'stmblade': ('Fire,Bomb,-,-,-,-,Coin,Start,Service,Test',
+                 'A,B,Select,Start,R,L', 2),
+    'ultrax': ('Fire,Grenade,Bomb,-,-,-,Coin,Start,Service,Test',
+               'A,B,X,Select,Start,R,L', 3),
 }
 
 # SSV_COINAGE_* expansions, from the macro definitions in ssv.cpp.
@@ -551,6 +552,15 @@ def main():
             cfg_failures.append((setname, str(exc)))
         if cfg_bytes:
             out.extend(cfgblk.cfg_rom_block(cfg_bytes))
+        # hiscore.dat configuration for rtl/hiscore.v.  Only emitted for sets
+        # whose table is in RAM this core's hiscore port can reach; see
+        # tools/ssv_hiscore.py.
+        hs_blob = None
+        if cfg_bytes:
+            hs_blob = ssv_hiscore.config_bytes(
+                setname, flags.get('extra_ram_mode', 0))
+        if hs_blob:
+            out.extend(ssv_hiscore.rom_block(hs_blob))
         if setname in DDR_FAST_LOAD_SETS:
             # See DDR_FAST_LOAD_SETS in tools/ssv_supported_sets.py: Main
             # memcpys the blob into DDR3 at this address instead of
@@ -562,10 +572,18 @@ def main():
             out.append('  <rom index="0" zip="%s">' % zips)
         out.extend(body)
         out.append('  </rom>')
+        # MiSTer Main tracks ONE persistence stream per MRA, so a set gets
+        # either the board NVRAM window (index 8) or the extracted hiscore
+        # table (index 4), never both.  Sets with a reachable hiscore.dat
+        # entry use index 4: stmblade is the only one that also has board
+        # NVRAM, and that window reads back all zeros through attract and
+        # coin-up in MAME 0.289, so nothing is lost by not persisting it.
         nvram_bytes = {1: 2048, 2: 65536}.get(flags.get('nvram_mode', 0))
-        if cfg_bytes and nvram_bytes:
-            # Index 8 is the SSV profile's native persistence stream. Keep it
-            # away from MiSTer's conventional hiscore index 4.
+        if hs_blob:
+            # The extracted score table is saved on index 4 as <MRA>.nvm.
+            out.append('  <nvram index="4" size="%d"/>' %
+                       ssv_hiscore.dump_bytes(setname))
+        elif cfg_bytes and nvram_bytes:
             out.append('  <nvram index="8" size="%d"/>' % nvram_bytes)
         if dip_lines:
             out.append('  <switches default="%s" base="16">' % default)

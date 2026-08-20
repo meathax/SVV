@@ -112,7 +112,9 @@ localparam CONF_STR = {
     "O[5:3],Video Fx,None,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
     "O[47:46],Stereo Mix,None,25%,50%,100%;",
     "O[6],Service Mode,Off,On;",
-    "H1O[48],Autosave Hiscores,Off,On;",
+    // Default On: the option bit reads 0 until the user changes it, so the
+    // enabled state is the first entry and the wire below is inverted.
+    "H1O[48],Autosave Hiscores,On,Off;",
     // Flip Screen, Demo Sounds, Difficulty, Lives, Free Play, Health and both
     // coinage nibbles are DIP switches and live in the MRA's <switches> block.
     // The framework only renders that as an OSD page when CONF_STR carries the
@@ -193,9 +195,12 @@ wire        video_rotated;
 // High score save/load nets. The module itself is instantiated further down,
 // next to ssv_core; these are declared here because hps_io and ssv_core both
 // sit above it and both connect to them. See that instance for the mapping.
-wire [15:0] hs_addr;
+// 18 bits: $000000-$00ffff is the block-RAM main RAM and $010000-$03ffff is
+// the SDRAM-backed extra work RAM that carries twineag2/ultrax score tables.
+wire [17:0] hs_addr;
 wire  [7:0] hs_data_to_ram, hs_data_from_ram;
-wire        hs_ram_write, hs_configured;
+wire        hs_ram_write, hs_configured, hs_ram_ready;
+wire        hs_intent_read, hs_intent_write;
 wire  [7:0] hs_data_to_hps;
 wire        hs_upload, hs_upload_req;
 
@@ -279,13 +284,33 @@ wire [7:0] ioctl_data_to_hps = (ioctl_index[7:0] == 8'd8)
 wire [14:0] hs_word_addr = hs_addr[15:1];
 wire [15:0] hs_word_din  = {hs_data_to_ram, hs_data_to_ram};
 wire  [1:0] hs_word_be   = hs_addr[0] ? 2'b10 : 2'b01;
-wire        hs_ram_we    = hs_ram_write;
+// An access above $00ffff belongs to the extra work RAM and must not disturb
+// the aliased main-RAM word that the truncated address would otherwise hit.
+wire        hs_ram_we    = hs_ram_write && !hs_ext_sel;
 wire [15:0] hs_word_dout;
 // The read side is registered inside the RAM, so the byte lane has to be
 // selected with the address that produced the data, not the current one.
 reg  hs_addr0_q;
 always_ff @(posedge clk_sys) hs_addr0_q <= hs_addr[0];
-assign hs_data_from_ram = hs_addr0_q ? hs_word_dout[15:8] : hs_word_dout[7:0];
+wire [7:0] hs_main_from_ram = hs_addr0_q ? hs_word_dout[15:8]
+                                         : hs_word_dout[7:0];
+
+// Extra work RAM ($010000-$03ffff, twineag2/ultrax) lives in SDRAM, so it
+// answers with wait states. hs_ram_ready is what stalls the hiscore module.
+wire        hs_ext_sel, hs_ext_ready;
+wire [7:0]  hs_ext_dout;
+wire        hs_ext_rd_req, hs_ext_rd_ack;
+wire [SDR_AW:3] hs_ext_rd_addr;
+wire [63:0] hs_ext_rd_dout;
+wire        hs_ext_wr_req, hs_ext_wr_ack;
+wire [SDR_AW:1] hs_ext_wr_addr;
+wire [15:0] hs_ext_wr_din;
+wire  [1:0] hs_ext_wr_be;
+
+reg hs_ext_sel_q;
+always_ff @(posedge clk_sys) hs_ext_sel_q <= hs_ext_sel;
+assign hs_data_from_ram = hs_ext_sel_q ? hs_ext_dout : hs_main_from_ram;
+assign hs_ram_ready     = hs_ext_ready;
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .clk_sys(clk_sys), .HPS_BUS(HPS_BUS),
@@ -494,9 +519,8 @@ wire p0_req  = core_p0_req;
 wire [SDR_AW:1] p0_addr = core_p0_addr;
 
 // Graphics row fetch: one 128-bit p2 burst per 16-pixel tile row. p1 (64-bit,
-// 4-word burst) is now unused by this core and is left tied off below -- it is
-// the natural home for a future ES5506 sample line cache, whose worst-case
-// latency is better served by a 13-cycle transaction than p2's 17.
+// 4-word burst) serves the hiscore module's extra-work-RAM line fetches; that
+// traffic exists only while the CPU is paused for a hiscore access.
 wire p2_req, p2_ack;
 wire [SDR_AW:4] p2_addr;
 wire [127:0] p2_dout;
@@ -548,20 +572,49 @@ ssv_nvram_bridge #(
     .sdr_rd_dout(nv_p3_dout), .sdr_rd_ack(nv_p3_ack)
 );
 
+ssv_hs_extram #(
+    .SDR_AW(SDR_AW),
+    .EXTRA_BASE(ssv_pkg::SDR_CPU_RAM_BASE),
+    .CPU_BASE(18'h10000)
+) hs_extram (
+    .clk(clk_sys), .rst(loader_reset),
+    // extra_ram_mode 2 is the $010000-$03ffff window; mode 1 is the $400000
+    // window, which no hiscore.dat entry references.
+    .enable(game_cfg_valid && (game_cfg.extra_ram_mode == 2'd2)),
+    .hs_access(hs_intent_read | hs_intent_write),
+    .hs_addr(hs_addr), .hs_write(hs_ram_write), .hs_din(hs_data_to_ram),
+    .hs_dout(hs_ext_dout), .hs_ready(hs_ext_ready), .hs_sel(hs_ext_sel),
+    .sdr_ready(sdram_ready_sys),
+    .rd_req(hs_ext_rd_req), .rd_addr(hs_ext_rd_addr),
+    .rd_dout(hs_ext_rd_dout), .rd_ack(hs_ext_rd_ack),
+    .wr_req(hs_ext_wr_req), .wr_addr(hs_ext_wr_addr),
+    .wr_din(hs_ext_wr_din), .wr_be(hs_ext_wr_be), .wr_ack(hs_ext_wr_ack)
+);
+
 wire loader_owns_write = ld_wr_req;
 wire nvram_owns_write = !loader_owns_write && nv_wr_req;
+// The CPU is paused for the duration of a hiscore restore, so taking the
+// write port ahead of the core costs it nothing.
+wire hs_ext_owns_write = !loader_owns_write && !nvram_owns_write &&
+                         hs_ext_wr_req;
 
 assign sw_req  = loader_owns_write ? ld_wr_req  :
-                 nvram_owns_write  ? nv_wr_req  : core_wr_req;
+                 nvram_owns_write  ? nv_wr_req  :
+                 hs_ext_owns_write ? hs_ext_wr_req : core_wr_req;
 assign sw_addr = loader_owns_write ? ld_wr_addr :
-                 nvram_owns_write  ? nv_wr_addr : core_wr_addr;
+                 nvram_owns_write  ? nv_wr_addr :
+                 hs_ext_owns_write ? hs_ext_wr_addr : core_wr_addr;
 assign sw_din  = loader_owns_write ? ld_wr_din  :
-                 nvram_owns_write  ? nv_wr_din  : core_wr_din;
+                 nvram_owns_write  ? nv_wr_din  :
+                 hs_ext_owns_write ? hs_ext_wr_din : core_wr_din;
 assign sw_be   = loader_owns_write ? ld_wr_be   :
-                 nvram_owns_write  ? nv_wr_be   : core_wr_be;
-assign ld_wr_ack   = loader_owns_write ? sw_ack : 1'b0;
-assign nv_wr_ack   = nvram_owns_write ? sw_ack : 1'b0;
-assign core_wr_ack = (!loader_owns_write && !nvram_owns_write) ? sw_ack : 1'b0;
+                 nvram_owns_write  ? nv_wr_be   :
+                 hs_ext_owns_write ? hs_ext_wr_be : core_wr_be;
+assign ld_wr_ack     = loader_owns_write ? sw_ack : 1'b0;
+assign nv_wr_ack     = nvram_owns_write ? sw_ack : 1'b0;
+assign hs_ext_wr_ack = hs_ext_owns_write ? sw_ack : 1'b0;
+assign core_wr_ack   = (!loader_owns_write && !nvram_owns_write &&
+                        !hs_ext_owns_write) ? sw_ack : 1'b0;
 
 // Only a completed core write in the exact descriptor-selected physical
 // NVRAM range marks persistence dirty. Loader/zero-fill/index-8 writes do not.
@@ -591,7 +644,8 @@ sdram sdram (
     .wr_req(sw_req), .wr_addr(sw_addr), .wr_din(sw_din),
     .wr_be(sw_be), .wr_ack(sw_ack),
     .p0_req(p0_req), .p0_addr(p0_addr), .p0_dout(p0_dout), .p0_ack(p0_ack),
-    .p1_req(1'b0), .p1_addr('0), .p1_dout(), .p1_ack(),
+    .p1_req(hs_ext_rd_req), .p1_addr(hs_ext_rd_addr),
+    .p1_dout(hs_ext_rd_dout), .p1_ack(hs_ext_rd_ack),
     .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
     .p3_req(nv_p3_req), .p3_addr(nv_p3_addr),
     .p3_dout(nv_p3_dout), .p3_ack(nv_p3_ack),
@@ -737,21 +791,23 @@ ssv_core core (
 // it), so byte address N is the low half of word N>>1 when N is even.
 // ---------------------------------------------------------------------------
 hiscore #(
-    // 16 bits covers the whole of SSV main RAM ($0000-$ffff).
-    .HS_ADDRESSWIDTH(16),
-    // 128 bytes of dump. Dyna Gear's table is 36 (a 4-byte high score plus
-    // four 8-byte entries), so this is generous, and halving it from the
-    // default keeps the two score buffers to one M10K each.
-    .HS_SCOREWIDTH(7),
+    // 18 bits covers SSV main RAM ($000000-$00ffff) plus the extra work RAM at
+    // $010000-$03ffff that twineag2 and ultrax keep their score tables in.
+    .HS_ADDRESSWIDTH(18),
+    // 256 bytes of dump: Vasara 2 has the largest table at 235 bytes
+    // (hiscore.dat vasara2: address $5302, length $eb).
+    .HS_SCOREWIDTH(8),
     .CFG_ADDRESSWIDTH(4)
 ) u_hiscore (
     .clk(clk_sys),
     .reset(core_reset),
     .paused(game_pause),
-    .autosave(status[48]),
-    // Do not trigger the hiscore scan when the OSD opens: that path pauses
-    // the game CPU and can destabilize video/audio synchronization.
-    .OSD_STATUS(1'b0),
+    .autosave(~status[48]),
+    // Opening the OSD is what triggers extraction of the table from game RAM,
+    // and without it nothing is ever saved. It pauses the game CPU for the
+    // length of the scan, which is why it is bound to the OSD rather than to
+    // anything that happens during play.
+    .OSD_STATUS(OSD_STATUS),
 
     .ioctl_upload(hs_upload),
     .ioctl_upload_req(hs_upload_req),
@@ -763,11 +819,12 @@ hiscore #(
     .data_from_hps(ioctl_dout),
     .data_to_hps(hs_data_to_hps),
     .data_from_ram(hs_data_from_ram),
+    .ram_ready(hs_ram_ready),
     .data_to_ram(hs_data_to_ram),
     .ram_address(hs_addr),
     .ram_write(hs_ram_write),
-    .ram_intent_read(),
-    .ram_intent_write(),
+    .ram_intent_read(hs_intent_read),
+    .ram_intent_write(hs_intent_write),
     .pause_cpu(hs_pause),
     .configured(hs_configured)
 );

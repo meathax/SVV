@@ -27,8 +27,12 @@ The core exposes the following MiSTer OSD features:
 - Reset
 - CRT Adjust: CRT Adjust, H-Size, H-Position, and V-Shift
 - Six game buttons, Test, Service, Start, and Coin inputs
-- Autosave Hiscores plumbing where the selected MRA provides a hiscore
-  configuration
+- High score saving on every supported game, enabled by default (OSD:
+  Autosave Hiscores). Six of the eight sets carry a hiscore.dat configuration
+  in their MRA and save the extracted table to `<MRA name>.nvm`; Change Air
+  Blade and Drift Out '94 keep their scores in battery-backed board NVRAM
+  instead, which is saved as its own persistence stream. The table is written
+  back to game RAM at load and re-read when the OSD is opened.
 
 Game-specific DIP switches are supplied by each MRA. Depending on the game,
 these include coinage, flip screen, demo sounds, difficulty, lives, free play,

@@ -53,4 +53,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_ddr_rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_nvram_bridge.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_hs_extram.sv
 set_global_assignment -name QIP_FILE rtl/pll/pll.qip

@@ -65,6 +65,11 @@ module hiscore
 
 	input		[7:0]							data_from_hps,		// Incoming data from HPS ioctl_dout
 	input		[7:0]							data_from_ram,		// Incoming data from game RAM
+	// Wait-state input for game RAM that cannot answer in one cycle (SSV puts
+	// the $010000-$03ffff work RAM of Twin Eagle II / Ultra X in SDRAM).  Tie
+	// high for single-cycle RAM: every state below then behaves exactly as it
+	// did before this input existed.
+	input										ram_ready,			// Game RAM data valid for the current ram_address
 	output	[HS_ADDRESSWIDTH-1:0]	ram_address,		// Address in game RAM to read/write score data
 	output	[7:0]							data_to_hps,		// Data to send to HPS ioctl_din
 	output	[7:0]							data_to_ram,		// Data to send to game RAM
@@ -459,9 +464,15 @@ begin
 						end
 					SM_COMPAREREAD:
 						begin
-							// Setup next address and signal write enable to hiscore buffer
-							buffer_write <= 1'b1;
-							state <= SM_COMPAREDONE;
+							// Setup next address and signal write enable to hiscore buffer.
+							// Hold here until the RAM has produced the byte for the
+							// current address: the buffer captures data_from_ram on the
+							// edge into SM_COMPAREDONE.
+							if (ram_ready == 1'b1)
+							begin
+								buffer_write <= 1'b1;
+								state <= SM_COMPAREDONE;
+							end
 						end
 					SM_COMPAREDONE:
 						begin
@@ -613,7 +624,7 @@ begin
 					SM_CHECKSTARTVAL: // Start check
 						begin
 							// Check for matching start value
-							if(wait_timer != CHECK_HOLD && data_from_ram == start_val)
+							if(wait_timer != CHECK_HOLD && ram_ready == 1'b1 && data_from_ram == start_val)
 							begin
 								// Prepare end check
 								ram_addr <= end_addr;
@@ -641,7 +652,7 @@ begin
 					SM_CHECKENDVAL: // End check
 						begin
 							// Check for matching end value
-							if (wait_timer != CHECK_HOLD & data_from_ram == end_val)
+							if (wait_timer != CHECK_HOLD & ram_ready == 1'b1 & data_from_ram == end_val)
 							begin
 								if (counter == total_entries)
 								begin

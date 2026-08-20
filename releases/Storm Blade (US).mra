@@ -14,6 +14,9 @@
   <rom index="1">
     <part>53030418100103000118440504B0F0000000000000000074</part>
   </rom>
+  <rom index="3">
+    <part>00000000FFFF004001000001000F0400000028D380150000</part>
+  </rom>
   <rom index="0" zip="stmblade.zip">
     <!-- program -->
     <part name="sb-pd0.u26" crc="91c4fbf7"/>
@@ -46,7 +49,7 @@
     <!-- st010 -->
     <part name="st010.bin" crc="aa11ee2d"/>
   </rom>
-  <nvram index="8" size="2048"/>
+  <nvram index="4" size="128"/>
   <switches default="FF,FE" base="16">
     <!-- DSW1 -->
     <dip bits="0,2" name="Coin A" ids="3C/1C,2C/1C,1C/1C,1C/2C,1C/3C,1C/4C,1C/5C,1C/6C" values="5,6,7,4,3,2,1,0"/>
