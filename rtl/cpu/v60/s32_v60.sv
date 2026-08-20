@@ -746,33 +746,59 @@ endfunction
 reg        rf_we0, rf_we1;
 reg [4:0]  rf_waddr0, rf_waddr1;
 reg [31:0] rf_wdata0, rf_wdata1;
-reg [31:0] rf_wmask0, rf_wmask1;
+// The write mask carried only four distinct patterns (full word, low byte,
+// low half, one bit) yet was stored and muxed as two full 32-bit buses fed
+// from ~70 call sites.  Carry a 2-bit kind plus a 5-bit bit index instead and
+// expand to a mask once at the commit loop; same masks, two 7-bit buses.
+localparam [1:0] WK_FULL = 2'd0, WK_BYTE = 2'd1, WK_HALF = 2'd2, WK_BIT = 2'd3;
+reg [1:0]  rf_wkind0, rf_wkind1;
+reg [4:0]  rf_wbit0, rf_wbit1;
+reg [31:0] rf_cmask0, rf_cmask1;
+// sp_push (the SP push address/value) was written out at eleven push sites
+// and synthesized as eleven 32-bit decrementers; r[31] is a constant-index
+// read, so one shared unit costs nothing to route.
+wire [31:0] sp_push = r[31] - 32'd4;
+// rf_rdata_a << ea_dim (the scaled index of the indexed addressing modes) was
+// written out at seven mutually exclusive S_EA_MODE branches and synthesized
+// as seven shift units; same operands every time, so share one.
+wire [31:0] ea_index = rf_rdata_a << ea_dim;
+function automatic [31:0] wkind_mask(input [1:0] k, input [4:0] b);
+    case (k)
+        WK_FULL: wkind_mask = 32'hffff_ffff;
+        WK_BYTE: wkind_mask = 32'h0000_00ff;
+        WK_HALF: wkind_mask = 32'h0000_ffff;
+        default: wkind_mask = 32'h1 << b;
+    endcase
+endfunction
 
 task automatic queue_reg_write(
     input [4:0] rn,
     input [31:0] v,
-    input [31:0] mask
+    input [1:0] kind,
+    input [4:0] bidx
 );
     if (!rf_we0) begin
         rf_we0 = 1'b1;
         rf_waddr0 = rn;
         rf_wdata0 = v;
-        rf_wmask0 = mask;
+        rf_wkind0 = kind;
+        rf_wbit0 = bidx;
     end
     else begin
         rf_we1 = 1'b1;
         rf_waddr1 = rn;
         rf_wdata1 = v;
-        rf_wmask1 = mask;
+        rf_wkind1 = kind;
+        rf_wbit1 = bidx;
     end
 endtask
 
 // merge result into register per dim (SETREG8/16 semantics)
 task automatic setreg(input [4:0] rn, input [31:0] v, input [1:0] d);
     case (d)
-        2'd0: queue_reg_write(rn, v, 32'h0000_00ff);
-        2'd1: queue_reg_write(rn, v, 32'h0000_ffff);
-        default: queue_reg_write(rn, v, 32'hffff_ffff);
+        2'd0: queue_reg_write(rn, v, WK_BYTE, 5'd0);
+        2'd1: queue_reg_write(rn, v, WK_HALF, 5'd0);
+        default: queue_reg_write(rn, v, WK_FULL, 5'd0);
     endcase
 endtask
 
@@ -800,7 +826,7 @@ task automatic write_psw_after_sp(input [31:0] v, input [31:0] sp_now);
             2'd0: l0sp <= sp_now; 2'd1: l1sp <= sp_now;
             2'd2: l2sp <= sp_now; 2'd3: l3sp <= sp_now;
         endcase
-        queue_reg_write(5'd31, pick_stack(v), 32'hffff_ffff);
+        queue_reg_write(5'd31, pick_stack(v), WK_FULL, 5'd0);
     end
     psw_rest <= v;
     f_z  <= v[0];
@@ -814,7 +840,7 @@ task automatic write_psw(input [31:0] v);
     if (((v ^ psw) & 32'h1000_0000) != 0 ||
         (!psw[28] && ((v ^ psw) & 32'h0300_0000) != 0)) begin
         save_stack(psw);
-        queue_reg_write(5'd31, pick_stack(v), 32'hffff_ffff);
+        queue_reg_write(5'd31, pick_stack(v), WK_FULL, 5'd0);
     end
     psw_rest <= v;
     f_z  <= v[0];
@@ -1002,8 +1028,10 @@ else if (ce) begin
     rf_waddr1 = 5'd0;
     rf_wdata0 = 32'd0;
     rf_wdata1 = 32'd0;
-    rf_wmask0 = 32'd0;
-    rf_wmask1 = 32'd0;
+    rf_wkind0 = WK_FULL;
+    rf_wkind1 = WK_FULL;
+    rf_wbit0 = 5'd0;
+    rf_wbit1 = 5'd0;
     irq_ack <= 0;
     nmi_r <= ~nmi_n;
     if (~nmi_n & ~nmi_r) nmi_seen <= 1'b1;
@@ -1238,9 +1266,9 @@ else if (ce) begin
             logic [15:0] bd16;
             bd16 = fb16(1);
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= pc + 3;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             wb_val <= pc + {{16{bd16[15]}}, bd16};
             st <= S_JSR1;
         end
@@ -1268,7 +1296,7 @@ else if (ce) begin
                         ? pc + {{16{bd16[15]}}, bd16} : pc + 4;
                 end
                 else begin
-                    queue_reg_write(fb[1][4:0], rf_rdata_a - 1, 32'hffff_ffff);
+                    queue_reg_write(fb[1][4:0], rf_rdata_a - 1, WK_FULL, 5'd0);
                     branch_target = (cond_true(cc4) && (rf_rdata_a - 1) != 0)
                         ? pc + {{16{bd16[15]}}, bd16} : pc + 4;
                 end
@@ -1523,7 +1551,7 @@ else if (ce) begin
         8'h4d, 8'h4e, 8'h4f: begin instflags <= fb[1]; cls <= C_F12; st <= S_IF2; end // CHKA*
         8'h49: begin instflags <= fb[1]; cls <= C_F12; st <= S_IF2; end // CALL
         8'hcc: begin // DISPOSE: SP = FP (R30), pop FP
-            queue_reg_write(5'd31, r[30], 32'hffff_ffff);
+            queue_reg_write(5'd31, r[30], WK_FULL, 5'd0);
             dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[30];
             st <= S_DISP1;
         end
@@ -1747,14 +1775,14 @@ else if (ce) begin
             end
             3'd4: begin             // Autoincrement
                 ea_addr <= rf_rdata_a;
-                queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), 32'hffff_ffff);
+                queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), WK_FULL, 5'd0);
                 ea_len <= 5'd1;
                 if (ea_want_addr) st <= S_EA_DONE;
                 else              st <= S_EA_VAL;
             end
             3'd5: begin             // Autodecrement
                 ea_addr <= rf_rdata_a - dim_step(ea_dim);
-                queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), 32'hffff_ffff);
+                queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), WK_FULL, 5'd0);
                 ea_len <= 5'd1;
                 if (ea_want_addr) st <= S_EA_DONE;
                 else              st <= S_EA_VAL;
@@ -1763,13 +1791,13 @@ else if (ce) begin
                 case (modval2[7:5])
                 3'd0, 3'd1, 3'd2: begin // Displacement indexed: [reg2+disp] + reg1*size
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
-                    ea_addr <= rf_rdata_b + d1t + (rf_rdata_a << ea_dim);
+                    ea_addr <= rf_rdata_b + d1t + ea_index;
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
                     if (ea_want_addr) st <= S_EA_DONE;
                     else              st <= S_EA_VAL;
                 end
                 3'd3: begin            // Register indirect indexed
-                    ea_addr <= rf_rdata_b + (rf_rdata_a << ea_dim);
+                    ea_addr <= rf_rdata_b + ea_index;
                     ea_len  <= 5'd2;
                     if (ea_want_addr) st <= S_EA_DONE;
                     else              st <= S_EA_VAL;
@@ -1778,7 +1806,7 @@ else if (ce) begin
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
                     dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                     dbus_addr <= rf_rdata_b + d1t;
-                    ea_addr <= (rf_rdata_a << ea_dim);  // index added after deref
+                    ea_addr <= ea_index;  // index added after deref
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
                     st <= S_EA_IND2;
                 end
@@ -1789,14 +1817,14 @@ else if (ce) begin
                     else case (modval2[3:0])
                     4'h0, 4'h1, 4'h2: begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
-                        ea_addr <= pc + d1t + (rf_rdata_a << ea_dim);
+                        ea_addr <= pc + d1t + ea_index;
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
                         if (ea_want_addr) st <= S_EA_DONE;
                         else              st <= S_EA_VAL;
                     end
                     4'h3: begin
                         d1t = fb32(ea_ofs+2);
-                        ea_addr <= d1t + (rf_rdata_a << ea_dim);
+                        ea_addr <= d1t + ea_index;
                         ea_len  <= 5'd6;
                         if (ea_want_addr) st <= S_EA_DONE;
                         else              st <= S_EA_VAL;
@@ -1805,7 +1833,7 @@ else if (ce) begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
                         dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                         dbus_addr <= pc + d1t;
-                        ea_addr <= (rf_rdata_a << ea_dim);
+                        ea_addr <= ea_index;
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
                         st <= S_EA_IND2;
                     end
@@ -1813,7 +1841,7 @@ else if (ce) begin
                         d1t = fb32(ea_ofs+2);
                         dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                         dbus_addr <= d1t;
-                        ea_addr <= (rf_rdata_a << ea_dim);
+                        ea_addr <= ea_index;
                         ea_len  <= 5'd6;
                         st <= S_EA_IND2;
                     end
@@ -1993,8 +2021,8 @@ else if (ce) begin
                 f_s <= product[63];
                 // MAME opMULX/opMULUX leave OV unchanged.
                 if (flag2) begin
-                    queue_reg_write(op2[4:0], product[31:0], 32'hffff_ffff);
-                    queue_reg_write(op2[4:0] + 5'd1, product[63:32], 32'hffff_ffff);
+                    queue_reg_write(op2[4:0], product[31:0], WK_FULL, 5'd0);
+                    queue_reg_write(op2[4:0] + 5'd1, product[63:32], WK_FULL, 5'd0);
                     st <= S_NEXT;
                 end
                 else begin
@@ -2033,8 +2061,8 @@ else if (ce) begin
                 st <= S_MOVD_WL;
             end
             else begin
-                queue_reg_write(xdiv_dst, xdiv_qresult, 32'hffff_ffff);
-                queue_reg_write(xdiv_dst + 5'd1, xdiv_rresult, 32'hffff_ffff);
+                queue_reg_write(xdiv_dst, xdiv_qresult, WK_FULL, 5'd0);
+                queue_reg_write(xdiv_dst + 5'd1, xdiv_rresult, WK_FULL, 5'd0);
                 st <= S_NEXT;
             end
         end
@@ -2194,8 +2222,8 @@ else if (ce) begin
         else if (dack) begin
             dbus_req <= 0; movd_hi <= bus_rdata;
             if (flag2) begin
-                queue_reg_write(op2[4:0],        movd_lo,    32'hffffffff);
-                queue_reg_write(op2[4:0] + 5'd1, bus_rdata,  32'hffffffff);
+                queue_reg_write(op2[4:0],        movd_lo, WK_FULL, 5'd0);
+                queue_reg_write(op2[4:0] + 5'd1, bus_rdata, WK_FULL, 5'd0);
                 st <= S_NEXT;
             end
             else st <= S_MOVD_WL;
@@ -2290,9 +2318,9 @@ else if (ce) begin
     S_CALL1b: begin
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= wb_val;          // return PC
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
         end
         else if (dack) begin           // return-PC push done
             dbus_req <= 0; dbus_we <= 0;
@@ -2305,7 +2333,7 @@ else if (ce) begin
     S_RET1: if (dack) begin
         dbus_req <= 0;
         pc <= bus_rdata;
-        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+        queue_reg_write(5'd31, r[31] + 4, WK_FULL, 5'd0);
         st <= S_RET2;
     end
     S_RET2: begin
@@ -2315,8 +2343,8 @@ else if (ce) begin
         end
         else if (dack) begin
             dbus_req <= 0;
-            queue_reg_write(5'd29, bus_rdata, 32'hffff_ffff); // AP (R29)
-            queue_reg_write(5'd31, r[31] + 4 + wb_val, 32'hffff_ffff);
+            queue_reg_write(5'd29, bus_rdata, WK_FULL, 5'd0); // AP (R29)
+            queue_reg_write(5'd31, r[31] + 4 + wb_val, WK_FULL, 5'd0);
             st <= S_FILL; st_after_fill <= S_DECODE;
         end
     end
@@ -2341,7 +2369,7 @@ else if (ce) begin
     S_RETI3: begin
         // pops (8) + frame-destroy operand (MAME: SP += amout), then the
         // PSW write may bank-switch SP — order matters: adjust THEN switch.
-        queue_reg_write(5'd31, r[31] + 8 + xch_addr, 32'hffff_ffff);
+        queue_reg_write(5'd31, r[31] + 8 + xch_addr, WK_FULL, 5'd0);
         write_psw_after_sp(alu_r, r[31] + 8 + xch_addr);
         pc <= wb_val;
         st <= S_FILL; st_after_fill <= S_DECODE;
@@ -2350,8 +2378,8 @@ else if (ce) begin
     // DISPOSE: FP fetched
     S_DISP1: if (dack) begin
         dbus_req <= 0;
-        queue_reg_write(5'd30, bus_rdata, 32'hffff_ffff); // FP = R30
-        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+        queue_reg_write(5'd30, bus_rdata, WK_FULL, 5'd0); // FP = R30
+        queue_reg_write(5'd31, r[31] + 4, WK_FULL, 5'd0);
         pc <= pc + 1;
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
@@ -2360,7 +2388,7 @@ else if (ce) begin
     S_RSR: if (dack) begin
         dbus_req <= 0;
         pc <= bus_rdata;
-        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+        queue_reg_write(5'd31, r[31] + 4, WK_FULL, 5'd0);
         // Flush the live and retained prefetch windows at the same edge as the
         // popped PC.  pf_epoch invalidates any outstanding old-stream fetch;
         // rsr_rebase_now prevents an acknowledgement coincident with this
@@ -2386,11 +2414,11 @@ else if (ce) begin
             logic [4:0] idx;
             idx = pushm_index(op1);
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             // Mask bit 31 pushes PSW, not r31 (audit R20 V60-11): the old code
             // pushed the SP value there and PSW save/restore was lost.
             dbus_wdata <= (idx == 5'd31) ? psw : rf_rdata_a;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             reg_ptr <= idx;
         end
         else if (dack) begin
@@ -2417,8 +2445,8 @@ else if (ce) begin
             if (reg_ptr == 5'd31)
                 write_psw((psw & 32'hffff_0000) | (bus_rdata & 32'h0000_ffff));
             else
-                queue_reg_write(reg_ptr, bus_rdata, 32'hffff_ffff);
-            queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+                queue_reg_write(reg_ptr, bus_rdata, WK_FULL, 5'd0);
+            queue_reg_write(5'd31, r[31] + 4, WK_FULL, 5'd0);
             op1[reg_ptr] <= 1'b0;
         end
     end
@@ -2457,8 +2485,8 @@ else if (ce) begin
     // PREPARE: push FP, FP=SP, SP-=imm
     S_PREP1: if (dack) begin
         dbus_req <= 0; dbus_we <= 0;
-        queue_reg_write(5'd30, r[31] - 4, 32'hffff_ffff); // FP = R30
-        queue_reg_write(5'd31, r[31] - 4 - op1, 32'hffff_ffff);
+        queue_reg_write(5'd30, sp_push, WK_FULL, 5'd0); // FP = R30
+        queue_reg_write(5'd31, sp_push - op1, WK_FULL, 5'd0);
         st <= S_NEXT;
     end
 
@@ -2565,13 +2593,13 @@ else if (ce) begin
                 // R27=0xFFFFFFFF, and str_src has already reached op1-step.
                 if (subop[0]) begin
                     f_z <= 1'b0;
-                    queue_reg_write(5'd27, 32'hffff_ffff, 32'hffff_ffff);
+                    queue_reg_write(5'd27, 32'hffff_ffff, WK_FULL, 5'd0);
                 end
                 else begin
                     f_z <= 1'b1;
-                    queue_reg_write(5'd27, str_len1, 32'hffff_ffff);
+                    queue_reg_write(5'd27, str_len1, WK_FULL, 5'd0);
                 end
-                queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+                queue_reg_write(5'd28, str_src, WK_FULL, 5'd0);
                 st <= S_NEXT;
             end
             else if (subop[4:0] <= 5'h02) begin
@@ -2584,8 +2612,8 @@ else if (ce) begin
                 logic [4:0]  shf;
                 shf  = cur_op[1] ? 5'd1 : 5'd0;
                 cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
-                queue_reg_write(5'd28, str_len1 + (cmin << shf), 32'hffff_ffff);
-                queue_reg_write(5'd27, str_len2 + (cmin << shf), 32'hffff_ffff);
+                queue_reg_write(5'd28, str_len1 + (cmin << shf), WK_FULL, 5'd0);
+                queue_reg_write(5'd27, str_len2 + (cmin << shf), WK_FULL, 5'd0);
                 if (str_len1 > str_len2)      begin f_s <= 1'b1; f_z <= 1'b0; end
                 else if (str_len2 > str_len1) begin f_s <= 1'b0; f_z <= 1'b0; end
                 else                          begin f_s <= 1'b0; f_z <= 1'b1; end
@@ -2615,9 +2643,8 @@ else if (ce) begin
                     // only at its one-past-the-top byte read (str_cnt==len1+1).
                     f_z <= subop[0] ? (str_cnt == (str_len1 + 32'd1)) : 1'b0;
                     queue_reg_write(5'd27, subop[0] ? (str_cnt - 32'd1)
-                                                    : (str_len1 - str_cnt),
-                                    32'hffff_ffff);
-                    queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+                                                    : (str_len1 - str_cnt), WK_FULL, 5'd0);
+                    queue_reg_write(5'd28, str_src, WK_FULL, 5'd0);
                     st <= S_NEXT;
                 end
                 else begin
@@ -2666,8 +2693,8 @@ else if (ce) begin
                 if (a != b) begin
                     f_z <= 1'b0;
                     f_s <= (a > b);
-                    queue_reg_write(5'd28, str_len1 + (ci << shf), 32'hffff_ffff);
-                    queue_reg_write(5'd27, str_len2 + (ci << shf), 32'hffff_ffff);
+                    queue_reg_write(5'd28, str_len1 + (ci << shf), WK_FULL, 5'd0);
+                    queue_reg_write(5'd27, str_len2 + (ci << shf), WK_FULL, 5'd0);
                     st <= S_NEXT;
                 end
                 else if (subop[4:0] == 5'h02 && (a == fb26 || b == fb26)) begin
@@ -2676,8 +2703,8 @@ else if (ce) begin
                     f_cy <= 1'b0;
                     f_z  <= 1'b0;
                     f_s  <= 1'b0;
-                    queue_reg_write(5'd28, str_len1 + (ci << shf), 32'hffff_ffff);
-                    queue_reg_write(5'd27, str_len2 + (ci << shf), 32'hffff_ffff);
+                    queue_reg_write(5'd28, str_len1 + (ci << shf), WK_FULL, 5'd0);
+                    queue_reg_write(5'd27, str_len2 + (ci << shf), WK_FULL, 5'd0);
                     st <= S_NEXT;
                 end
                 else st <= S_STR_NEXT;               // equal: tail flags set at exhaustion
@@ -2702,7 +2729,7 @@ else if (ce) begin
     S_STR_FILL: begin
         if (str_fi == 0) begin
             if (str_fill_after) begin                // MOVCFU/MOVCFD tail done
-                queue_reg_write(5'd27, str_fr27, 32'hffff_ffff);
+                queue_reg_write(5'd27, str_fr27, WK_FULL, 5'd0);
                 st <= S_NEXT;
             end
             else st <= S_STR_RD;                     // CMPCF: run the compare now
@@ -2787,7 +2814,7 @@ else if (ce) begin
             if (sum != 0 || cyo) f_z <= 1'b0;      // Z sticky-clears only
             resb = bin2bcd(sum[6:0]);
             if (flag2) begin
-                queue_reg_write(op2[4:0], resb, 32'h0000_00ff);
+                queue_reg_write(op2[4:0], resb, WK_BYTE, 5'd0);
                 st <= S_NEXT;
             end
             else begin
@@ -2800,7 +2827,7 @@ else if (ce) begin
                     ({4'b0, op1[7:4]} | dec_pat)};
             if (op1[7:0] != 0) f_z <= 1'b0;
             if (flag2) begin
-                queue_reg_write(op2[4:0], resh, 32'h0000_ffff);
+                queue_reg_write(op2[4:0], resh, WK_HALF, 5'd0);
                 st <= S_NEXT;
             end
             else begin
@@ -2812,7 +2839,7 @@ else if (ce) begin
             resb = {op1[3:0], op1[11:8]};
             if (resb != 0) f_z <= 1'b0;
             if (flag2) begin
-                queue_reg_write(op2[4:0], resb, 32'h0000_00ff);
+                queue_reg_write(op2[4:0], resb, WK_BYTE, 5'd0);
                 st <= S_NEXT;
             end
             else begin
@@ -2893,7 +2920,7 @@ else if (ce) begin
     S_FP_WB: begin
         // flags were set by fp_exec (or the FDIV completion); just store fp_res.
         if (fp_op2_reg) begin
-            queue_reg_write(op2[4:0], fp_res, 32'hffff_ffff);
+            queue_reg_write(op2[4:0], fp_res, WK_FULL, 5'd0);
             st <= S_NEXT;
         end
         else if (!dbus_req) begin
@@ -2978,9 +3005,7 @@ else if (ce) begin
                 bam_off  <= 32'd0;
                 queue_reg_write(
                     modreg,
-                    rf_rdata_a + ((cur_op == 8'h5b) ? 32'd1 : 32'd4),
-                    32'hffff_ffff
-                );
+                    rf_rdata_a + ((cur_op == 8'h5b) ? 32'd1 : 32'd4), WK_FULL, 5'd0);
                 bam_fill_len(5'd1);
                 st <= bam_next();
             end
@@ -2988,9 +3013,7 @@ else if (ce) begin
                 bam_base <= rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4);
                 queue_reg_write(
                     modreg,
-                    rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4),
-                    32'hffff_ffff
-                );
+                    rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4), WK_FULL, 5'd0);
                 bam_off  <= 32'd0;
                 bam_fill_len(5'd1);
                 st <= bam_next();
@@ -3058,7 +3081,7 @@ else if (ce) begin
             default: res = v << (6'd32 - {1'b0, bit_len[4:0]});         // L
         endcase
         if (flag2) begin
-            queue_reg_write(op2[4:0], res, 32'hffff_ffff);
+            queue_reg_write(op2[4:0], res, WK_FULL, 5'd0);
             total_len <= 5'd3 + len1 + len2;
             st <= S_NEXT;
         end
@@ -3148,7 +3171,7 @@ else if (ce) begin
         end
     end
     S_BS_SCHB: begin
-        queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+        queue_reg_write(5'd28, str_src, WK_FULL, 5'd0);
         if (bs_sdata[bs_soff] == subop[1]) begin   // sub 0 finds 0, sub 2 finds 1
             f_z <= 1'b0;
             bit_val <= str_cnt;
@@ -3249,8 +3272,8 @@ else if (ce) begin
         nd = bs_ddata;
         nd[bs_doff] = bs_sdata[bs_soff];
         bs_ddata <= nd;
-        queue_reg_write(5'd28, str_src, 32'hffff_ffff);
-        queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
+        queue_reg_write(5'd28, str_src, WK_FULL, 5'd0);
+        queue_reg_write(5'd27, str_dst, WK_FULL, 5'd0);
         wrap_s = subop[0] ? (bs_soff == 3'd0) : (bs_soff == 3'd7);
         wrap_d = subop[0] ? (bs_doff == 3'd0) : (bs_doff == 3'd7);
         bit_len <= bit_len - 1;
@@ -3334,7 +3357,7 @@ else if (ce) begin
         end
         else if (task_phase == 5 && !task_reloaded) begin
             // Stack fields loaded on prior cycles are now stable.
-            queue_reg_write(5'd31, pick_stack(psw), 32'hffff_ffff);
+            queue_reg_write(5'd31, pick_stack(psw), WK_FULL, 5'd0);
             task_reloaded <= 1'b1;
         end
         else if (task_phase <= 35) begin
@@ -3355,7 +3378,7 @@ else if (ce) begin
             2: l1sp <= bus_rdata;
             3: l2sp <= bus_rdata;
             4: l3sp <= bus_rdata;
-            default: queue_reg_write(task_phase - 5, bus_rdata, 32'hffff_ffff);
+            default: queue_reg_write(task_phase - 5, bus_rdata, WK_FULL, 5'd0);
         endcase
         task_addr <= task_addr + 4;
         task_phase <= task_phase + 1'd1;
@@ -3431,48 +3454,48 @@ else if (ce) begin
     S_EXC_EXTRA: begin
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= exc_extra;
         end
         else if (dack) begin
             dbus_req <= 0; dbus_we <= 0;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             st <= S_EXC_CODE;
         end
     end
     S_EXC_CODE: begin         // push code+size word (trap-class only)
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= exc_code;
         end
         else if (dack) begin
             dbus_req <= 0; dbus_we <= 0;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             st <= S_EXC_PUSH2;
         end
     end
     S_EXC_PUSH2: begin        // push old PSW
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= exc_pushval;
         end
         else if (dack) begin
             dbus_req <= 0; dbus_we <= 0;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             st <= S_EXC_JMP;   // reused as "push PC" state
         end
     end
     S_EXC_JMP: begin          // push return PC (A2: PC+len for TRAP)
         if (!dbus_req) begin
             dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-            dbus_addr <= r[31] - 4;
+            dbus_addr <= sp_push;
             dbus_wdata <= exc_retpc;
         end
         else if (dack) begin
             dbus_req <= 0; dbus_we <= 0;
-            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
             st <= S_EXC_VEC;
         end
     end
@@ -3496,7 +3519,7 @@ else if (ce) begin
     S_POP: if (dack) begin
         dbus_req <= 0;
         if (flag1) begin
-            queue_reg_write(op1[4:0], bus_rdata, 32'hffff_ffff);
+            queue_reg_write(op1[4:0], bus_rdata, WK_FULL, 5'd0);
             st <= S_NEXT;
         end
         else begin
@@ -3504,7 +3527,7 @@ else if (ce) begin
             wb_val <= bus_rdata;
             st <= S_WB_MEM;
         end
-        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
+        queue_reg_write(5'd31, r[31] + 4, WK_FULL, 5'd0);
     end
 
     S_HALT: begin
@@ -3637,10 +3660,12 @@ else if (ce) begin
 
     // Port 1 is applied second so the final queued write retains the original
     // nonblocking-assignment priority when both ports address the same bit.
+    rf_cmask0 = wkind_mask(rf_wkind0, rf_wbit0);
+    rf_cmask1 = wkind_mask(rf_wkind1, rf_wbit1);
     for (int rf_wbit = 0; rf_wbit < 32; rf_wbit = rf_wbit + 1) begin
-        if (rf_we0 && rf_wmask0[rf_wbit])
+        if (rf_we0 && rf_cmask0[rf_wbit])
             r[rf_waddr0][rf_wbit] <= rf_wdata0[rf_wbit];
-        if (rf_we1 && rf_wmask1[rf_wbit])
+        if (rf_we1 && rf_cmask1[rf_wbit])
             r[rf_waddr1][rf_wbit] <= rf_wdata1[rf_wbit];
     end
 end
@@ -3816,7 +3841,7 @@ task automatic movc_finish(input [31:0] idx);
         r28 = op1 + (idx << shf);
         r27 = op2 + (idx << shf);
     end
-    queue_reg_write(5'd28, r28, 32'hffff_ffff);
+    queue_reg_write(5'd28, r28, WK_FULL, 5'd0);
     if (isfill && (str_len1 < str_len2)) begin
         // Stop is never set for a fill opcode, so idx == dest here.  MAME pads
         // the destination tail elements [idx, lenop2) with R26; the down form
@@ -3836,7 +3861,7 @@ task automatic movc_finish(input [31:0] idx);
         st <= S_STR_FILL;
     end
     else begin
-        queue_reg_write(5'd27, r27, 32'hffff_ffff);
+        queue_reg_write(5'd27, r27, WK_FULL, 5'd0);
         st <= S_NEXT;
     end
 endtask
@@ -3862,6 +3887,7 @@ endfunction
 
 task automatic exec_op;
     logic [31:0] a, b, res;
+    logic [31:0] ae, be;
     logic [32:0] wide;
     logic [1:0]  d2;
     d2 = f12_dim2(cur_op);
@@ -3871,6 +3897,13 @@ task automatic exec_op;
     // fact explicit to synthesis and prevent task-local latch inference.
     res  = 32'b0;
     wide = 33'b0;
+    // a, b and d2 are fixed for the whole task, so every dimext(a,d2) in the
+    // case below is the same extender.  Written per call site it was built
+    // sixteen times over -- four in SUB/SUBC alone -- because each copy sits
+    // under a different opcode arm.  Extend once here instead; the arms then
+    // select an already-extended value.  Bit-identical by construction.
+    ae = dimext(a, d2);
+    be = dimext(b, d2);
 
     case (cur_op)
     // ------------ moves ------------
@@ -3909,8 +3942,8 @@ task automatic exec_op;
             movd_lo <= r[op1[4:0]];
             movd_hi <= r[op1[4:0] + 5'd1];
             if (flag2) begin
-                queue_reg_write(op2[4:0],          r[op1[4:0]],          32'hffffffff);
-                queue_reg_write(op2[4:0] + 5'd1,   r[op1[4:0] + 5'd1],   32'hffffffff);
+                queue_reg_write(op2[4:0],          r[op1[4:0]], WK_FULL, 5'd0);
+                queue_reg_write(op2[4:0] + 5'd1,   r[op1[4:0] + 5'd1], WK_FULL, 5'd0);
                 st <= S_NEXT;
             end
             else st <= S_MOVD_WL;   // register -> memory qword
@@ -3920,7 +3953,7 @@ task automatic exec_op;
 
     // ------------ arith ------------
     8'h80, 8'h82, 8'h84: begin      // ADD
-        wide = {1'b0, dimext(b,d2)} + {1'b0, dimext(a,d2)};
+        wide = {1'b0, be} + {1'b0, ae};
         res = wide[31:0];
         f_cy <= (d2==2'd0) ? (({1'b0,b[7:0]}+{1'b0,a[7:0]}) >> 8) != 0 :
                 (d2==2'd1) ? (({1'b0,b[15:0]}+{1'b0,a[15:0]}) >> 16) != 0 :
@@ -3932,7 +3965,7 @@ task automatic exec_op;
         wb_op2(res, d2);
     end
     8'h90, 8'h92, 8'h94: begin      // ADDC
-        wide = {1'b0, dimext(b,d2)} + {1'b0, dimext(a,d2)} + {32'b0, f_cy};
+        wide = {1'b0, be} + {1'b0, ae} + {32'b0, f_cy};
         res = wide[31:0];
         f_cy <= (d2==2'd2) ? wide[32] :
                 (d2==2'd1) ? res[16] : res[8];
@@ -3944,8 +3977,8 @@ task automatic exec_op;
     end
     8'ha8, 8'haa, 8'hac,            // SUB
     8'hb8, 8'hba, 8'hbc: begin      // CMP (no writeback)
-        res = dimext(b,d2) - dimext(a,d2);
-        f_cy <= (dimext(b,d2) < dimext(a,d2));
+        res = be - ae;
+        f_cy <= (be < ae);
         f_ov <= (d2==2'd0) ? ((b[7]^a[7]) & (b[7]^res[7])) :
                 (d2==2'd1) ? ((b[15]^a[15]) & (b[15]^res[15])) :
                              ((b[31]^a[31]) & (b[31]^res[31]));
@@ -3957,11 +3990,11 @@ task automatic exec_op;
         else wb_op2(res, d2);
     end
     8'h98, 8'h9a, 8'h9c: begin      // SUBC
-        res = dimext(b,d2) - dimext(a,d2) - {31'b0, f_cy};
+        res = be - ae - {31'b0, f_cy};
         // 33-bit borrow: the old 32-bit compare wrapped when a+carry overflowed
         // (SUBC.W with a=0xFFFFFFFF, carry=1 read borrow=0); and OV used bit 31
         // for every width, so byte/half OV was constant 0 (audit R20 V60-16).
-        f_cy <= ({1'b0, dimext(b,d2)} < ({1'b0, dimext(a,d2)} + {32'b0, f_cy}));
+        f_cy <= ({1'b0, be} < ({1'b0, ae} + {32'b0, f_cy}));
         f_ov <= (d2==2'd0) ? ((b[7]^a[7]) & (b[7]^res[7])) :
                 (d2==2'd1) ? ((b[15]^a[15]) & (b[15]^res[15])) :
                              ((b[31]^a[31]) & (b[31]^res[31]));
@@ -3969,13 +4002,13 @@ task automatic exec_op;
         wb_op2(res, d2);
     end
     8'h38, 8'h3a, 8'h3c: begin      // NOT
-        res = ~dimext(a,d2);
+        res = ~ae;
         set_zs(res, d2); f_ov <= 0; f_cy <= 0;
         wb_op2(res, d2);
     end
     8'h39, 8'h3b, 8'h3d: begin      // NEG
-        res = 32'd0 - dimext(a,d2);
-        f_cy <= (dimext(a,d2) != 0);
+        res = 32'd0 - ae;
+        f_cy <= (ae != 0);
         f_ov <= sgn(a,d2) & sgn(res,d2);
         set_zs(res, d2);
         wb_op2(res, d2);
@@ -4044,7 +4077,7 @@ task automatic exec_op;
         end
         else begin
             rotc_cnt <= a[7:0];
-            rotc_val <= dimext(b, d2);
+            rotc_val <= be;
             st <= S_ROTC;
         end
     end
@@ -4059,9 +4092,9 @@ task automatic exec_op;
             f_z  <= ~rf_rdata_b[bi];
             f_cy <=  rf_rdata_b[bi];
             case (cur_op)
-                8'h97: queue_reg_write(op2[4:0], 32'hffff_ffff, 32'h1 << bi);
-                8'ha7: queue_reg_write(op2[4:0], 32'h0000_0000, 32'h1 << bi);
-                8'hb7: queue_reg_write(op2[4:0], ~rf_rdata_b, 32'h1 << bi);
+                8'h97: queue_reg_write(op2[4:0], 32'hffff_ffff, WK_BIT, bi);
+                8'ha7: queue_reg_write(op2[4:0], 32'h0000_0000, WK_BIT, bi);
+                8'hb7: queue_reg_write(op2[4:0], ~rf_rdata_b, WK_BIT, bi);
                 default: ;
             endcase
             st <= S_NEXT;
@@ -4088,8 +4121,8 @@ task automatic exec_op;
              (d2==2'd1) ? {{16{a[15]}}, a[15:0]} : a;
         sb = (d2==2'd0) ? {{24{b[7]}}, b[7:0]} :
              (d2==2'd1) ? {{16{b[15]}}, b[15:0]} : b;
-        ma = (mul_signed && sa[31]) ? (~sa + 1'b1) : dimext(a, d2);
-        mb = (mul_signed && sb[31]) ? (~sb + 1'b1) : dimext(b, d2);
+        ma = (mul_signed && sa[31]) ? (~sa + 1'b1) : ae;
+        mb = (mul_signed && sb[31]) ? (~sb + 1'b1) : be;
         mdop <= ma;
         mdacc <= {32'b0, mb};
         md_sign <= mul_signed & (sa[31] ^ sb[31]);
@@ -4098,11 +4131,11 @@ task automatic exec_op;
     end
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5,       // DIV/DIVU
     8'h50, 8'h51, 8'h52, 8'h53, 8'h54, 8'h55: begin // REM/REMU
-        if (dimext(a, d2) == 0) begin
+        if (ae == 0) begin
             // MAME divide-by-zero: destination unchanged and no trap, but Z/S
             // are still set from the (unchanged) destination = the dividend, and
             // OV is cleared (audit R20 V60-8); the old code left flags stale.
-            set_zs(dimext(b, d2), d2);
+            set_zs(be, d2);
             f_ov <= 1'b0;
             st <= S_NEXT;
         end
@@ -4120,11 +4153,11 @@ task automatic exec_op;
             sa = is_signed
                ? ((d2==2'd0) ? {{24{a[7]}},a[7:0]} :
                   (d2==2'd1) ? {{16{a[15]}},a[15:0]} : a)
-               : dimext(a, d2);
+               : ae;
             sb = is_signed
                ? ((d2==2'd0) ? {{24{b[7]}},b[7:0]} :
                   (d2==2'd1) ? {{16{b[15]}},b[15:0]} : b)
-               : dimext(b, d2);
+               : be;
             maga = (is_signed && sa[31]) ? (~sa + 1'b1) : sa;
             magb = (is_signed && sb[31]) ? (~sb + 1'b1) : sb;
             mdop   <= maga;
@@ -4232,10 +4265,10 @@ task automatic exec_op;
     8'h49: begin
         // MAME opCALL: SP-=4; [SP]=AP; AP=op2; SP-=4; [SP]=retPC; PC=op1.
         dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-        dbus_addr <= r[31] - 4;
+        dbus_addr <= sp_push;
         dbus_wdata <= r[29];          // push AP (R29) first
-        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
-        queue_reg_write(5'd29, op2, 32'hffff_ffff); // AP (R29) = op2
+        queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
+        queue_reg_write(5'd29, op2, WK_FULL, 5'd0); // AP (R29) = op2
         wb_val <= pc + 5'd2 + len1 + len2; // return PC, pushed in S_CALL1
         alu_r  <= op1;               // target
         st <= S_CALL1;
@@ -4328,9 +4361,9 @@ task automatic exec_op;
     end
     8'he8, 8'he9: begin // JSR
         dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-        dbus_addr <= r[31] - 4;
+        dbus_addr <= sp_push;
         dbus_wdata <= pc + 5'd1 + len1;
-        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+        queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
         wb_val <= op1;
         st <= S_JSR1;
     end
@@ -4346,9 +4379,9 @@ task automatic exec_op;
     end
     8'hee, 8'hef: begin // PUSH
         dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-        dbus_addr <= r[31] - 4;
+        dbus_addr <= sp_push;
         dbus_wdata <= op1;
-        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+        queue_reg_write(5'd31, sp_push, WK_FULL, 5'd0);
         total_len <= 5'd1 + len1;
         st <= S_PUSH;
     end
@@ -4371,7 +4404,7 @@ task automatic exec_op;
     end
     8'hde, 8'hdf: begin // PREPARE: push FP (R30); FP=SP; SP -= imm
         dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
-        dbus_addr <= r[31] - 4;
+        dbus_addr <= sp_push;
         dbus_wdata <= r[30];
         total_len <= 5'd1 + len1;
         st <= S_PREP1;
@@ -5057,8 +5090,18 @@ task automatic fp_exec;
             r = fp_scale(fp_b, $signed(fp_a[15:0]));
             fp_arith_flags(r); fp_res <= r; fp_finish_write();
         end
-        5'h18: begin r = fp_add(fp_b, fp_a);                  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // ADDFS
-        5'h19: begin r = fp_add(fp_b, fp_a ^ 32'h8000_0000);  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // SUBFS
+        // ADDFS / SUBFS share one fp_add. SUBFS was already nothing but ADDFS
+        // with the addend's sign bit flipped, but writing it as a second call
+        // inlined the whole adder -- unpack, align, normalise, round -- a
+        // second time, because the two calls take different operands and the
+        // synthesiser cannot know the arms are mutually exclusive. Selecting
+        // the operand instead of the adder is the same arithmetic on either
+        // path and halves the largest function in the FP unit.
+        5'h18,
+        5'h19: begin
+            r = fp_add(fp_b, subop[0] ? (fp_a ^ 32'h8000_0000) : fp_a);
+            fp_arith_flags(r); fp_res <= r; fp_finish_write();
+        end
         5'h1a: begin r = fp_mul(fp_b, fp_a);                  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // MULFS
         5'h1b: fp_div_start(fp_b, fp_a);             // DIVFS (iterative)
         default: st <= S_NEXT;
