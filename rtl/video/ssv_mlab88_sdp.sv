@@ -70,7 +70,25 @@ defparam
     ram.outdata_aclr_b = "NONE",
     ram.outdata_reg_b = "UNREGISTERED",
     ram.power_up_uninitialized = "FALSE",
-    ram.ram_block_type = "MLAB",
+    // LOCAL CHANGE (SSV), 20 Aug 2026: MLAB -> M10K. Sixteen of these banks
+    // are instantiated (ssv_line_buffer4.sv), each 88x15 = 1,320 bits, and
+    // each was burning a whole LAB for it -- 48 LABs of pure MLAB site, plus
+    // a soft address decoder/read mux Quartus builds inside every instance
+    // when the block is MLAB (~19 ALUTs each, ~304 total). An M10K holds one
+    // of these with room to spare and has that decode in hard logic, so this
+    // recovers the LABs and the glue ALUTs for 16 M10Ks. Sibling
+    // ssv_mlab240_sdp.sv already uses this identical wrapper shape at M10K.
+    // This is the storage primitive only -- read_during_write_mode_mixed_ports
+    // stays DONT_CARE, which is still valid: line_buffer4's own bypass
+    // registers cover the same-cycle RMW hazard (see the comment above the
+    // `else` branch), not the memory's native mode, so nothing about that
+    // guarantee depends on which primitive backs the array. Do NOT revert to
+    // an RTL-inferred array here instead of this explicit altsyncram
+    // primitive -- ssv_line_buffer4.sv's own history records a measured
+    // 745-830 LAB fitter overflow the last time inference was tried for
+    // arrays this shape (2026-08-19); this changes only which primitive the
+    // already-explicit instantiation targets.
+    ram.ram_block_type = "M10K",
     ram.read_during_write_mode_mixed_ports = "DONT_CARE",
     ram.width_byteena_a = 1;
 `else

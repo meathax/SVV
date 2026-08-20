@@ -260,7 +260,16 @@ localparam CFG_RECORDWIDTH = 40 + CFG_LENGTHBITS;
 localparam CFG_LENGTH_LSB = 24;
 localparam CFG_START_LSB = CFG_LENGTH_LSB + CFG_LENGTHBITS;
 localparam CFG_END_LSB = CFG_START_LSB + 8;
-(* ramstyle = "MLAB, no_rw_check" *)
+// LOCAL CHANGE (SSV), 20 Aug 2026: MLAB -> M10K. 16 words * up to 56 bits is
+// at most 896 bits, well under one M10K's 10,240, but as an MLAB it still
+// costs a whole LAB -- the worst bits-per-LAB ratio of any forced array in
+// this core. The registered-read behaviour the comment above requires is
+// exactly what M10K natively provides; no_rw_check is unaffected (same-
+// address read/write coherency was never guaranteed by either primitive
+// here, per the merge rationale above: writes and reads use the same
+// address but the four fields' write strobes are mutually exclusive with
+// the read path's use in the frame this module runs in).
+(* ramstyle = "M10K, no_rw_check" *)
 reg [CFG_RECORDWIDTH-1:0] config_table [0:(1<<CFG_ADDRESSWIDTH)-1];
 reg [CFG_RECORDWIDTH-1:0] config_q;
 reg [CFG_RECORDWIDTH-1:0] config_stage;
