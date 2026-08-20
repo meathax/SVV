@@ -731,6 +731,21 @@ wire         bob_deint;
 		.PALETTE2("false"),
 	`else
 		`ifndef MISTER_FB_PALETTE
+			// The comment above already covers this generic when MISTER_FB
+			// is undefined, but the arcade cores that define MISTER_FB for
+			// screen_rotate (this core included) still produce an RGB
+			// framebuffer, not 8bpp indexed -- MISTER_FB_PALETTE is left
+			// undefined on purpose (Arcade-SSV.qsf) and FB_FORMAT is a
+			// constant RGB code (arcade_video.v). Only PALETTE2 was forced
+			// false here; PALETTE stayed at ascal's "true" default, so
+			// GenPal1 (ascal.vhd) still elaborated pal1_mem plus a second
+			// copy of the o_acpt4/o_format select mux inside ascal's o_clk
+			// pixel-fetch stage -- the same stage and the same operands as
+			// this design's chronic pll_hdmi Slow-corner setup miss. Forcing
+			// both false here removes an unreachable generate branch; it is
+			// a VHDL generic, not an RTL behaviour change, and does not
+			// touch ascal.vhd itself.
+			.PALETTE("false"),
 			.PALETTE2("false"),
 		`endif
 	`endif
