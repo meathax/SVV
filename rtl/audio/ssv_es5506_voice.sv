@@ -138,7 +138,12 @@ logic [4:0] voice_i;
 localparam int SLOT_TICKS = 16;
 logic [4:0] slot_cnt;
 logic [3:0] filtcount [0:31];
-logic signed [23:0] mix_l, mix_r;
+// 32-bit headroom: up to 32 voices each contributing up to the full 20-bit
+// channel-accumulator range (spec section 6/12) sums to ~2^24.7, and this
+// must never wrap before the end-of-scan saturating clamp -- a wrapped sum
+// is indistinguishable from a much quieter signal, silently wrong rather
+// than loudly clipped.
+logic signed [31:0] mix_l, mix_r;
 logic signed [15:0] s1, s2;
 logic        got_ack;
 logic [7:0]  wait_cnt;
@@ -159,15 +164,32 @@ logic [17:0] proc_p1, proc_p2, proc_p3, proc_p4;
 
 wire stopped = !cr_valid || |(cr & CR_STOP);
 
-function automatic logic [15:0] vol_gain(input logic [15:0] vol);
-    logic [11:0] idx;
+// OTTO Spec Rev 2.3 section 11.6 (p36): the 16-bit filter-4 output is
+// multiplied by 1MMMMMMMM (M = the 8 mantissa bits), the top 20 bits of that
+// 25-bit product are kept, then right-shifted by (15 - exponent). Net:
+// (s16 * {1,mantissa}) >> (20 - exponent). This replaces a two-step form
+// that rounded the gain to an integer before the sample multiply (silently
+// zeroing the contribution for low exponents) and then additionally shifted
+// by >>>13 instead of the spec's per-exponent (20-e) -- a fixed 2-bit-too-
+// much attenuation on top of an already-wrong per-exponent shift, so a
+// single max-volume voice was clipping the 16-bit output by 4x before any
+// other voice was summed in. See docs/ES5506_DATASHEET_AUDIT.md section A.
+function automatic logic signed [31:0] vol_contrib(
+    input logic signed [17:0] s18,
+    input logic [15:0]        vol
+);
     logic [3:0]  e;
     logic [8:0]  m;
+    logic signed [31:0] p;
+    integer shamt;
     begin
-        idx = vol[15:4];
-        e   = idx[11:8];
-        m   = {1'b1, idx[7:0]};
-        vol_gain = 16'((32'(m) << 7) >> (16 - e));
+        e = vol[15:12];
+        m = {1'b1, vol[11:4]};
+        // s18 is filter-4's 18-bit result; [17:2] is the spec's 16-bit
+        // panning-stage input (section 11.4, p32).
+        p = $signed(s18[17:2]) * $signed({1'b0, m});
+        shamt = 20 - {28'd0, e};
+        vol_contrib = p >>> shamt;
     end
 endfunction
 
@@ -219,22 +241,31 @@ function automatic logic signed [17:0] hp(
     end
 endfunction
 
-function automatic logic signed [15:0] lerp(
+function automatic logic signed [17:0] lerp(
     input logic signed [15:0] a,
     input logic signed [15:0] b,
     input logic [31:0] acc
 );
-    // The fraction is 9 bits by construction (acc[10:2]). Keep the
-    // interpolation products in the original 32-bit expression width:
-    // narrowing the unsigned fraction operands makes SystemVerilog size the
-    // multiply before assignment, which truncates negative PCM products and
-    // produces loud static bursts.
+    // The fraction is 9 bits by construction (acc[10:2]) -- OTTO Spec Rev 2.3
+    // section 11.3 (p32): "ACCfr is the 9 fractional bits of the
+    // Accumulator". The accumulator's fractional field is 11 bits (it also
+    // sets frequency resolution) but only the top 9 feed interpolation; 9 is
+    // correct here and MAME's 11-bit fraction is the deviation, not this.
+    //
+    // Section 11.3 also states: "The output of the Interpolator is
+    // maintained at 18-bits when sent to the filters." Taking t[24:9]
+    // rounded the interpolated result to 16-bit resolution before it ever
+    // reached the 18-bit filter datapath, discarding two low bits of
+    // precision on every sample of every voice for the life of the filter
+    // cascade. Taking t[24:7] keeps the same integer scale (the *512
+    // weighting is unchanged) while retaining those two bits. See
+    // docs/ES5506_DATASHEET_AUDIT.md section C.
     logic [8:0] frac;
     logic signed [31:0] t;
     begin
         frac = acc[10:2];
         t = $signed(a) * (32'sd512 - 32'(frac)) + $signed(b) * 32'(frac);
-        lerp = t[24:9];
+        lerp = t[24:7];
     end
 endfunction
 
@@ -404,11 +435,25 @@ always_ff @(posedge clk) begin
                 end
 
                 S_PROC: begin
-                    // Stage 1: lerp + accumulator/loop/IRQ only (no filters).
+                    // Stage 1: lerp + accumulator/loop/IRQ only (filter
+                    // poles are computed in S_POLE12/S_FILT unconditionally
+                    // -- see the note there).
                     proc_active <= 1'b0;
                     proc_accn <= accum;
                     proc_crn <= cr;
-                    proc_xin <= o1n1;
+                    // Stopped/degenerate voices feed zero into the filter
+                    // chain instead of the old x=h trick (which forced
+                    // lp()/hp() to compute a zero delta and freeze the pole
+                    // state exactly where it was). Spec section 5 (p14):
+                    // filter temp registers "are continuously updated even
+                    // when the voice is stopped" -- the voice-setup
+                    // procedure (section 8, p21) writes K1=K2=FFFh and
+                    // relies on live poles draining stale state within four
+                    // sample periods before the next note starts. A frozen
+                    // chain never drains, so every retrigger played through
+                    // the previous note's leftover filter tail. See
+                    // docs/ES5506_DATASHEET_AUDIT.md section B.
+                    proc_xin <= 18'sd0;
                     proc_p1 <= o1n1;
                     proc_p2 <= o2n1;
                     proc_p3 <= o3n1;
@@ -419,7 +464,7 @@ always_ff @(posedge clk) begin
                         // output.  S_START bypassed SDRAM for this case.
                         proc_crn <= cr | 16'h0001;
                     end else if (!stopped) begin
-                        logic signed [15:0] ip;
+                        logic signed [17:0] ip;
                         logic [31:0] accn;
                         logic [15:0] crn;
 
@@ -464,14 +509,19 @@ always_ff @(posedge clk) begin
                         proc_active <= 1'b1;
                         proc_accn <= accn;
                         proc_crn <= crn;
-                        proc_xin <= {{2{ip[15]}}, ip};
+                        proc_xin <= ip;
                     end
                     state <= S_POLE12;
                 end
 
                 S_POLE12: begin
-                    // Stage 2: first two filter poles.
-                    if (proc_active) begin
+                    // Stage 2: first two filter poles. Runs for every voice
+                    // every slot, active or stopped -- see the S_PROC note
+                    // on proc_xin. proc_active still gates whether the
+                    // result is allowed to contribute to the mix and
+                    // whether ACCUM/CR advance; it no longer gates whether
+                    // the filter state itself moves.
+                    begin
                         logic signed [17:0] p1, p2;
                         p1 = lp(proc_xin, k1, o1n1);
                         p2 = lp(p1, k1, o2n1);
@@ -483,7 +533,8 @@ always_ff @(posedge clk) begin
 
                 S_FILT: begin
                     // Stage 3: remaining filter poles (mode-dependent).
-                    if (proc_active) begin
+                    // Unconditional -- see S_POLE12.
+                    begin
                         logic signed [17:0] p3, p4;
                         unique case (cr[9:8])
                             2'b00: begin
@@ -528,30 +579,31 @@ always_ff @(posedge clk) begin
                     eng_k2_w <= k2;
                     eng_ecount_w <= ecount;
 
-                    if (proc_active) begin
-                        logic signed [31:0] aL, aR;
-                        logic [15:0] gL, gR;
+                    // Filter temps are written back for every voice, stopped
+                    // or not -- S_POLE12/S_FILT now compute them
+                    // unconditionally (fed with zero input while stopped),
+                    // and the writeback must follow or the drain in B has
+                    // nowhere to land. See docs/ES5506_DATASHEET_AUDIT.md
+                    // section B.
+                    eng_wr_filt <= 1'b1;
+                    eng_o1n1_w  <= proc_p1;
+                    eng_o2n2_w  <= o2n1;
+                    eng_o2n1_w  <= proc_p2;
+                    eng_o3n2_w  <= o3n1;
+                    eng_o3n1_w  <= proc_p3;
+                    eng_o4n1_w  <= proc_p4;
 
-                        gL = vol_gain(lvol);
-                        gR = vol_gain(rvol);
-                        aL = $signed(proc_p4[17:2]) * $signed({1'b0, gL});
-                        aR = $signed(proc_p4[17:2]) * $signed({1'b0, gR});
-                        // >>>13, not >>>11: MAME normalises the 20-bit
-                        // accumulator to full scale, and this path ran 4x
-                        // hot, hard-clipping every voice at a quarter of
-                        // the usable range.
-                        mix_l <= mix_l + 24'(aL >>> 13);
-                        mix_r <= mix_r + 24'(aR >>> 13);
+                    if (proc_active) begin
+                        // Section A: (s16 * {1,mantissa}) >> (20-exponent)
+                        // per voice, summed into a wide accumulator and
+                        // saturated to the chip's 20-bit channel rail once,
+                        // at end of scan (S_NEXT) -- not attenuated per
+                        // voice here.
+                        mix_l <= mix_l + vol_contrib(proc_p4, lvol);
+                        mix_r <= mix_r + vol_contrib(proc_p4, rvol);
 
                         eng_wr_accum <= 1'b1;
                         eng_accum_w  <= proc_accn;
-                        eng_wr_filt  <= 1'b1;
-                        eng_o1n1_w   <= proc_p1;
-                        eng_o2n2_w   <= o2n1;
-                        eng_o2n1_w   <= proc_p2;
-                        eng_o3n2_w   <= o3n1;
-                        eng_o3n1_w   <= proc_p3;
-                        eng_o4n1_w   <= proc_p4;
                     end
 
                     // CR.IRQ is a per-voice pending bit.  Leave it set while
@@ -569,12 +621,20 @@ always_ff @(posedge clk) begin
                         eng_cr_clr <= cr & ~proc_crn;
                     end
 
+                    // FILTCOUNT free-runs every sample period regardless of
+                    // ECOUNT (OTTO Spec Rev 2.3 section 11.5, p35: the
+                    // "FILTCOUNT = FILTCOUNT + 1" step sits outside the
+                    // "if ECOUNT != 0" guard). Previously it only advanced
+                    // while an envelope was active, so its divide-by-eight
+                    // phase for slow K1/K2 ramps drifted after any envelope
+                    // pause. See docs/ES5506_DATASHEET_AUDIT.md section D.
+                    filtcount[voice_i] <= filtcount[voice_i] + 4'd1;
+
                     // Envelopes advance for stopped and running voices alike.
                     // Slow negative K ramps test the old counter, so the first
                     // step occurs at count zero, then eight, sixteen, ...
                     if (ecount != 9'd0) begin
                         logic signed [16:0] tmp;
-                        filtcount[voice_i] <= filtcount[voice_i] + 4'd1;
                         eng_wr_env <= 1'b1;
                         eng_ecount_w <= ecount - 9'd1;
                         if (lvramp != 8'd0) begin
@@ -618,12 +678,20 @@ always_ff @(posedge clk) begin
                     else begin
                     slot_cnt <= 5'd0;
                     if (voice_i == active_voices) begin
-                        if (mix_l > 24'sh007fff) audio_l <= 16'sh7fff;
-                        else if (mix_l < -24'sh008000) audio_l <= -16'sh8000;
-                        else audio_l <= mix_l[15:0];
-                        if (mix_r > 24'sh007fff) audio_r <= 16'sh7fff;
-                        else if (mix_r < -24'sh008000) audio_r <= -16'sh8000;
-                        else audio_r <= mix_r[15:0];
+                        // Saturate to the chip's 20-bit channel-accumulator
+                        // rail (spec section 6 p14 / section 12 p37: 23-bit
+                        // register = 20 data bits + 3 overflow guard bits,
+                        // saturated at transfer to serial output), then
+                        // shift down to the 16-bit DAC word. The clamp
+                        // bounds are exact multiples of 16, so the shift
+                        // never needs its own separate saturate.
+                        logic signed [31:0] cl, cr_;
+                        cl  = (mix_l > 32'sh0007ffff) ? 32'sh0007ffff
+                            : (mix_l < -32'sh00080000) ? -32'sh00080000 : mix_l;
+                        cr_ = (mix_r > 32'sh0007ffff) ? 32'sh0007ffff
+                            : (mix_r < -32'sh00080000) ? -32'sh00080000 : mix_r;
+                        audio_l <= 16'(cl >>> 4);
+                        audio_r <= 16'(cr_ >>> 4);
                         sample_tick <= 1'b1;
                         voice_i <= 5'd0;
                         mix_l <= '0;

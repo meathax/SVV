@@ -162,7 +162,19 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # lottery result, not a regression from the area work (which only touched
 # s32_v60 and the DDR3 loader, neither in this clock domain). Sweeping seed
 # per this file's own policy before touching RTL.
-set_global_assignment -name SEED 2
+#
+# 21 Aug 2026: netlist changed again (DDR3 fast-load for every supported set).
+# Seed 2 on THIS netlist: Slow 100C -0.167 ns, single endpoint, same pll_hdmi
+# divclk domain as always. Trying seed 19 next -- it was the closest to clean
+# on the immediately preceding netlist (20 Aug: +0.064 ns Slow 100C, only
+# -0.022 ns miss at Slow -40C) -- before sweeping further seeds.
+#
+# Seed 19 on THIS netlist: -0.053 ns Slow 100C, TNS -0.085 ns / 2 endpoints,
+# same pll_hdmi divclk domain -- an improvement over seed 2's -0.167 ns but
+# still failing. Trying seed 3 next (this file's own "only seed with any
+# recorded clean result" note, +0.04 ns pre-cleanup) as the second of the
+# three-seed sweep budget.
+set_global_assignment -name SEED 3
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

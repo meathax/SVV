@@ -486,10 +486,20 @@ always_comb begin
             if (!host_fresh_o1n1[eng_voice]) we_o1n1 = 1'b1;
         end
         if (eng_wr_env) begin
-            if (!host_fresh_lvol[eng_voice])   we_lvol = 1'b1;
-            if (!host_fresh_rvol[eng_voice])   we_rvol = 1'b1;
-            if (!host_fresh_k1[eng_voice])     we_k1 = 1'b1;
-            if (!host_fresh_k2[eng_voice])     we_k2 = 1'b1;
+            // OTTO Spec Rev 2.3 section 11.5 (p35): ECOUNT is checked
+            // "immediately before updating the oscillator" and the whole
+            // group -- LVOL/RVOL/K1/K2 as well as ECOUNT itself -- is
+            // aborted if it is zero. A host write that zeroes ECOUNT for
+            // this voice mid-slot (after the engine's S_START snapshot, so
+            // the engine's own check saw a stale nonzero value) must also
+            // suppress the ramp step on the other four fields, not just
+            // protect ECOUNT's own register from being overwritten.
+            logic ecount_frozen;
+            ecount_frozen = host_fresh_ecount[eng_voice];
+            if (!host_fresh_lvol[eng_voice]   && !ecount_frozen) we_lvol = 1'b1;
+            if (!host_fresh_rvol[eng_voice]   && !ecount_frozen) we_rvol = 1'b1;
+            if (!host_fresh_k1[eng_voice]     && !ecount_frozen) we_k1 = 1'b1;
+            if (!host_fresh_k2[eng_voice]     && !ecount_frozen) we_k2 = 1'b1;
             if (!host_fresh_ecount[eng_voice]) we_ecount = 1'b1;
         end
     end
@@ -866,10 +876,17 @@ always_ff @(posedge clk) begin
                 if (eng_write_any) begin
                     pend_voice <= eng_voice;
                     pend_accum <= eng_wr_accum && !host_fresh_accum[eng_voice];
-                    pend_lvol <= eng_wr_env && !host_fresh_lvol[eng_voice];
-                    pend_rvol <= eng_wr_env && !host_fresh_rvol[eng_voice];
-                    pend_k1 <= eng_wr_env && !host_fresh_k1[eng_voice];
-                    pend_k2 <= eng_wr_env && !host_fresh_k2[eng_voice];
+                    // See the always_comb note above: a host ECOUNT write
+                    // for this voice also aborts the LVOL/RVOL/K1/K2 step,
+                    // not just its own field.
+                    pend_lvol <= eng_wr_env && !host_fresh_lvol[eng_voice] &&
+                        !host_fresh_ecount[eng_voice];
+                    pend_rvol <= eng_wr_env && !host_fresh_rvol[eng_voice] &&
+                        !host_fresh_ecount[eng_voice];
+                    pend_k1 <= eng_wr_env && !host_fresh_k1[eng_voice] &&
+                        !host_fresh_ecount[eng_voice];
+                    pend_k2 <= eng_wr_env && !host_fresh_k2[eng_voice] &&
+                        !host_fresh_ecount[eng_voice];
                     pend_ecount <= eng_wr_env && !host_fresh_ecount[eng_voice];
                     pend_o4n1 <= eng_wr_filt && !host_fresh_o4n1[eng_voice];
                     pend_o3n1 <= eng_wr_filt && !host_fresh_o3n1[eng_voice];
@@ -898,16 +915,20 @@ always_ff @(posedge clk) begin
                     !host_fresh_accum[eng_voice];
                 pend_lvol <= eng_wr_env &&
                     !((voice == eng_voice) && we_lvol) &&
-                    !host_fresh_lvol[eng_voice];
+                    !host_fresh_lvol[eng_voice] &&
+                    !host_fresh_ecount[eng_voice];
                 pend_rvol <= eng_wr_env &&
                     !((voice == eng_voice) && we_rvol) &&
-                    !host_fresh_rvol[eng_voice];
+                    !host_fresh_rvol[eng_voice] &&
+                    !host_fresh_ecount[eng_voice];
                 pend_k1 <= eng_wr_env &&
                     !((voice == eng_voice) && we_k1) &&
-                    !host_fresh_k1[eng_voice];
+                    !host_fresh_k1[eng_voice] &&
+                    !host_fresh_ecount[eng_voice];
                 pend_k2 <= eng_wr_env &&
                     !((voice == eng_voice) && we_k2) &&
-                    !host_fresh_k2[eng_voice];
+                    !host_fresh_k2[eng_voice] &&
+                    !host_fresh_ecount[eng_voice];
                 pend_ecount <= eng_wr_env &&
                     !((voice == eng_voice) && we_ecount) &&
                     !host_fresh_ecount[eng_voice];
