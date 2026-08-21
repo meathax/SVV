@@ -56,6 +56,9 @@ Thumbs.db
 # MAME MCP generated scripts/logs/state (mister-mame-diff skill)
 .mame_mcp/
 
+# AI session debug notes -- not part of the public core repo.
+/docs/
+
 # MISTER-FPGA-AUTOPILOT-V4 START
 .mister/runs/*
 !.mister/runs/.gitkeep
