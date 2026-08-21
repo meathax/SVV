@@ -202,6 +202,11 @@ logic [DESC_WIDTH-1:0] build_last_descriptor;
 logic        build_last_descriptor_valid;
 // After storing the last cache slot, finish its line buckets then stop.
 logic cache_stop_after_bucket;
+// Set when a deadline/capacity abort re-routes the build into the prefix+
+// reindex passes instead of publishing immediately. Suppresses re-triggering
+// the deadline containment (cache_deadline is a level for the tail of a
+// scanline) while those bounded passes finish.
+logic cache_finish_index;
 // One array, not two. Pre-resolving the record removes 40 stored bits per
 // entry and the render-side global/local coordinate network. Keep it as one
 // physical memory: an earlier split packing hint measured eight blocks worse.
@@ -1129,16 +1134,42 @@ always_ff @(posedge clk) begin
         // reindex operation miss the whole window, keep cache_busy asserted
         // throughout visible display, and suppress every line-buffer swap in
         // ssv_core. Apply the containment at every active build phase.
-        if (cache_busy && cache_deadline) begin
+        if (cache_busy && cache_deadline && !cache_finish_index) begin
 `ifdef SIMULATION
             $display("CACHE_OVR deadline state=%0d count=%0d writes=%0d",
                      state, cache_count, cache_write_count);
 `endif
-            cache_count <= cache_write_count;
-            cache_ready <= 1'b1;
             cache_overflow <= 1'b1;
-            cache_busy <= 1'b0;
-            state <= IDLE;
+            // Publishing here used to hand the renderer a torn index: the
+            // list walk's per-line counts belong to THIS frame while the
+            // pooled bases and line_entries[] still belong to the LAST one,
+            // so RENDER walked mismatched pool regions and whole coherent
+            // sprite groups (the HUD, the player) vanished for as long as
+            // the deadline kept firing. Never publish half-built state:
+            //  - aborted during the list walk: the counts are real, so run
+            //    the bounded prefix+reindex passes (240 + writes cycles) and
+            //    publish a consistent, merely truncated, index;
+            //  - aborted during clear/prefix/reindex: the counts themselves
+            //    are torn between frames, so publish an empty frame -- one
+            //    blank sprite layer beats groups rendered from garbage.
+            if ((state == BUILD_GLOBAL_WAIT) || (state == BUILD_GLOBAL_0) ||
+                (state == BUILD_GLOBAL_1) || (state == BUILD_GLOBAL_2) ||
+                (state == BUILD_GLOBAL_3) || (state == BUILD_LOCAL_WAIT) ||
+                (state == BUILD_LOCAL_0) || (state == BUILD_LOCAL_1) ||
+                (state == BUILD_LOCAL_2) || (state == BUILD_LOCAL_3) ||
+                (state == BUILD_EVALUATE) || (state == BUILD_STORE) ||
+                (state == BUILD_BUCKET_READ) || (state == BUILD_BUCKET_WRITE) ||
+                (state == BUILD_ADVANCE)) begin
+                cache_finish_index <= 1'b1;
+                line_count_addr <= 8'd0;
+                state <= BUILD_PREFIX_READ;
+            end
+            else begin
+                cache_count <= '0;
+                cache_ready <= 1'b1;
+                cache_busy <= 1'b0;
+                state <= IDLE;
+            end
         end
         // A CPU write landed in the state this build is reading: the capture
         // is torn between two frames. Abandon and rebuild from IDLE via the
@@ -1175,6 +1206,7 @@ always_ff @(posedge clk) begin
                     cache_ready <= 1'b0;
                     cache_overflow <= 1'b0;
                     cache_stop_after_bucket <= 1'b0;
+                    cache_finish_index <= 1'b0;
                     build_last_descriptor_valid <= 1'b0;
                     cache_busy <= 1'b1;
                     cache_pending <= 1'b0;
@@ -1300,11 +1332,13 @@ always_ff @(posedge clk) begin
                     $display("CACHE_OVR cache_capacity state=%0d count=%0d writes=%0d",
                              state, cache_count, cache_write_count);
 `endif
-                    cache_count <= cache_write_count;
-                    cache_ready <= 1'b1;
                     cache_overflow <= 1'b1;
-                    cache_busy <= 1'b0;
-                    state <= IDLE;
+                    // Same torn-index hazard as the deadline path: the walk
+                    // stops here, but the pooled index must still be built
+                    // before the renderer may see this frame's counts.
+                    cache_finish_index <= 1'b1;
+                    line_count_addr <= 8'd0;
+                    state <= BUILD_PREFIX_READ;
                 end
                 else begin
                     state <= BUILD_ADVANCE;
