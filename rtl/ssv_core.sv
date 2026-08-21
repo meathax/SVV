@@ -117,6 +117,21 @@ module ssv_core #(
     output logic [1:0] coin_lockout,
     output logic       renderer_overrun
     ,output logic       motor_output
+    // Temporary sound-debug taps for ssv_debug_overlay (rtl/debug/
+    // ssv_debug_overlay.sv), unconditional (unlike the debug_* bus below,
+    // which is SIMULATION-only and stripped from synthesis). Remove
+    // alongside the overlay once the ES5506 sound issue is closed.
+    ,output logic [8:0] ovl_hpos
+    ,output logic [8:0] ovl_scanline
+    ,output logic       ovl_sound_commit
+    ,output logic       ovl_irq_promote
+    ,output logic       ovl_voice_writeback
+    ,output logic [4:0] ovl_voice
+    ,output logic       ovl_sample_req
+    ,output logic       ovl_sample_done
+    ,output logic       ovl_sample_tick
+    ,output logic       ovl_sample_underrun
+    ,output logic       ovl_frame_boundary
 `ifdef SIMULATION
     , output logic [31:0] debug_pc
     , output logic [23:0] debug_status
@@ -1597,6 +1612,23 @@ always_ff @(posedge clk_sys) begin
         end
     end
 end
+// Unconditional mirror of the sound-path signals ssv_debug_overlay needs.
+// See the ovl_* port block above -- kept separate from the SIMULATION-only
+// debug_* bus below so the overlay works in a real synthesized RBF build.
+always_comb begin
+    ovl_hpos = hcnt;
+    ovl_scanline = vcnt;
+    ovl_sound_commit = sound_commit;
+    ovl_irq_promote = eng_irq_set;
+    ovl_voice_writeback = eng_wr_accum || eng_wr_cr || eng_wr_filt || eng_wr_env;
+    ovl_voice = eng_voice;
+    ovl_sample_req = sdr_p4_req;
+    ovl_sample_done = sdr_p4_req && sdr_p4_ack;
+    ovl_sample_tick = sound_sample_tick;
+    ovl_sample_underrun = sound_underrun;
+    ovl_frame_boundary = frame_tick;
+end
+
 `ifdef SIMULATION
 logic debug_rst_d;
 logic debug_mainbus_complete_d;
