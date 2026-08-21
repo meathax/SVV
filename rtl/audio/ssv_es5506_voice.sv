@@ -40,7 +40,19 @@ module ssv_es5506_voice (
     output logic        eng_wr_accum,
     output logic [31:0] eng_accum_w,
     output logic        eng_wr_cr,
-    output logic [15:0] eng_cr_w,
+    // CR writeback as set/clear masks over the live register, not a value.
+    // The engine's end-of-sample transition is the chip's own read-modify-
+    // write of STOP0/IRQ/DIR/LPE/BLE/LEI: shipping the whole snapshot-derived
+    // word let a concurrent host CR write and the writeback clobber each
+    // other whichever way the register file arbitrated it. Masks compose:
+    // the host keeps every bit the engine doesn't touch, and the engine's
+    // one-shot transitions (STOP at end, BLE->LEI promotion) always land.
+    // Dropping them was the audible bug: a lost BLE transition leaves the
+    // loop bits armed forever (sound repeats long after its trigger) or
+    // leaves LEI set with an unwrapped accumulator (runs off the end of the
+    // sample bank -- the warped/garbled layer).
+    output logic [15:0] eng_cr_set,
+    output logic [15:0] eng_cr_clr,
     output logic        eng_wr_filt,
     output logic [17:0] eng_o4n1_w,
     output logic [17:0] eng_o3n1_w,
@@ -257,7 +269,8 @@ always_ff @(posedge clk) begin
         eng_wr_env <= 1'b0;
         eng_irq_set <= 1'b0;
         eng_accum_w <= '0;
-        eng_cr_w <= '0;
+        eng_cr_set <= '0;
+        eng_cr_clr <= '0;
         eng_o4n1_w <= '0;
         eng_o3n1_w <= '0;
         eng_o3n2_w <= '0;
@@ -371,7 +384,15 @@ always_ff @(posedge clk) begin
                 end
 
                 S_REQ2: begin
-                    sdr_addr <= sample_address(cfg, cr[15:14], accum) + 1'd1;
+                    // Second interpolation tap. MAME's get_integer_addr(accum,
+                    // 1) adds the +1 to the accumulator's integer field BEFORE
+                    // the 21-bit mask, so at the last word of a bank the tap
+                    // wraps to word 0 of the SAME bank. Adding 1 to the fully
+                    // formed SDRAM address instead escaped into the next 4 MiB
+                    // slot (or past the sample area entirely for the last
+                    // slot). Wrap the integer field first, as MAME does.
+                    sdr_addr <= sample_address(cfg, cr[15:14],
+                                               {accum[31:11] + 21'd1, 11'd0});
                     sdr_req  <= 1'b1;
                     got_ack  <= 1'b0;
                     state    <= S_WAIT2;
@@ -493,7 +514,8 @@ always_ff @(posedge clk) begin
                 S_MIX: begin
                     // Stage 4: volume, mix accumulate, register writebacks.
                     eng_accum_w <= accum;
-                    eng_cr_w <= cr;
+                    eng_cr_set <= '0;
+                    eng_cr_clr <= '0;
                     eng_o1n1_w <= o1n1;
                     eng_o2n1_w <= o2n1;
                     eng_o2n2_w <= o2n2;
@@ -539,10 +561,12 @@ always_ff @(posedge clk) begin
                         eng_irq_set <= 1'b1;
                         eng_irq_voice <= voice_i;
                         eng_wr_cr <= 1'b1;
-                        eng_cr_w <= proc_crn & ~CR_IRQ;
+                        eng_cr_set <= (proc_crn & ~CR_IRQ) & ~cr;
+                        eng_cr_clr <= cr & ~(proc_crn & ~CR_IRQ);
                     end else if (proc_crn != cr) begin
                         eng_wr_cr <= 1'b1;
-                        eng_cr_w <= proc_crn;
+                        eng_cr_set <= proc_crn & ~cr;
+                        eng_cr_clr <= cr & ~proc_crn;
                     end
 
                     // Envelopes advance for stopped and running voices alike.

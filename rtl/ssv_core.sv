@@ -1267,8 +1267,12 @@ wire [7:0] sound_rdata;
 // ES5506 MLAB banks need 2 wait cycles: steal addr, then latch q → read_latch.
 logic [1:0] sound_rd_cnt;
 wire sound_host_we = m_req && m_we && sel_sound && !ack_r && m_be[0];
+// m_be[0] mirrors sound_host_we: MAME maps the ES5506 with umask16(0x00ff),
+// so an odd-address byte read never reaches the device. Without the gate the
+// read still stole the register file's port and, for host_reg 0xE, cleared
+// IRQV where MAME would not.
 wire sound_host_re = m_req && !m_we && sel_sound &&
-                     !ack_r && (sound_rd_cnt == 2'd0);
+                     !ack_r && m_be[0] && (sound_rd_cnt == 2'd0);
 wire sound_irq_n;
 wire sound_commit;
 wire [6:0] sound_commit_page;
@@ -1287,7 +1291,8 @@ wire [31:0] eng_start, eng_end, eng_accum;
 wire [17:0] eng_o4n1, eng_o3n1, eng_o3n2, eng_o2n1, eng_o2n2, eng_o1n1;
 wire        eng_wr_accum, eng_wr_cr, eng_wr_filt, eng_wr_env;
 wire [31:0] eng_accum_w;
-wire [15:0] eng_cr_w, eng_lvol_w, eng_rvol_w, eng_k1_w, eng_k2_w;
+wire [15:0] eng_cr_set, eng_cr_clr;
+wire [15:0] eng_lvol_w, eng_rvol_w, eng_k1_w, eng_k2_w;
 wire [17:0] eng_o4n1_w, eng_o3n1_w, eng_o3n2_w, eng_o2n1_w, eng_o2n2_w, eng_o1n1_w;
 wire [8:0]  eng_ecount_w;
 wire        eng_irq_set;
@@ -1334,7 +1339,7 @@ ssv_es5506_regs sound_registers (
     .eng_o4n1(eng_o4n1), .eng_o3n1(eng_o3n1), .eng_o3n2(eng_o3n2),
     .eng_o2n1(eng_o2n1), .eng_o2n2(eng_o2n2), .eng_o1n1(eng_o1n1),
     .eng_wr_accum(eng_wr_accum), .eng_accum_w(eng_accum_w),
-    .eng_wr_cr(eng_wr_cr), .eng_cr_w(eng_cr_w),
+    .eng_wr_cr(eng_wr_cr), .eng_cr_set(eng_cr_set), .eng_cr_clr(eng_cr_clr),
     .eng_wr_filt(eng_wr_filt),
     .eng_o4n1_w(eng_o4n1_w), .eng_o3n1_w(eng_o3n1_w), .eng_o3n2_w(eng_o3n2_w),
     .eng_o2n1_w(eng_o2n1_w), .eng_o2n2_w(eng_o2n2_w), .eng_o1n1_w(eng_o1n1_w),
@@ -1366,7 +1371,7 @@ ssv_es5506_voice sound_voices (
     .eng_o4n1(eng_o4n1), .eng_o3n1(eng_o3n1), .eng_o3n2(eng_o3n2),
     .eng_o2n1(eng_o2n1), .eng_o2n2(eng_o2n2), .eng_o1n1(eng_o1n1),
     .eng_wr_accum(eng_wr_accum), .eng_accum_w(eng_accum_w),
-    .eng_wr_cr(eng_wr_cr), .eng_cr_w(eng_cr_w),
+    .eng_wr_cr(eng_wr_cr), .eng_cr_set(eng_cr_set), .eng_cr_clr(eng_cr_clr),
     .eng_wr_filt(eng_wr_filt),
     .eng_o4n1_w(eng_o4n1_w), .eng_o3n1_w(eng_o3n1_w), .eng_o3n2_w(eng_o3n2_w),
     .eng_o2n1_w(eng_o2n1_w), .eng_o2n2_w(eng_o2n2_w), .eng_o1n1_w(eng_o1n1_w),

@@ -73,7 +73,12 @@ module ssv_es5506_regs (
     input  logic        eng_wr_accum,
     input  logic [31:0] eng_accum_w,
     input  logic        eng_wr_cr,
-    input  logic [15:0] eng_cr_w,
+    // Engine CR writeback as set/clear masks (see ssv_es5506_voice.sv's
+    // port comment): applied over the live register so the engine's
+    // one-shot transitions and concurrent host CR writes compose instead of
+    // clobbering each other.
+    input  logic [15:0] eng_cr_set,
+    input  logic [15:0] eng_cr_clr,
     input  logic        eng_wr_filt,
     input  logic [17:0] eng_o4n1_w,
     input  logic [17:0] eng_o3n1_w,
@@ -198,18 +203,42 @@ logic [17:0] eng_o1n1_h;
 // per-field masks keep the host authoritative when both update the same field.
 logic        eng_pending;
 logic [4:0]  pend_voice;
-logic        pend_control, pend_accum;
+logic        pend_accum;
 logic        pend_lvol, pend_rvol, pend_k1, pend_k2, pend_ecount;
 logic        pend_o4n1, pend_o3n1, pend_o3n2;
 logic        pend_o2n1, pend_o2n2, pend_o1n1;
-logic [15:0] pend_control_w;
 logic [31:0] pend_accum_w;
 logic [15:0] pend_lvol_w, pend_rvol_w, pend_k1_w, pend_k2_w;
 logic [8:0]  pend_ecount_w;
 logic [17:0] pend_o4n1_w, pend_o3n1_w, pend_o3n2_w;
 logic [17:0] pend_o2n1_w, pend_o2n2_w, pend_o1n1_w;
 
-wire eng_write_any = eng_wr_accum | eng_wr_cr | eng_wr_filt | eng_wr_env;
+wire eng_write_any = eng_wr_accum | eng_wr_filt | eng_wr_env;
+
+// Engine-owned CR bits: STOP0(0), LEI(2), LPE(3), BLE(4), DIR(6), IRQ(7).
+// The engine's end-of-sample transitions touch only these. They are held as
+// per-voice sticky set/clear masks in flops -- never through the shared MLAB
+// write port, so they can never collide with a host commit and can never be
+// dropped. Every CR consumer (engine snapshot, host readback) sees the masks
+// applied combinationally; the masks are flushed into the MLAB at the
+// voice's next snapshot when the port is free, and a host CR write to the
+// voice clears them (the host's later, complete value supersedes the
+// transition, exactly as MAME's serialized write ordering would).
+function automatic [5:0] cr_pack(input [15:0] m);
+    cr_pack = {m[7], m[6], m[4], m[3], m[2], m[0]};
+endfunction
+function automatic [15:0] cr_unpack(input [5:0] m);
+    cr_unpack = {8'd0, m[5], m[4], 1'b0, m[3], m[2], m[1], 1'b0, m[0]};
+endfunction
+function automatic [15:0] cr_apply(input [15:0] v,
+                                   input [5:0] eset, input [5:0] eclr);
+    cr_apply = (v | cr_unpack(eset)) & ~cr_unpack(eclr);
+endfunction
+logic [5:0] cr_eset [32];
+logic [5:0] cr_eclr [32];
+wire  [5:0] cr_eset_ev = cr_eset[eng_voice];
+wire  [5:0] cr_eclr_ev = cr_eclr[eng_voice];
+wire        cr_masks_nz_ev = |{cr_eset_ev, cr_eclr_ev};
 
 // The voice engine is a single sequential state machine: it snapshots one
 // voice's registers at S_START and writes derived state back several ce
@@ -224,7 +253,7 @@ wire eng_write_any = eng_wr_accum | eng_wr_cr | eng_wr_filt | eng_wr_env;
 // snapshot of that voice (eng_snap), and consulted by every engine
 // writeback path before it is allowed to touch the register file. See
 // docs/debug/ES5506_WARPED_NOTES_ROOT_CAUSE_20260819.md.
-logic [31:0] host_fresh_control, host_fresh_accum;
+logic [31:0] host_fresh_accum;
 logic [31:0] host_fresh_lvol, host_fresh_rvol, host_fresh_k1, host_fresh_k2;
 logic [31:0] host_fresh_ecount;
 logic [31:0] host_fresh_o4n1, host_fresh_o3n1, host_fresh_o3n2;
@@ -232,7 +261,6 @@ logic [31:0] host_fresh_o2n1, host_fresh_o2n2, host_fresh_o1n1;
 
 always_ff @(posedge clk) begin
     if (rst) begin
-        host_fresh_control <= '0;
         host_fresh_accum   <= '0;
         host_fresh_lvol    <= '0;
         host_fresh_rvol    <= '0;
@@ -251,7 +279,6 @@ always_ff @(posedge clk) begin
         // assignment in program order wins, so "set" always beats "clear"
         // on a same-cycle race. Never lose a fresh host write.
         if (eng_snap) begin
-            host_fresh_control[eng_voice] <= 1'b0;
             host_fresh_accum[eng_voice]   <= 1'b0;
             host_fresh_lvol[eng_voice]    <= 1'b0;
             host_fresh_rvol[eng_voice]    <= 1'b0;
@@ -266,7 +293,6 @@ always_ff @(posedge clk) begin
             host_fresh_o1n1[eng_voice]    <= 1'b0;
         end
         if (host_commit) begin
-            if (we_control) host_fresh_control[voice] <= 1'b1;
             if (we_accum)   host_fresh_accum[voice]   <= 1'b1;
             if (we_lvol)    host_fresh_lvol[voice]    <= 1'b1;
             if (we_rvol)    host_fresh_rvol[voice]    <= 1'b1;
@@ -283,7 +309,10 @@ always_ff @(posedge clk) begin
     end
 end
 
-assign eng_cr       = eng_hold ? eng_cr_h       : q_control;
+// The engine (and, via the _h snapshot, a held steal cycle) always sees
+// pending CR masks applied -- an unflushed STOP/LEI is real state.
+assign eng_cr       = cr_apply(eng_hold ? eng_cr_h : q_control,
+                               cr_eset_ev, cr_eclr_ev);
 assign eng_cr_valid = (eng_hold ? eng_cr_valid_h : voice_control_valid[eng_voice]) &&
                       !cold_init_active;
 assign eng_fc       = eng_hold ? eng_fc_h       : q_fc;
@@ -328,7 +357,7 @@ always_comb begin
     we_o2n2 = 1'b0;
     we_o1n1 = 1'b0;
     wr_addr = eng_voice;
-    w_control = eng_cr_w;
+    w_control = 16'd0;
     w_fc = 17'd0;
     w_lvol = eng_lvol_w;
     w_lvramp = 8'd0;
@@ -405,7 +434,6 @@ always_comb begin
         // pend_voice (the engine may have moved on to another voice since).
         // This can only ever drop a write the host has already superseded.
         wr_addr = pend_voice;
-        we_control = pend_control && !host_fresh_control[pend_voice];
         we_accum = pend_accum && !host_fresh_accum[pend_voice];
         we_lvol = pend_lvol && !host_fresh_lvol[pend_voice];
         we_rvol = pend_rvol && !host_fresh_rvol[pend_voice];
@@ -418,7 +446,6 @@ always_comb begin
         we_o2n1 = pend_o2n1 && !host_fresh_o2n1[pend_voice];
         we_o2n2 = pend_o2n2 && !host_fresh_o2n2[pend_voice];
         we_o1n1 = pend_o1n1 && !host_fresh_o1n1[pend_voice];
-        w_control = pend_control_w;
         w_accum = pend_accum_w;
         w_lvol = pend_lvol_w;
         w_rvol = pend_rvol_w;
@@ -438,8 +465,18 @@ always_comb begin
         // never the whole writeback -- so an unrelated field on the same
         // voice still commits normally this cycle.
         wr_addr = eng_voice;
+        // CR is deliberately absent here: engine CR updates travel through
+        // the sticky cr_eset/cr_eclr masks above, never this port.
         if (eng_wr_accum && !host_fresh_accum[eng_voice]) we_accum = 1'b1;
-        if (eng_wr_cr    && !host_fresh_control[eng_voice]) we_control = 1'b1;
+        // Flush pending CR masks into the MLAB at the voice's snapshot tick:
+        // rd_addr is on eng_voice so q_control is this voice's live word, the
+        // port is free (host_commit/eng_pending own the earlier branches, and
+        // writebacks never coincide with a snapshot), and after the flush the
+        // stored word equals the adjusted view every reader already saw.
+        if (eng_snap && cr_masks_nz_ev && !cold_init_active) begin
+            we_control = 1'b1;
+            w_control  = cr_apply(q_control, cr_eset_ev, cr_eclr_ev);
+        end
         if (eng_wr_filt) begin
             if (!host_fresh_o4n1[eng_voice]) we_o4n1 = 1'b1;
             if (!host_fresh_o3n1[eng_voice]) we_o3n1 = 1'b1;
@@ -594,8 +631,7 @@ function automatic [31:0] assemble_host_read(
         assemble_host_read = 32'd0;
         if (page < 7'h20) begin
             unique case (regn)
-                4'h0: assemble_host_read = cr_valid
-                    ? {16'd0, control} : 32'h0000_0003;
+                4'h0: assemble_host_read = {16'd0, control};
                 4'h1: assemble_host_read = {15'd0, fc};
                 4'h2: assemble_host_read = {16'd0, lvol};
                 4'h3: assemble_host_read = {16'd0, lvramp, 8'd0};
@@ -619,8 +655,7 @@ function automatic [31:0] assemble_host_read(
         end
         else if (page < 7'h40) begin
             unique case (regn)
-                4'h0: assemble_host_read = cr_valid
-                    ? {16'd0, control} : 32'h0000_0003;
+                4'h0: assemble_host_read = {16'd0, control};
                 4'h1: assemble_host_read = start_a;
                 4'h2: assemble_host_read = end_a;
                 4'h3: assemble_host_read = accum;
@@ -672,6 +707,10 @@ always_ff @(posedge clk) begin
         host_rd_pending  <= 1'b0;
         eng_hold         <= 1'b0;
         eng_pending      <= 1'b0;
+        for (int i = 0; i < 32; i++) begin
+            cr_eset[i] <= '0;
+            cr_eclr[i] <= '0;
+        end
         page_r           <= 7'd0;
         reg_r            <= 4'd0;
         irqv_r           <= 8'h80;
@@ -698,6 +737,40 @@ always_ff @(posedge clk) begin
             // cycle while MLAB q still reflects the host rd_addr (address_reg_b).
             // Dropping hold with steal alone lets eng_* sample host voice data.
             eng_hold        <= host_rd_steal || host_rd_pending;
+
+            // Sticky engine-CR masks. Merge on every engine CR writeback
+            // (pure flops -- no port, no collision, no drop); newest
+            // direction wins per bit. Cleared when they flush into the MLAB
+            // at the voice's snapshot, or when a host CR write to the voice
+            // supersedes them.
+            if (eng_wr_cr) begin
+                cr_eset[eng_voice] <=
+                    (cr_eset[eng_voice] & ~cr_pack(eng_cr_clr)) | cr_pack(eng_cr_set);
+                cr_eclr[eng_voice] <=
+                    (cr_eclr[eng_voice] & ~cr_pack(eng_cr_set)) | cr_pack(eng_cr_clr);
+            end
+            else if (eng_snap && cr_masks_nz_ev && !cold_init_active &&
+                     !host_commit && !eng_pending) begin
+                // Mirrors the combinational flush branch exactly: the write
+                // fired this cycle, so the stored word now equals the
+                // adjusted view and the masks retire.
+                cr_eset[eng_voice] <= '0;
+                cr_eclr[eng_voice] <= '0;
+            end
+            if (host_commit && (commit_reg == 4'h0) && (commit_page < 7'h40) &&
+                !(eng_wr_cr && (commit_page[4:0] == eng_voice))) begin
+                // (The eng_wr_cr exclusion: on an exact same-cycle collision
+                // the engine transition merges and survives the host write --
+                // a one-clock-stale CR bit is recoverable, a dropped BLE->LEI
+                // transition is a permanent loop.)
+                // Host CR write supersedes any pending engine transition for
+                // that voice, exactly as MAME's serialized ordering would --
+                // the transition was visible to every read the host did
+                // before this write (the masks adjust the read paths), so
+                // discarding it now cannot lose information the host lacked.
+                cr_eset[commit_page[4:0]] <= '0;
+                cr_eclr[commit_page[4:0]] <= '0;
+            end
 
             if (host_rd_steal) begin
                 page_r <= current_page;
@@ -732,7 +805,13 @@ always_ff @(posedge clk) begin
                 read_latch <= assemble_host_read(
                     page_r, reg_r,
                     voice_control_valid[page_r[4:0]],
-                    q_control, q_fc, q_lvol, q_lvramp, q_rvol, q_rvramp,
+                    // Pending engine CR masks are real state; a host read-
+                    // modify-write must see them or it re-arms a stopped
+                    // voice with stale loop bits.
+                    cold_init_active ? 16'h0003
+                        : cr_apply(q_control,
+                                   cr_eset[page_r[4:0]], cr_eclr[page_r[4:0]]),
+                    q_fc, q_lvol, q_lvramp, q_rvol, q_rvramp,
                     q_ecount, q_k2, q_k2ramp, q_k1, q_k1ramp,
                     q_start, q_end, q_accum,
                     q_o4n1, q_o3n1, q_o3n2, q_o2n1, q_o2n2, q_o1n1,
@@ -786,7 +865,6 @@ always_ff @(posedge clk) begin
                 eng_pending <= eng_write_any;
                 if (eng_write_any) begin
                     pend_voice <= eng_voice;
-                    pend_control <= eng_wr_cr && !host_fresh_control[eng_voice];
                     pend_accum <= eng_wr_accum && !host_fresh_accum[eng_voice];
                     pend_lvol <= eng_wr_env && !host_fresh_lvol[eng_voice];
                     pend_rvol <= eng_wr_env && !host_fresh_rvol[eng_voice];
@@ -799,7 +877,6 @@ always_ff @(posedge clk) begin
                     pend_o2n1 <= eng_wr_filt && !host_fresh_o2n1[eng_voice];
                     pend_o2n2 <= eng_wr_filt && !host_fresh_o2n2[eng_voice];
                     pend_o1n1 <= eng_wr_filt && !host_fresh_o1n1[eng_voice];
-                    pend_control_w <= eng_cr_w;
                     pend_accum_w <= eng_accum_w;
                     pend_lvol_w <= eng_lvol_w;
                     pend_rvol_w <= eng_rvol_w;
@@ -816,9 +893,6 @@ always_ff @(posedge clk) begin
             end
             else if (host_commit && !eng_pending && eng_write_any) begin
                 pend_voice <= eng_voice;
-                pend_control <= eng_wr_cr &&
-                    !((voice == eng_voice) && we_control) &&
-                    !host_fresh_control[eng_voice];
                 pend_accum <= eng_wr_accum &&
                     !((voice == eng_voice) && we_accum) &&
                     !host_fresh_accum[eng_voice];
@@ -855,7 +929,6 @@ always_ff @(posedge clk) begin
                 pend_o1n1 <= eng_wr_filt &&
                     !((voice == eng_voice) && we_o1n1) &&
                     !host_fresh_o1n1[eng_voice];
-                pend_control_w <= eng_cr_w;
                 pend_accum_w <= eng_accum_w;
                 pend_lvol_w <= eng_lvol_w;
                 pend_rvol_w <= eng_rvol_w;
@@ -869,8 +942,6 @@ always_ff @(posedge clk) begin
                 pend_o2n2_w <= eng_o2n2_w;
                 pend_o1n1_w <= eng_o1n1_w;
                 eng_pending <=
-                    (eng_wr_cr && !((voice == eng_voice) && we_control) &&
-                        !host_fresh_control[eng_voice]) |
                     (eng_wr_accum && !((voice == eng_voice) && we_accum) &&
                         !host_fresh_accum[eng_voice]) |
                     (eng_wr_env && !((voice == eng_voice) &&
@@ -899,8 +970,6 @@ always_ff @(posedge clk) begin
             // flags), and the cold-init sweep deliberately rewrites everything,
             // so both are excluded.
             if (!cold_init_active && !host_commit) begin
-                if (we_control && host_fresh_control[wr_addr])
-                    $fatal(1, "ES5506 engine clobbered fresh host CONTROL, voice %0d", wr_addr);
                 if (we_accum && host_fresh_accum[wr_addr])
                     $fatal(1, "ES5506 engine clobbered fresh host ACCUM, voice %0d", wr_addr);
                 if (we_lvol && host_fresh_lvol[wr_addr])
@@ -929,10 +998,6 @@ always_ff @(posedge clk) begin
 
 `endif
 
-            if (!host_commit && !eng_pending && eng_wr_cr)
-                voice_control_valid[eng_voice] <= 1'b1;
-            if (eng_pending && !host_commit && pend_control)
-                voice_control_valid[pend_voice] <= 1'b1;
         end
 
         if (cold_init_active) begin

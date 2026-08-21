@@ -35,7 +35,8 @@ logic        eng_snap;
 logic        eng_wr_accum;
 logic [31:0] eng_accum_w;
 logic        eng_wr_cr;
-logic [15:0] eng_cr_w;
+logic [15:0] eng_cr_set;
+logic [15:0] eng_cr_clr;
 logic        eng_wr_filt;
 logic [17:0] eng_o4n1_w, eng_o3n1_w, eng_o3n2_w;
 logic [17:0] eng_o2n1_w, eng_o2n2_w, eng_o1n1_w;
@@ -59,7 +60,7 @@ ssv_es5506_regs dut (
     .eng_o4n1(), .eng_o3n1(), .eng_o3n2(),
     .eng_o2n1(), .eng_o2n2(), .eng_o1n1(),
     .eng_wr_accum, .eng_accum_w,
-    .eng_wr_cr, .eng_cr_w,
+    .eng_wr_cr, .eng_cr_set, .eng_cr_clr,
     .eng_wr_filt,
     .eng_o4n1_w, .eng_o3n1_w, .eng_o3n2_w,
     .eng_o2n1_w, .eng_o2n2_w, .eng_o1n1_w,
@@ -179,7 +180,8 @@ initial begin
     eng_wr_accum = 1'b0;
     eng_accum_w = 32'd0;
     eng_wr_cr = 1'b0;
-    eng_cr_w = 16'd0;
+    eng_cr_set = 16'd0;
+    eng_cr_clr = 16'd0;
     eng_wr_filt = 1'b0;
     eng_o4n1_w = 18'd0;
     eng_o3n1_w = 18'd0;
@@ -302,13 +304,37 @@ initial begin
 
     // A deferred control write must mark the deferred voice valid, not the
     // host-selected voice. Exercise a different voice to catch index errors.
+    write_reg(4'hf, 32'h0000_0011);
+    write_reg(4'h0, 32'h0000_0018);      // voice17: running, LPE|BLE
     eng_voice = 5'd17;
-    eng_cr_w  = 16'h8000;
+    eng_cr_set = 16'h0004;               // transwave end: set LEI...
+    eng_cr_clr = 16'h0018;               // ...clear the loop bits
     eng_wr_cr = 1'b1;
     collide_host_engine(4'h1, 32'h3894_3000);
-    write_reg(4'hf, 32'h0000_0011);
+    eng_cr_set = 16'd0;
+    eng_cr_clr = 16'd0;
     read_reg(4'h0, value);
-    expect32(value, 32'h0000_8000, "voice17 deferred CR");
+    expect32(value, 32'h0000_0004, "voice17 CR masks across host collision");
+
+    // The race that shipped broken: the host rewrites CR (a pan-style
+    // update, same running value) AFTER the engine snapshotted the voice but
+    // BEFORE the writeback lands. The old host_fresh_control guard dropped
+    // the engine's whole transwave transition here -- BLE stayed armed and
+    // the sound looped forever. With masks the transition must land on top
+    // of the host's rewrite.
+    write_reg(4'h0, 32'h0000_0018);      // host pan-rewrite, still LPE|BLE
+    repeat (2) @(posedge clk);
+    eng_voice = 5'd17;
+    eng_cr_set = 16'h0004;
+    eng_cr_clr = 16'h0018;
+    eng_wr_cr = 1'b1;
+    @(negedge clk);
+    eng_wr_cr = 1'b0;
+    eng_cr_set = 16'd0;
+    eng_cr_clr = 16'd0;
+    repeat (3) @(posedge clk);
+    read_reg(4'h0, value);
+    expect32(value, 32'h0000_0004, "transwave transition lands after host CR rewrite");
     write_reg(4'h0, 32'h0000_0003);
     write_reg(4'hf, 32'h0000_0030);
     write_reg(4'h3, 32'h3894_3000);
