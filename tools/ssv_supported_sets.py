@@ -36,6 +36,7 @@ SUPPORTED_SET_IDS = {
 DESCRIPTOR_FEATURE_OVERRIDES = {
     "vasara": {"rapid_fire_b3_to_b1": True},
     "vasara2": {"rapid_fire_b3_to_b1": True},
+    "stmblade": {"rapid_fire_b3_to_b1": True},
     "twineag2": {"rapid_fire_b1": True, "rapid_fire_b2": True},
 }
 
@@ -56,7 +57,7 @@ DESCRIPTOR_FEATURE_OVERRIDES = {
 # each game should confirm the load completes (LED_USER goes out) and the
 # game matches the ioctl-streamed load. Reverting a set to the legacy path
 # is deleting it from this tuple and regenerating MRAs -- no RTL change.
-DDR_FAST_LOAD_SETS = SUPPORTED_SETS
+DDR_FAST_LOAD_SETS = ()
 DDR_FAST_LOAD_ADDR = "0x30000000"
 
 # Execution scope for the current source-exhaustion/real-game proof pass.

@@ -48,8 +48,12 @@ BUTTONS = {
                  'A,B,Select,Start,R,L', 2),
     'twineag2': ('Cannon,Ground Attack,Bomb,-,-,-,Coin,Start,Service,Test',
                  'A,B,X,Select,Start,R,L', 3),
-    'stmblade': ('Fire,Bomb,-,-,-,-,Coin,Start,Service,Test',
-                 'A,B,Select,Start,R,L', 2),
+    # B3 is the same MiSTer-only rapid-fire convenience mapping vasara and
+    # vasara2 use (rapid_fire_b3_to_b1 in the profile descriptor): held B3
+    # strobes B1 at the input-port divider rate. Real hardware has no third
+    # button on this game.
+    'stmblade': ('Fire,Bomb,Rapid Fire,-,-,-,Coin,Start,Service,Test',
+                 'A,B,X,Select,Start,R,L', 3),
     'ultrax': ('Fire,Grenade,Bomb,-,-,-,Coin,Start,Service,Test',
                'A,B,X,Select,Start,R,L', 3),
 }
