@@ -74,6 +74,18 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # second copy of the o_acpt4/o_format mux inside the exact failing o_clk
 # stage. Fixed there (see that file's comment); this core's FB_FORMAT is a
 # constant RGB code, so pal1 was never reachable. Retrying fit on 4.0 first.
+#
+# That fit (PALETTE + mlab88->M10K + hiscore config_table->M10K, still seed
+# 19) missed WORSE than the pre-savings baseline: -0.067/-0.280 ns, both slow
+# corners, vs -0.022 ns single-corner before. Adding the S_EA_MODE fb32 hoist
+# on top (s32_v60.sv, four fixes total, 40,297 ALMs) made it worse again:
+# -0.666/-0.332 ns. Freeing resources moved this domain in the wrong
+# direction three times running -- confirms placement lottery, not a
+# resource-limited path, so seed 19 was never actually tied to this netlist's
+# best placement, just the earlier one's. Swept fresh on the four-fix
+# netlist: seed 2 is CLEAN on all four corners -- Slow 100C +0.245 ns, Slow
+# -40C +0.040 ns (thin but positive), Fast 100C +2.940 ns, Fast -40C
+# +3.490 ns. Kept as the seed for this netlist.
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
@@ -150,7 +162,7 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # lottery result, not a regression from the area work (which only touched
 # s32_v60 and the DDR3 loader, neither in this clock domain). Sweeping seed
 # per this file's own policy before touching RTL.
-set_global_assignment -name SEED 19
+set_global_assignment -name SEED 2
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two
