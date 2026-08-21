@@ -18,7 +18,7 @@
   <rom index="3">
     <part>00000000FFFF004001000001000F04000000E20803400F00000155722F400A00</part>
   </rom>
-  <rom index="0" zip="twineag2.zip">
+  <rom index="0" zip="twineag2.zip" address="0x30000000">
     <!-- program -->
     <part name="sx002-12.u22" crc="846044dc"/>
     <!-- graphics -->

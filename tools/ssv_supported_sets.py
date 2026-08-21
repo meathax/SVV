@@ -44,20 +44,29 @@ DESCRIPTOR_FEATURE_OVERRIDES = {
 # MiSTer Main places the ROM blob directly in DDR3 instead of streaming it
 # over ioctl (rtl/mem/ssv_ddr_rom_loader.sv consumes it from there).
 #
-# Enabled for every supported set on 2026-08-20 after the adaptor gained
-# functional coverage: verif/tb_ssv_ddr_rom_loader.sv models the DDRAM_*
-# read handshake with randomized latency and free-running loader
-# back-pressure, and caught (fixes now in the RTL) an MSB-first byte-order
-# reversal, a dropped-byte wait-handshake race, and a core_cold_reset/
-# video_reset port-gate deadlock. Byte order was independently confirmed
-# against MiSTer-devel/Arcade-IGSPGM_MiSTer's ddr_rom_loader_adaptor
-# (buffer[(offset[2:0]*8) +: 8], LSB-first) and this core's own screen_rotate
-# BE mapping. Still not hardware-verified per
-# ~/.claude/reference/mister-hardware-hazards.md; the first hardware boot of
-# each game should confirm the load completes (LED_USER goes out) and the
-# game matches the ioctl-streamed load. Reverting a set to the legacy path
-# is deleting it from this tuple and regenerating MRAs -- no RTL change.
-DDR_FAST_LOAD_SETS = ()
+# Enabled for every supported set on 2026-08-21. History: the 2026-08-20
+# enablement black-screened every game on hardware -- the top level passed
+# ssv_rom_loader the raw HPS index, so the moment Main moved on to the
+# trailing <nvram index="4"> element mid-replay, the rest of the ROM was
+# silently dropped (rom_loaded never asserted, core never left reset). The
+# adaptor now holds the loader's index at 0 and stalls Main via ioctl_wait
+# for the replay's duration; verif/tb_ssv_ddr_rom_loader.sv test 4
+# reproduces the failure (8 of 1035 bytes with the old RTL) and proves the
+# fix (1035 of 1035). Earlier sim-caught fixes: MSB-first byte-order
+# reversal, dropped-byte wait-handshake race, core_cold_reset port-gate
+# deadlock, and the hps_io end-of-download +1 overshoot. Byte order and the
+# length convention were confirmed against Main_MiSTer master
+# (mra_loader.cpp rom_finish/shmem_put; user_io_set_download passes len)
+# and the IGSPGM reference adaptor.
+#
+# The RTL fix is NOT yet hardware-verified; these MRAs require an RBF built
+# from commit bdb8c8f or later -- on the 20260820 RBF or older they black-
+# screen exactly as above. First boot of each game should confirm the load
+# completes (LED_USER goes out), is visibly faster than the ioctl stream,
+# rotated titles still display, and game switching without a power cycle
+# works. Reverting a set to the legacy path is deleting it from this tuple
+# and regenerating MRAs -- no RTL change.
+DDR_FAST_LOAD_SETS = SUPPORTED_SETS
 DDR_FAST_LOAD_ADDR = "0x30000000"
 
 # Execution scope for the current source-exhaustion/real-game proof pass.

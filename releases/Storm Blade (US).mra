@@ -17,7 +17,7 @@
   <rom index="3">
     <part>00000000FFFF004001000001000F0400000028D380150000</part>
   </rom>
-  <rom index="0" zip="stmblade.zip">
+  <rom index="0" zip="stmblade.zip" address="0x30000000">
     <!-- program -->
     <part name="sb-pd0.u26" crc="91c4fbf7"/>
     <part repeat="0x100000">00</part>
