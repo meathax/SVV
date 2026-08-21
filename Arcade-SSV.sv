@@ -469,6 +469,8 @@ wire               game_cfg_commit;
 wire        ddr_replay_active, ddr_replay_wr;
 wire [26:0] ddr_replay_addr;
 wire  [7:0] ddr_replay_dout;
+wire  [7:0] ddr_replay_index;
+wire        ddr_replay_hold;
 wire        ddr_ld_acquire, ddr_ld_rd;
 wire  [7:0] ddr_ld_burstcnt;
 wire [28:0] ddr_ld_addr;
@@ -480,16 +482,23 @@ ssv_ddr_rom_loader #(.DDR_BASE_BYTES(32'h3000_0000)) u_ddr_rom_loader (
     .loader_wait(ld_ioctl_wait),
     .replay_active(ddr_replay_active), .replay_wr(ddr_replay_wr),
     .replay_addr(ddr_replay_addr), .replay_dout(ddr_replay_dout),
+    .replay_index(ddr_replay_index), .replay_hold(ddr_replay_hold),
     .ddr_acquire(ddr_ld_acquire), .ddr_burstcnt(ddr_ld_burstcnt),
     .ddr_addr(ddr_ld_addr), .ddr_rd(ddr_ld_rd), .ddr_busy(DDRAM_BUSY),
     .ddr_dout(DDRAM_DOUT), .ddr_dout_ready(DDRAM_DOUT_READY)
 );
 
-// Only ssv_rom_loader's index-0 path reacts to ioctl_wr/ioctl_addr/
-// ioctl_dout, and ddr_replay_active is only ever high while real
-// ioctl_index==0 traffic is in play (ssv_ddr_rom_loader gates internally on
-// ioctl_index), so muxing all four unconditionally is safe: with replay
-// inactive every one of these equals the raw hps_io signal, unchanged.
+// With replay inactive every one of these equals the raw hps_io signal,
+// unchanged. The index is muxed too -- this is not optional. In address mode
+// Main's rom_finish() does a shmem_put and drops ioctl_download in
+// milliseconds, then moves straight on to the next MRA element (every shipped
+// SSV MRA has a trailing <nvram index="4">) while the replay is still
+// streaming megabytes out of DDR3. ssv_rom_loader only accepts a byte while
+// the index it sees is 0, so handing it the live HPS index mid-replay dropped
+// the rest of the ROM on the floor: rom_loaded never asserted, core_cold_reset
+// never released, black screen on every game. Found on hardware 2026-08-21;
+// verif/tb_ssv_ddr_rom_loader.sv test 4 reproduces it (8 of 1035 bytes
+// delivered with the index passed through raw).
 wire        loader_ioctl_download = ioctl_download | ddr_replay_active;
 wire        loader_ioctl_wr       = ddr_replay_active ? ddr_replay_wr   : ioctl_wr;
 wire [26:0] loader_ioctl_addr     = ddr_replay_active ? ddr_replay_addr : ioctl_addr;
@@ -499,7 +508,7 @@ ssv_rom_loader loader (
     .cfg(game_cfg), .cfg_valid(game_cfg_valid),
     .cfg_commit(game_cfg_commit),
     .clk(clk_sys), .rst(loader_reset), .mem_ready(sdram_ready_sys),
-    .ioctl_download(loader_ioctl_download), .ioctl_index(ioctl_index[7:0]),
+    .ioctl_download(loader_ioctl_download), .ioctl_index(ddr_replay_index),
     .ioctl_wr(loader_ioctl_wr), .ioctl_addr(loader_ioctl_addr),
     .ioctl_dout(loader_ioctl_dout), .ioctl_wait(ld_ioctl_wait),
     .sdr_wr_req(ld_wr_req), .sdr_wr_addr(ld_wr_addr),
@@ -515,7 +524,11 @@ wire nv_init_ioctl_wait = (game_cfg_commit || nv_init_busy) &&
                           ioctl_download &&
                           ((ioctl_index == 16'd0) ||
                            (ioctl_index == 16'd8));
-assign ioctl_wait = ld_ioctl_wait | nv_ioctl_wait | nv_init_ioctl_wait;
+// ddr_replay_hold stalls Main's next transfer (typically the trailing
+// <nvram index="4"> element) until the DDR3 replay has finished feeding the
+// loader; without it those bytes would race the replay for the muxed bus.
+assign ioctl_wait = ld_ioctl_wait | nv_ioctl_wait | nv_init_ioctl_wait |
+                    ddr_replay_hold;
 
 wire core_p0_req;
 wire [SDR_AW:1] core_p0_addr;

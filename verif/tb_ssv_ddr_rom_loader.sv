@@ -33,6 +33,8 @@ logic [26:0] ioctl_addr     = 27'd0;
 logic        loader_wait    = 1'b0;
 
 wire         replay_active;
+wire   [7:0] replay_index;
+wire         replay_hold;
 wire         replay_wr;
 wire  [26:0] replay_addr;
 wire   [7:0] replay_dout;
@@ -54,6 +56,7 @@ ssv_ddr_rom_loader #(.DDR_BASE_BYTES(DDR_BASE_BYTES)) dut (
     .loader_wait(loader_wait),
     .replay_active(replay_active), .replay_wr(replay_wr),
     .replay_addr(replay_addr), .replay_dout(replay_dout),
+    .replay_index(replay_index), .replay_hold(replay_hold),
     .ddr_acquire(ddr_acquire), .ddr_burstcnt(ddr_burstcnt),
     .ddr_addr(ddr_addr), .ddr_rd(ddr_rd), .ddr_busy(ddr_busy),
     .ddr_dout(ddr_dout), .ddr_dout_ready(ddr_dout_ready)
@@ -115,12 +118,19 @@ byte unsigned got [BLOB_LEN];
 int  got_n = 0;
 int  addr_errs = 0;
 
-// ssv_rom_loader accepts a byte on (ioctl_wr && !busy) and drives ioctl_wait
-// from busy, with no input buffer -- so a byte counts as delivered exactly on
-// the cycles where the strobe is up and wait is down. Sampling every cycle the
-// strobe is high instead would count a held byte many times over.
+// What the top level actually hands ssv_rom_loader as its index. The loader
+// only accepts a byte when this is 0 (ssv_rom_loader.sv: ioctl_index == 8'd0),
+// so a replay that outlives Main's index-0 download is silently dropped unless
+// the index is held for the replay's duration.
+wire [7:0] loader_index = replay_index;
+
+// ssv_rom_loader accepts a byte on (ioctl_wr && !busy && index==0) and drives
+// ioctl_wait from busy, with no input buffer -- so a byte counts as delivered
+// exactly on the cycles where the strobe is up, wait is down, and the index it
+// sees is still 0. Sampling every cycle the strobe is high instead would count
+// a held byte many times over.
 always @(posedge clk) begin
-    if (replay_wr && !loader_wait) begin
+    if (replay_wr && !loader_wait && loader_index == 8'd0) begin
         if (got_n < BLOB_LEN) begin
             got[got_n] = replay_dout;
             if (replay_addr != got_n) begin
@@ -185,8 +195,13 @@ task automatic run_download(input bit address_mode, input int len);
         // Main copies the blob straight into DDR3 and emits no ioctl_wr at
         // all; ioctl_addr is left holding the byte count.
         repeat (20) @(posedge clk);
+        // user_io_set_download(1, len) in address mode: hps_io latches the
+        // byte count into ioctl_addr up front, and no FIO_FILE_TX_DAT ever
+        // fires, so it is never incremented during the transfer...
         ioctl_addr <= len[26:0];
         repeat (4)  @(posedge clk);
+        // ...but hps_io's end-of-download branch adds one unconditionally.
+        ioctl_addr <= len[26:0] + 27'd1;
     end
     else begin
         // Legacy MRA: real byte traffic over the ioctl bus.
@@ -318,6 +333,57 @@ initial begin
         if (got[i] !== blob[i]) begin
             if (errors < 12)
                 $display("FAIL: resumed byte %0d is %02h, expected %02h", i, got[i], blob[i]);
+            errors++;
+        end
+    end
+    repeat (50) @(posedge clk);
+
+    // -------------------------------------------------------------------
+    // 4. Main moves on while the replay is still in flight.
+    //
+    // This is what address mode actually looks like on hardware and it is the
+    // case the original code got wrong. Main's rom_finish() does a shmem_put
+    // and drops ioctl_download in milliseconds -- it never waits for the core
+    // to consume anything -- then proceeds to the next MRA element. Every
+    // shipped SSV MRA has a trailing <nvram index="4">, so Main sets
+    // ioctl_index to 4 and starts that transfer while the core is still
+    // replaying megabytes out of DDR3. ssv_rom_loader only accepts bytes while
+    // the index it sees is 0, so unless the index is held for the replay the
+    // rest of the ROM is dropped on the floor, rom_loaded never asserts, and
+    // the core never leaves reset -- a black screen on every game.
+    // -------------------------------------------------------------------
+    got_n        = 0;
+    reads_issued = 0;
+    core_cold_reset <= 1'b1;
+    repeat (20) @(posedge clk);
+    run_download(.address_mode(1), .len(BLOB_LEN));
+
+    // Main is done with index 0 and immediately starts the next element.
+    repeat (40) @(posedge clk);
+    if (!replay_hold) begin
+        $display("FAIL: replay_hold low while a replay is in flight -- Main is not stalled");
+        errors++;
+    end
+    ioctl_index    <= 8'd4;
+    ioctl_download <= 1'b1;
+
+    timeout = 0;
+    while (got_n < BLOB_LEN && timeout < 400000) begin
+        @(posedge clk);
+        timeout++;
+    end
+    ioctl_download <= 1'b0;
+    ioctl_index    <= 8'd0;
+
+    if (got_n != BLOB_LEN) begin
+        $display("FAIL: Main switched index mid-replay: only %0d of %0d bytes reached the loader",
+                 got_n, BLOB_LEN);
+        errors++;
+    end
+    for (int i = 0; i < BLOB_LEN; i++) begin
+        if (got[i] !== blob[i]) begin
+            if (errors < 12)
+                $display("FAIL: index-switch byte %0d is %02h, expected %02h", i, got[i], blob[i]);
             errors++;
         end
     end

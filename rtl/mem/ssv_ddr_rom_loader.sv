@@ -70,6 +70,19 @@ module ssv_ddr_rom_loader #(
     output logic         replay_wr,
     output logic  [26:0] replay_addr,
     output logic   [7:0] replay_dout,
+    // The index the caller must hand ssv_rom_loader. Held at 0 for the whole
+    // replay: the loader only accepts a byte while the index it sees is 0, and
+    // in address mode Main is long gone by the time we are replaying (see
+    // replay_hold), so passing its live index through would drop the rest of
+    // the ROM on the floor.
+    output logic   [7:0] replay_index,
+    // Fold into the core's ioctl_wait. Address mode gives Main no reason to
+    // wait: rom_finish() does a shmem_put and drops ioctl_download in
+    // milliseconds, then moves to the next MRA element -- every shipped SSV MRA
+    // has a trailing <nvram index="4"> -- while we are still replaying
+    // megabytes. Without this, that next transfer's bytes are lost, because the
+    // caller has muxed the loader's ioctl_wr over to the replay stream.
+    output logic         replay_hold,
 
     // DDRAM_* port (arbitrated by the caller against screen_rotate using
     // ddr_acquire as the select).
@@ -113,6 +126,8 @@ assign ddr_burstcnt  = 8'd1;
 assign replay_active = (state != S_IDLE) ||
                        (sel && prev_download && !ioctl_download &&
                         !wr_seen && ioctl_addr != 27'd0);
+assign replay_index  = replay_active ? ROM_INDEX : ioctl_index;
+assign replay_hold   = replay_active;
 // AND with core_cold_reset every cycle, not just at the moment of
 // acquisition: if the gate were ever to drop mid-load this releases the port
 // immediately rather than trusting a stale decision from load-start.
@@ -141,10 +156,16 @@ always_ff @(posedge clk) begin
                         wr_seen <= 1'b0;
                     end
                     else if (ioctl_addr != 27'd0) begin
-                        // Address-mode MRA: ioctl_addr is the final byte
-                        // count Main left behind; the blob itself is in
-                        // DDR3 at DDR_BASE_BYTES.
-                        length <= ioctl_addr;
+                        // Address-mode MRA: ioctl_addr is the byte count Main
+                        // left behind (user_io_set_download's second argument
+                        // is the length in this mode, despite being named
+                        // addr), and the blob itself is in DDR3 at
+                        // DDR_BASE_BYTES. Subtract the one hps_io adds in its
+                        // end-of-download branch: that increment exists to turn
+                        // the last-written address into a total in streaming
+                        // mode, but nothing was streamed here, so it is pure
+                        // overshoot and would replay one byte past the blob.
+                        length <= ioctl_addr - 27'd1;
                         offset <= 27'd0;
                         state  <= S_ISSUE;
                     end
