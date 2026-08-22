@@ -222,3 +222,41 @@ simulation-harness defect (sample ROM was previously compiled out), but not
 claimed as perfect MAME waveform equivalence or original-PCB analog
 equivalence. Those claims require an isolated exact-command ES5506 replay or
 a real board/MiSTer capture. No RBF was built.
+
+## 8. 2026-08-22 Vasara 2 disappearing-sprite closure
+
+After the audio audit, the pinned Vasara 2 journal was replayed through the
+first active gameplay window. MAME 0.289 captured frames 50--80 with
+`mame-trace.jsonl` SHA-256
+`27d0adfafeceff83f8a55a3c6462bf1d7ba61ab24deb33ab79ec1539fbae6231`.
+The clean one-thread RTL replay reached the same stop barrier with 81 native
+frames, dropped=0, and `rtl-trace.jsonl` SHA-256
+`26c6f10c0232f883b0067258bd5839ea7920c5fe3a28940ddb9a8e99235f941f`.
+
+The strict bus comparator correctly rejects ordinal comparison at frame 50:
+MAME's first captured event is a write at `0x00dfec` while RTL is still at a
+different V60 read. This is the pre-existing CPU/raster phase divergence, not
+a renderer event. The same sprite-list writes are present in both lanes; RTL
+timestamps them at raster lines 247/250/261. Frame CRCs show MAME's first
+moving frame at 55 and RTL's corresponding frame at 58, then unique stable
+frames thereafter. This is a timing alignment issue and must not be “fixed” by
+offsetting or cropping sprite output.
+
+The actual disappearing-sprite root cause is the one fixed in commit
+`54b550b`: a cache build is sequential (clear counts -> walk descriptors ->
+prefix pooled bases -> reindex line entries), but the old deadline/capacity
+abort path published `cache_count`/`cache_ready` from a partially built index.
+That paired this frame's line counts with the previous frame's pooled bases and
+line entries, so coherent groups (HUD/player) addressed the wrong descriptors
+and vanished for repeated aborts. The fix routes list-walk aborts through the
+bounded prefix/reindex finish and publishes an empty frame for aborts during
+the torn phases; it never exposes a mixed index.
+
+The new replay exercises that path with line-pool demand 256, maximum per-line
+demand 2, cache peak 16 entries, build maximum 8,932 `clk_sys` cycles, zero
+deadline aborts, zero cache overflows, zero line underruns, and no repeated
+blank-frame CRCs after the initial CPU phase lag. No new RTL change is
+justified: the causal renderer defect is already fixed, and the remaining
+earliest MAME-vs-RTL divergence is the V60/raster schedule upstream of sprite
+production. A hardware RBF load is still required to claim physical closure;
+no RBF was built in this audit.
