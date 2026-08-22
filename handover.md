@@ -260,3 +260,135 @@ justified: the causal renderer defect is already fixed, and the remaining
 earliest MAME-vs-RTL divergence is the V60/raster schedule upstream of sprite
 production. A hardware RBF load is still required to claim physical closure;
 no RBF was built in this audit.
+
+## 9. 2026-08-22 Vasara 1/2 complete sprite-pipeline audit
+
+This audit used MAME 0.289 (`mame.exe` SHA-256
+`af6966108d9b52c22465c6d50f4e5d50cc371b50f2d27dc443935f287aad37a3`)
+and pinned `ssv_v.cpp` SHA-256
+`49f3e1e06f5075627f23408652d1e651a1b9d2e6387a4a86284f61bc07370978`.
+MAME is a behavioral reference here, not proof of PCB-cycle timing.
+
+### A. Sprite RAM buffering / DMA
+
+**KNOWN MAME behavior:** `ssv_state::draw_sprites` reads `m_spriteram`
+directly (`ssv_v.cpp:756-769`); MAME 0.289 models no explicit sprite DMA,
+register trigger, or private hardware latch. The physical PCB transfer scheme
+therefore remains unknown. **KNOWN RTL behavior:** sprite RAM uses separate CPU
+and renderer ports with registered read latency, and the renderer constructs a
+private per-frame descriptor/index snapshot during VBlank. A directed test
+changes live sprite RAM after publication and proves the displayed descriptor
+does not change.
+
+The real core defect was the torn cache index fixed in commit `54b550b`.
+Deadline/capacity aborts previously published current per-line counts against
+the previous frame's bases and pooled entries. That made coherent groups such
+as player/HUD objects address unrelated descriptors and disappear. List-walk
+aborts now complete prefix/reindex before publication; aborts during already
+torn phases publish an empty layer. The new focused test forces that former
+abort boundary and requires published line count to equal published cache
+count. No guessed DMA trigger was added.
+
+### B. Evaluation and line limits
+
+**KNOWN MAME behavior:** the global list occupies the first 0x2000 bytes,
+advances in four-word entries, terminates on global word 1 bit 15, and expands
+`(global_mode[4:0] + 1)` locals (`ssv_v.cpp:758-778`). Coordinates are signed
+10-bit values (`ssv_v.cpp:857-859`), not 8-bit wraparound. Width is 1/2/4/8
+tiles and height is 1/2/4 tiles for ordinary sprites (`ssv_v.cpp:861-884`).
+MAME models no silicon sprites-per-line limit.
+
+**KNOWN RTL behavior:** the same terminator, local count, signed clipping,
+size and list order are implemented. The focused regression covers sprites
+crossing both vertical edges and fills all 2,048 descriptor slots with 64
+globals x 32 distinct locals on the same eight scanlines: 16,384 pooled line
+occurrences, with exact first-128 ordering. Vasara runtime maxima were 640/2048
+descriptors, 9,936/24,576 occurrences and 77 entries on one scanline. Maximum
+cache build was 27,600 `clk_sys` cycles with zero deadline aborts. These are
+implementation bounds and observations, not claims about a physical silicon
+limit.
+
+### C. Line buffers
+
+MAME composes objects directly into its indexed bitmap. The RTL uses a
+four-slot line ring: a slot is cleared before reuse, only an opened render
+epoch can write it, completed slots are consumed in order, and an underrun
+repeats the prior complete line rather than exposing an in-flight bank. Pen 0
+produces no write. The directed regression proves four-slot reuse clears stale
+pixels, transparent/no-write pixels cannot erase an opaque object, and the
+documented underrun behavior is deterministic. Both Vasara full-core runs
+reported zero object and background overruns. The horizontal-band symptom was
+caused by the torn per-frame index in A, not a clear or swap offset.
+
+### D. Sprite-vs-sprite ordering
+
+**KNOWN MAME behavior:** global and local entries are visited in ascending
+list order and each later nonzero pen writes the bitmap, so later opaque
+objects win (`ssv_v.cpp:756-907`, with pen-zero rejection in
+`drawgfx_line`, `ssv_v.cpp:178-188`). The line-buffer regression writes two
+opaque objects to the same pixels and proves the later entry wins. No reverse
+index or first-write-wins hack was introduced.
+
+### E. Priority / tilemap relationship
+
+The proposed separate sprite-vs-tile priority mixer does not exist in the
+pinned SSV model. Tilemaps are object-list entries, not independent playfields
+with per-sprite priority bits. `screen_update` draws the automatic background
+layer first and then the ordered object list (`ssv_v.cpp:946-981`); there is no
+`priority_bitmap`/`pdrawgfx` path. Consequently the correct truth table is:
+pen 0 preserves the current pixel; an opaque ordinary pen replaces it; a
+shadow pen modifies it; and later list entries act after earlier entries.
+Widening the line buffer for invented priority bits would be unsupported and
+was rejected.
+
+### F. Shadows
+
+**KNOWN MAME behavior:** a shadow is not an opaque color. It replaces the high
+two or four bits of the underlying 15-bit palette index with low pen bits:
+`((dest & shadow_mask) | (pen << shadow_shift)) & 0x7fff`
+(`ssv_v.cpp:140-188`, with mask/shift selection at `ssv_v.cpp:946-961`). The
+RTL already implements that formula. Directed tests cover two-bit and four-bit
+shadows, shadow after a character (modifies it), and shadow before a later
+character (the later character replaces it). MAME itself labels some other
+titles' shadow modes unverified, so no broader PCB-accuracy claim is made.
+
+### G. Paired validation and remaining boundary
+
+Vasara 2 has two deterministic 381-frame MAME captures and two deterministic
+full-core one-thread Verilator captures. Its machine-readable frame comparator
+matches all 141 ordered exact native RGB states; the only RTL-only state is the
+declared pre-epoch partial frame. Vasara 1 likewise has two byte-identical MAME
+trace/state captures and two byte-identical RTL frame/state/audio captures.
+Its RTL frame SHA-256 is
+`be0889c67c1e14326c48bc47b1515bed7bfa05ef70d87710f7a4787ff7eb91ad`
+in both runs.
+
+Vasara 1 does not pass exact final-pixel MAME equivalence after the fixed-frame
+start sequence: the frame comparator reports a phase-diverged animated scene.
+The stage comparator localizes that difference upstream of sprite attributes:
+167/168 ordered `list512+spr8k` states match, every MAME sprite state through
+frame 379 appears by RTL frame 380, the only candidate-only state is a
+six-frame pre-start hold, and the only reference-only state is the terminal
+tail. Final saved frames show the same scene, but palette/game-update phase is
+different. This mismatch is retained, not masked or called a sprite pass.
+
+Focused tests pass under Verilator 5.050 with assertions, unique-X semantics,
+timing enabled, headless display-none and one runtime thread:
+
+- 2,048 distinct on-screen descriptors on one scanline group / 16,384 pooled
+  occurrences;
+- signed top/bottom clipping and first/last-line inclusion;
+- immutable per-frame snapshot after live sprite-RAM mutation;
+- coherent publication at the former torn-index deadline abort;
+- four-slot clear/reuse, transparent no-write, last-opaque-wins ordering;
+- two/four-bit shadow, shadow-over-background and both shadow/character orders.
+
+The only source edit in this audit outside tests is simulation-only: normal
+watchdog-kick logging is now opt-in via `+WDOG_TRACE`; the unconditional print
+made Vasara replay unusably slow. It is under `SIMULATION` and changes no
+synthesized state, width, latency, reset, clock, CDC, memory, SDC or raster
+contract. No new synthesizable sprite change was justified beyond `54b550b`.
+No Quartus build or RBF was produced. Physical closure still requires loading
+the existing timing-clean RBF containing `54b550b` on MiSTer and replaying the
+reported Vasara 1/2 gameplay scenes; the physical DMA trigger and silicon line
+limit remain unknown.
