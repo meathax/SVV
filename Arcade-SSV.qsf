@@ -174,7 +174,7 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # still failing. Trying seed 3 next (this file's own "only seed with any
 # recorded clean result" note, +0.04 ns pre-cleanup) as the second of the
 # three-seed sweep budget.
-set_global_assignment -name SEED 3
+set_global_assignment -name SEED 19
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two
