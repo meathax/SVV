@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Set,
     [Parameter(Mandatory=$true)][string]$Session,
     [int]$Frames = 360,
+    [ValidateRange(8000,192000)][int]$AudioRate = 48000,
     [ValidateSet('all','cpu_data','none')][string]$BusMode = 'all',
     [switch]$StrictOnly,
     [int]$BusStartFrame = -1,
@@ -150,7 +151,7 @@ $env:SSV_HEADLESS_HEIGHT = $height
 $env:SSV_HEADLESS_ROM_BASE = $romBase
 $env:SSV_HEADLESS_FRAMES = $Frames
 $env:SSV_HEADLESS_INPUT_JOURNAL = $InputJournal
-$env:SSV_HEADLESS_AUDIO_RATE = '48000'
+$env:SSV_HEADLESS_AUDIO_RATE = [string]$AudioRate
 $env:SSV_HEADLESS_MAME_VERSION = $version
 $env:SSV_HEADLESS_MAME_SHA256 = $mameSha256
 $env:SSV_HEADLESS_JOURNAL_SHA256 = $journalSha256
@@ -203,7 +204,7 @@ $arguments = @(
     # allowing MAME's canonical 48 kHz mixer stream to reach the WAV writer.
     '-noreadconfig', $Set, '-rompath', $RomPath, '-video', 'none', '-sound', 'xaudio2',
     '-coin_impulse', '-1',
-    '-samplerate', '48000', '-wavwrite', (Join-Path $sessionPath 'mame-audio.wav'),
+    '-samplerate', [string]$AudioRate, '-wavwrite', (Join-Path $sessionPath 'mame-audio.wav'),
     '-nothrottle', '-skip_gameinfo', '-autoboot_delay', '0',
     '-autoboot_script', (Join-Path $PSScriptRoot 'mame-ssv-headless.lua'),
     '-cfg_directory', (Join-Path $mameRoot 'cfg'),
@@ -332,10 +333,11 @@ if ($StateCrcCapture) {
 } else {
     $receipt | Add-Member -NotePropertyName state_crc_capture -NotePropertyValue $false
 }
+$receipt | Add-Member -NotePropertyName capture_audio_rate_hz -NotePropertyValue $AudioRate -Force
 $receipt | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $receiptPath -Encoding $jsonEncoding
 $wav = Join-Path $sessionPath 'mame-audio.wav'
 if (-not (Test-Path -LiteralPath $wav) -or (Get-Item -LiteralPath $wav).Length -le 44) {
-    throw "MAME did not emit a non-empty 48 kHz WAV capture: $wav"
+    throw "MAME did not emit a non-empty WAV capture at $AudioRate Hz: $wav"
 }
 $normalized = Join-Path $sessionPath 'mame-audio-s16le-48k-stereo.pcm'
 & python (Join-Path $PSScriptRoot 'normalize_audio.py') $wav $normalized

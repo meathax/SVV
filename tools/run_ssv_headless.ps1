@@ -9,6 +9,7 @@ param(
     [string]$InputJournal = '',
     [UInt64]$TraceStartCycle = 0,
     [UInt64]$TraceStopCycle = 0,
+    [int]$CpuIncOverride = 0,
     [int]$TraceStartFrame = -1,
     [int]$TraceStopFrame = -1,
     [UInt64]$TraceMaxEvents = 0,
@@ -154,6 +155,7 @@ if ($TraceStopCycle -ne 0) { $arguments += "+TRACE_STOP_CYCLE=$TraceStopCycle" }
 if ($TraceStartFrame -ge 0) { $arguments += "+TRACE_START_FRAME=$TraceStartFrame" }
 if ($TraceStopFrame -ge 0) { $arguments += "+TRACE_STOP_FRAME=$TraceStopFrame" }
 if ($TraceMaxEvents -ne 0) { $arguments += "+TRACE_MAX_EVENTS=$TraceMaxEvents" }
+if ($CpuIncOverride -ne 0) { $arguments += "+CPU_INC_OVERRIDE=$CpuIncOverride" }
 if ($StrictOnly) { $arguments += '+TRACE_STRICT_ONLY' }
 if ($Restore) {
     if (-not $Acceleration) { throw '-Restore requires -Acceleration' }

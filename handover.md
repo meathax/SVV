@@ -190,3 +190,35 @@ as a deterministic non-silent ES5506 path. It is not closed as perfect MAME
 equivalence or original-PCB warble removal: exact command replay into an
 isolated ES5506 comparator and a real MiSTer/PCB audio capture remain the next
 evidence threshold. No RBF was built.
+
+## 7. 2026-08-22 native-rate sound equivalence audit
+
+The MAME adapter now accepts `-AudioRate` and records `capture_audio_rate_hz`
+in its receipt. A clean MAME capture at the ES5506 native stream rate (31,250
+Hz) produced 110,626 stereo frames, peak 3,209, active onset 47,786, and WAV
+SHA-256 `839c6a1253b41412c3cdf081bda83cb32f82a20184e9985c332bf6ed0d3fdacf`.
+This removes the 48-kHz export resampler from the comparison. The corrected
+RTL replay remains 104,314 source frames, peak 2,720, active onset 41,000.
+After deterministic onset alignment, the 3,000-sample native comparison is
+correlation 0.85169 and MAE 266.87; this is materially the same as the prior
+resampled result, so the mismatch is in the ES5506 digital path (or its MAME
+model), not WAV-rate conversion or host capture.
+
+Three read-only diagnostic branches were falsified and removed from RTL:
+
+- MAME's 11-bit interpolation fraction: no improvement for Drift Out because
+  this title's active fractional steps are aligned to the OTTO 9-bit field.
+- MAME high-pass history taps (`o2n2`/`o3n2`): correlation fell to 0.73067 and
+  MAE rose to 1,247.3, so the production `o2n1`/`o3n1` recurrence is retained.
+- MAME's intermediate volume lookup truncation: native correlation 0.85168,
+  indistinguishable from production 0.85169, so the combined RTL shift is not
+  the cause.
+
+The higher-tier OTTO/spec audit still supports the production 9-bit
+interpolator, 18-bit filter datapath, arithmetic shifts, panning narrowing,
+and stopped-voice filter drain. No causal silicon-backed RTL correction has
+therefore been identified. The sound lane is closed for the verified
+simulation-harness defect (sample ROM was previously compiled out), but not
+claimed as perfect MAME waveform equivalence or original-PCB analog
+equivalence. Those claims require an isolated exact-command ES5506 replay or
+a real board/MiSTer capture. No RBF was built.
