@@ -104,7 +104,9 @@ localparam CONF_STR = {
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O[44:43],Scale,Normal,Integer (Horizontal),V-Integer (Vertical),HV-Integer;",
-    "O[50:49],Rotation,Horizontal,Vertical (CW),Vertical (CCW),Horizontal (Flipped);",
+    // Framebuffer-only rotation. Direct Video is a raw native raster path; a
+    // vertical cabinet is rotated physically, while HDMI rotation uses DDRAM.
+    "H0O[50:49],Rotation,Horizontal,Vertical (CW),Vertical (CCW),Horizontal (Flipped);",
     // Was labelled "Scandoubler Fx" while no scandoubler existed. HQ2x is
     // gone with arcade_video; the line doubler that replaced it does not
     // filter, so the list is the scanline levels only. Any non-None setting
@@ -190,6 +192,7 @@ wire [15:0] joystick_l_analog_0;
 // Driven by hps_io, consumed by the video chain at the bottom of this file.
 // There is no gamma_bus: gamma_corr went with arcade_video.
 wire        forced_scandoubler;
+wire        direct_video;
 wire        video_rotated;
 
 // High score save/load nets. The module itself is instantiated further down,
@@ -325,8 +328,11 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .ioctl_din(ioctl_data_to_hps),
     // H1 hides Autosave on an MRA that carries no hiscore.dat entry.
     // H2 hides the three CRT Adjust amounts while CRT Adjust itself is Off.
-    .status_menumask({13'd0, ~status[24], ~hs_configured, 1'b0}),
+    // H0 hides the framebuffer Rotation menu while Direct Video is selected.
+    // Direct Video carries the native raster and has no rotated framebuffer.
+    .status_menumask({13'd0, ~status[24], ~hs_configured, direct_video}),
     .forced_scandoubler(forced_scandoubler),
+    .direct_video(direct_video),
     .video_rotated(video_rotated),
     .joystick_0(joystick_0), .joystick_1(joystick_1),
     .joystick_2(joystick_2), .joystick_3(joystick_3)
@@ -1176,7 +1182,11 @@ assign VGA_SL   = status[4:3];
 wire vga_de_in = sd_on   ? ~(sd_hb | sd_vb)
                : crt_on  ? crt_de_osd
                :           ~(av_hb | av_vb);
-wire rotation_active = (rotation == 2'd1) || (rotation == 2'd2);
+// Direct Video is the raw native raster. Its vertical-cabinet use case is a
+// physically rotated CRT; DDRAM screen rotation is for the normal HDMI /
+// framebuffer path only.
+wire rotation_active = !direct_video &&
+                       ((rotation == 2'd1) || (rotation == 2'd2));
 
 // Follow the established MiSTer vertical-core contract: present the native
 // cabinet aspect as 4:3 horizontally and 3:4 after framebuffer rotation.
@@ -1209,9 +1219,9 @@ screen_rotate u_screen_rotate (
     .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL),
     .VGA_R(VGA_R), .VGA_G(VGA_G), .VGA_B(VGA_B),
     .VGA_HS(VGA_HS), .VGA_VS(VGA_VS), .VGA_DE(vga_de_in),
-    .rotate_ccw(rotation == 2'd2),
-    .no_rotate((rotation == 2'd0) || (rotation == 2'd3)),
-    .flip(rotation == 2'd3),
+    .rotate_ccw(!direct_video && (rotation == 2'd2)),
+    .no_rotate(direct_video || (rotation == 2'd0) || (rotation == 2'd3)),
+    .flip(!direct_video && (rotation == 2'd3)),
     .video_rotated(video_rotated),
     .FB_EN(FB_EN), .FB_FORMAT(FB_FORMAT), .FB_WIDTH(FB_WIDTH),
     .FB_HEIGHT(FB_HEIGHT), .FB_BASE(FB_BASE), .FB_STRIDE(FB_STRIDE),

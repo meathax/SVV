@@ -38,6 +38,25 @@ Game-specific DIP switches are supplied by each MRA. Depending on the game,
 these include coinage, flip screen, demo sounds, difficulty, lives, free play,
 service mode, rapid fire, subtitles, and other original board settings.
 
+## Direct Video and rotated games
+
+Direct Video outputs each game's native raster without MiSTer framebuffer
+rotation. The horizontal `dynagear` and `drifto94` profiles therefore work
+directly on a compatible display. The vertical `cairblad`, `vasara`, `vasara2`,
+`stmblade`, `twineag2`, and `ultrax` profiles require a physically rotated CRT
+or another display that accepts the native vertical signal when Direct Video is
+enabled.
+
+For a normal landscape HDMI display, leave Direct Video disabled (`direct_video=0`)
+so MiSTer's DDRAM framebuffer rotation can present the six vertical profiles.
+The core hides its framebuffer Rotation menu while Direct Video is enabled,
+because that presentation-layer rotation cannot transform the raw Direct Video
+signal. The complete profile audit is reproducible with:
+
+```powershell
+python tools/verify_ssv_video_profiles.py
+```
+
 ## PCB Accuracy
 
 This section is intentionally limited to core behavior supported by primary
