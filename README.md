@@ -142,7 +142,8 @@ all of the Meatcores automatically:
 
 ```ini
 [meathax/meatcores]
-db_url = https://raw.githubusercontent.com/meathax/meatcores/db/downloader_meathax_meatcores.zip
+
+db_url = https://raw.githubusercontent.com/meathax/meatcores/db/db.json.zip
 ```
 
 ## Development and verification
