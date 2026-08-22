@@ -1433,7 +1433,7 @@ wire        wdog_kick = m_req && wdog_addr_hit &&
 logic sim_wdog_rst_d;
 initial sim_wdog_rst_d = 1'b0;
 always @(posedge clk_sys) begin
-    if (wdog_kick)
+    if (wdog_kick && $test$plusargs("WDOG_TRACE"))
         $display("SSV_WDOG_KICK mode=%0d rw=%0d addr=%06x cycle=%0d",
                  cfg.wdog_mode, m_we, a, wdog_cycle_cnt);
     if (wdog_rst !== sim_wdog_rst_d)
