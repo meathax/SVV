@@ -12,6 +12,7 @@ $bash = 'D:\vibes\fpga\toolchains\msys64\usr\bin\bash.exe'
 if (-not $ModelDir) {
     $workspace = $env:VERILATOR_WORKSPACE
     if (-not $workspace) { $workspace = (& $verilator workspace).Trim() }
+    $env:VERILATOR_WORKSPACE = $workspace
     $ModelDir = Join-Path $workspace $(if ($Savable) { 'obj_headless_save' } else { 'obj_headless' })
 }
 $objDir = [System.IO.Path]::GetFullPath($ModelDir)
@@ -104,7 +105,12 @@ $timingArguments = if ($Savable) {
 } else {
     @('--timing', '--sched-zero-delay', '--assert')
 }
-$profileDefines = @('+define+SIMULATION', '+define+SSV_HEADLESS_DIFF', '+define+SSV_VISUAL_EXTERNAL_CLOCK')
+$profileDefines = @(
+    '+define+SIMULATION',
+    '+define+SSV_HEADLESS_DIFF',
+    '+define+SSV_HEADLESS_SAMPLE_ROM',
+    '+define+SSV_VISUAL_EXTERNAL_CLOCK'
+)
 if ($Savable) { $profileDefines += '+define+SSV_HEADLESS_SAVABLE' }
 $arguments = @(
     '--cc', '--exe', '--build'

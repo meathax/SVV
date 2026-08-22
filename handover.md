@@ -97,3 +97,57 @@ its timing envelope. Use the `mister-mame-diff` skill /
 - No MAME/Verilator differential run has been done yet for the warble
   itself — only the on-screen overlay read from user-supplied video.
 - Not deployed to hardware.
+
+## 5. 2026-08-22 MAME-versus-Verilator audio continuation
+
+The differential lane is now implemented and has current paired captures.
+MAME 0.289 and RTL are independently deterministic for the 156-frame
+`audio_coin_prefix` scenario (journal SHA-256
+`228498b4f97400c564a3feb704482b59d00bfbba0c659cefe9d7573fa52a85ef`).
+
+The first RTL PCM captures peaked at only +/-1 because the headless testbench
+compiled out its sample-ROM backend: `samples.bin` loading and p4 readback were
+guarded by `SSV_VISUAL`, which the strict headless build does not define. This
+was a verification-harness defect, not ES5506 RTL. The strict build now defines
+`SSV_HEADLESS_SAMPLE_ROM`, enabling only sample ROM loading/readback without
+enabling SDL or other visual code.
+
+Closure evidence:
+
+- The first fetches are the expected `c400`, `d000`, `c400`, `d000`, `d000`,
+  `0400`, `d000`, `0400`; 60,588 fetches complete, 60,459 nonzero.
+- RTL PCM peak advances from 1 to 2,720 (MAME prefix peak 3,222).
+- Same-window RTL A/B traces match 184,186 normalized `cpu_data` events with
+  no resynchronization; comparator digest
+  `edebadc4cde0561370446824db2b8e7315fc40af18590a0950467161e288af8b`.
+- PCM, frame, state, native-frame, and trace hashes match independently.
+- The first aligned 50 ES5506 host writes match MAME. Write 51 diverges because
+  the V60 observes the `FB24` main-loop/IRQ handshake at a different raster
+  phase, so longer CPU-driven audio comparison is not yet trustworthy.
+- The initial aligned waveform reaches correlation 0.884 over 5,000 samples
+  after deterministic 31.25 kHz to 48 kHz resampling and a two-sample phase
+  adjustment (fitted gain 0.929).
+
+The corrected diagnostic replay was then repeated with the real sample backend
+and a bounded ES5506 event trace. It completed 156 frames with 217,375 ES5506
+events: 61 host commits, 182,763 voice writebacks, 21,630 sample requests,
+7,210 sample completions, and 5,711 sample ticks. There were no dropped events,
+sample underruns, renderer deadline failures, or RTL assertions. The trace
+SHA-256 is
+`871532950b57a878be540c8bb635c4687efbc4e92034df415a383aa2ee581c41`.
+
+This closes the identified silent-audio defect and the ES5506 RTL semantic
+boundary in simulation: the focused register/voice regressions pass, the exact
+Drift Out voice prefix fetches the expected bank-2 words and produces material
+PCM, and independent corrected RTL runs are byte-identical. The remaining
+MAME-vs-full-core mismatch is upstream of ES5506: after the first 50 matching
+sound commits, the V60 observes the FB24 main-loop/IRQ handshake at a different
+raster phase. That makes later CPU-driven audio command order an invalid audio
+engine comparator, not evidence of a new ES5506 arithmetic fault.
+
+No synthesizable RTL, clock, reset, CDC, SDC, framework, or RBF changed in this
+continuation. Physical MiSTer audio and the original recurring hardware warble
+remain unverified because no board capture was available; claiming hardware
+closure would exceed the evidence. The next experiment, if hardware or a
+sound-command replay barrier becomes available, is to validate the same ES5506
+event contract at the exact name-entry passage without changing V60 timing.
