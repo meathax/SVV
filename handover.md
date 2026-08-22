@@ -1,5 +1,14 @@
 # Session handover — 2026-08-21/22
 
+## Current correction — debug overlay fully removed (2026-08-23)
+
+The temporary ES5506 screenshot overlay was not a valid release feature. It
+was removed from `Arcade-SSV.sv`, `rtl/ssv_core.sv`, and `files.qip`, and its
+RTL source was deleted. The shared core now drives the native RGB path directly;
+no `ovl_*` ports or overlay mux remain. This cleanup invalidates any prior
+hardware visual result taken from the overlay-enabled 20260822 RBF. It does
+not by itself close the independent audio or Vasara sprite failures.
+
 ## 1. RTL fixes committed (dfed31a)
 
 - **ES5506 ECOUNT-freeze ramp abort** (`rtl/audio/ssv_es5506_regs.sv`): a host
@@ -13,45 +22,10 @@
 
 Both pushed to `main` before this session's later work.
 
-## 2. Sound debug overlay (uncommitted)
+## 2. Diagnostic display cleanup (historical)
 
-Added to chase the still-unresolved ES5506 warble (see §3):
-
-- [rtl/debug/ssv_debug_overlay.sv](rtl/debug/ssv_debug_overlay.sv) — new
-  module. Draws a column of squares over the right edge of the active
-  picture. Rows 0-7 are toggle flip-flops (flip on each pulse of their
-  monitored signal — green=1/red=0); row 8 is 5 squares showing the raw
-  5-bit last-serviced voice index. Row order top-to-bottom: `sound_commit`,
-  `irq_promote`, `voice_writeback`, `sample_req`, `sample_done`,
-  `sample_tick`, `sample_underrun`, `frame_boundary`, `voice_index[4:0]`.
-- [rtl/ssv_core.sv](rtl/ssv_core.sv) — added a new **unconditional** `ovl_*`
-  port block mirroring the sound-path signals the overlay needs. Necessary
-  because the existing `debug_*` bus is gated `` `ifdef SIMULATION `` and is
-  stripped from synthesis — the overlay needs these signals in a real RBF,
-  not just sim.
-- [Arcade-SSV.sv](Arcade-SSV.sv) — wires `ovl_*` from `ssv_core`, instantiates
-  `ssv_debug_overlay`, muxes its output into `av_r/g/b` ahead of the
-  scandoubler, gated by `localparam DEBUG_OVERLAY_EN` (currently **`1`** —
-  **flip to 0 before any real release build**).
-- [files.qip](files.qip) — added the new source file.
-
-Interpretation caveat baked into the module's own header comment: a square
-whose monitored signal pulses faster than once per video frame (e.g.
-`voice_writeback`, `irq_promote`, which fire per-voice every frame) will
-show as red/green speckle rather than a flat color — that's scanout
-sampling a flip-flop that changed value mid-frame, not a rendering bug.
-
-## 3. RBF build
-
-Built clean with the overlay enabled: `releases/Arcade-SSV_20260822.rbf`
-(SHA-256 `b7bdf1f3aaa6b4323c6dd60adb6240e4c0121c9b3e028ee094bc412fff76f7fd`),
-0 errors, positive setup/hold slack, 98% ALM. Full report already given
-earlier in-session. **Ships with the debug overlay visible on-screen** —
-intentional, for the screenshot/video capture below. Not yet committed.
-
-First compile attempt failed (`can't find port "debug_hpos"` etc.) because
-the top level wired the sim-only `debug_*` bus into synthesis — fixed by
-adding the unconditional `ovl_*` ports instead (§2).
+The temporary display was removed after confirming it contaminated the
+release video path. No diagnostic pixels or release-only sound taps remain.
 
 ## 4. Sound warble investigation — user-supplied clips
 
@@ -90,12 +64,13 @@ its timing envelope. Use the `mister-mame-diff` skill /
 
 ## Outstanding / not done this session
 
-- Debug overlay files are **uncommitted** (`git status`: `Arcade-SSV.sv`,
-  `rtl/ssv_core.sv`, `files.qip` modified; `rtl/debug/` and
-  `releases/Arcade-SSV_20260822.rbf` untracked).
-- `DEBUG_OVERLAY_EN` must be set back to `0` before any real release build.
-- No MAME/Verilator differential run has been done yet for the warble
-  itself — only the on-screen overlay read from user-supplied video.
+- The current source cleanup is not yet deployed as a fresh hardware RBF.
+- The corrected real-SDRAM Vasara 2 gameplay replay reached frame 380 with
+  `deadline_aborts=0`, `bg_ack_while_obj_owns=0`, `CACHE_PEAK=328/2048`, and
+  `max_line_entries=23`; its frame CRC passed. The first capture used a wrong
+  native-width argument and therefore has no valid native-frame receipt.
+- No MAME/Verilator differential run has yet identified the first sample-value
+  divergence for the recurring warble itself.
 - Not deployed to hardware.
 
 ## 5. 2026-08-22 MAME-versus-Verilator audio continuation

@@ -15,10 +15,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_upd7001.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_adc0809.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/io/ssv_93c46_16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_srmp7_bank.sv
-# rtl/debug/ssv_debug_overlay.sv is a temporary screenshot aid for the ES5506
-# sound issue -- see Arcade-SSV.sv DEBUG_OVERLAY_EN. Remove both the file and
-# this line once that issue is closed.
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/debug/ssv_debug_overlay.sv
 # rtl/video/ssv_sprite_decode.sv is intentionally absent: nothing in the build
 # instantiates it. Its only consumer was the legacy rtl/video/ssv_sprite_renderer.sv,
 # which is already out of the file list (the release uses the cached renderer).

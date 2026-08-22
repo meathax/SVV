@@ -1550,7 +1550,7 @@ task automatic apply_inputs(input integer f);
 `endif
 `ifdef SSV_VISUAL
     // SDL reports active-high pressed controls; the SSV ports are active low.
-    // Overlay live controls after any deterministic scenario inputs so the
+    // Apply live controls after any deterministic scenario inputs so the
     // same universal testbench remains usable both interactively and in gates.
     visual_p1_mask = ssv_visual_p1();
     visual_system_mask = ssv_visual_system();

@@ -770,15 +770,6 @@ wire core_ce, core_hs, core_vs, core_hb, core_vb;
 wire renderer_overrun;
 wire signed [15:0] core_audio_l, core_audio_r;
 
-// Sound-path taps for ssv_debug_overlay (rtl/debug/ssv_debug_overlay.sv).
-// See DEBUG_OVERLAY_EN below. Remove alongside the overlay module once the
-// ES5506 sound issue is closed.
-wire [8:0] dbg_hpos, dbg_scanline;
-wire       dbg_sound_commit, dbg_irq_promote, dbg_voice_writeback;
-wire       dbg_sample_req, dbg_sample_done, dbg_sample_tick, dbg_sample_underrun;
-wire       dbg_frame_boundary;
-wire [4:0] dbg_voice_index;
-
 ssv_core core (
     .cfg(game_cfg),
     .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
@@ -810,39 +801,8 @@ ssv_core core (
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .wdog_rst(wdog_rst),
-    .coin_lockout(), .renderer_overrun(renderer_overrun), .motor_output(),
-
-    .ovl_hpos(dbg_hpos), .ovl_scanline(dbg_scanline),
-    .ovl_sound_commit(dbg_sound_commit),
-    .ovl_irq_promote(dbg_irq_promote),
-    .ovl_voice_writeback(dbg_voice_writeback),
-    .ovl_voice(dbg_voice_index),
-    .ovl_sample_req(dbg_sample_req), .ovl_sample_done(dbg_sample_done),
-    .ovl_sample_tick(dbg_sample_tick),
-    .ovl_sample_underrun(dbg_sample_underrun),
-    .ovl_frame_boundary(dbg_frame_boundary)
+    .coin_lockout(), .renderer_overrun(renderer_overrun), .motor_output()
 );
-
-// ---------------------------------------------------------------------------
-// Temporary ES5506 sound debug overlay (rtl/debug/ssv_debug_overlay.sv).
-// Flip DEBUG_OVERLAY_EN to 0 (or drop this block and the file/files.qip line)
-// once the sound issue is closed.
-// ---------------------------------------------------------------------------
-localparam DEBUG_OVERLAY_EN = 1'b1;
-wire [23:0] debug_overlay_rgb;
-ssv_debug_overlay u_debug_overlay (
-    .clk_sys(clk_sys), .rst(core_reset),
-    .rgb_in(core_rgb), .hpos(dbg_hpos), .scanline(dbg_scanline),
-    .sound_commit(dbg_sound_commit),
-    .irq_promote(dbg_irq_promote),
-    .voice_writeback(dbg_voice_writeback),
-    .sample_req(dbg_sample_req), .sample_done(dbg_sample_done),
-    .sample_tick(dbg_sample_tick), .sample_underrun(dbg_sample_underrun),
-    .frame_boundary(dbg_frame_boundary),
-    .voice_index(dbg_voice_index),
-    .rgb_out(debug_overlay_rgb)
-);
-wire [23:0] core_rgb_dbg = DEBUG_OVERLAY_EN ? debug_overlay_rgb : core_rgb;
 
 // ---------------------------------------------------------------------------
 // High score save/load (rtl/hiscore.v, alanswx / JimmyStones).
@@ -899,9 +859,9 @@ hiscore #(
 // raster (ssv_diag_video) that used to sit alongside it has been removed: it
 // was permanently disabled by a hardcoded localparam, so the mux below always
 // selected the core and the second timing path was dead weight in every build.
-wire [7:0] av_r = core_rgb_dbg[23:16];
-wire [7:0] av_g = core_rgb_dbg[15:8];
-wire [7:0] av_b = core_rgb_dbg[7:0];
+wire [7:0] av_r = core_rgb[23:16];
+wire [7:0] av_g = core_rgb[15:8];
+wire [7:0] av_b = core_rgb[7:0];
 wire av_hs = core_hs;
 wire av_vs = core_vs;
 wire av_hb = core_hb;
