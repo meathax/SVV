@@ -151,3 +151,42 @@ remain unverified because no board capture was available; claiming hardware
 closure would exceed the evidence. The next experiment, if hardware or a
 sound-command replay barrier becomes available, is to validate the same ES5506
 event contract at the exact name-entry passage without changing V60 timing.
+
+## 6. 2026-08-22 full gameplay audio and command-capture continuation
+
+The corrected sample-ROM backend was carried through the complete 941-frame
+`gameplay_neutral` journal. The gameplay-only lane reached its explicit entry
+barrier at frame 820 and the 120-frame neutral soak, with a complete receipt:
+`sim_output/diff/drifto94-audio-gameplay-fixed-b/rtl-receipt.json`. The run is
+headless, one-thread, dropped=0, and contains 511,898 stereo source frames;
+PCM peak is 2,720, the first non-zero source frame is 62,975, and the PCM hash
+is `587dd709919874eb69c52308a66ca242c75305201e5ecd34b46684bc97bed159`.
+The bounded ES5506 trace hash is
+`4578c31a888cd22ff83e7dd0a708e1b2daac6ec1c491fcd53b9018ff5a8e17f5` and
+contains 531,158 events (515,062 voice writebacks and 16,096 sample ticks)
+with no underrun event. A first full replay also reached frame 940 but stopped
+at finalization because the attract-only assertion was incompatible with this
+gameplay journal; its common PCM prefix is byte-identical to the corrected
+gameplay run. The dedicated attract lane remains the attract assertion gate.
+
+MAME ES5506 bus capture is now pinned for the same journal and MAME 0.289:
+`sim_output/diff/drifto94-audio-gameplay-mame-bus-80/mame-trace.jsonl`, SHA-256
+`b8e5d8a72d2ec28da13a9a337029515d197d81f22f34bf00eecdfa5ac2f452c9`, with
+3901066 main-bus and 461871 cpu-data events. The mapped sound writes repeat a
+stable sequence at `0x300000-0x30007f`; the first 50 semantic host commits
+remain the exact matching prefix already recorded above. The first later
+divergence is still the V60 `FB24` main-loop/IRQ phase, not an ES5506 register
+or sample fetch mismatch.
+
+A bounded temporary diagnostic build substituted MAME's 11-bit interpolation
+fraction for the production OTTO-spec 9-bit fraction. It made the aligned
+prefix materially worse (correlation 0.786 over 1,000 samples and 0.590 over
+3,000, versus 0.886 and 0.910 for production), so that hypothesis is rejected
+and the production RTL was restored unchanged. No production sound fix beyond
+the headless sample-ROM backend correction is justified by current evidence.
+
+The sound issue is therefore closed as a verified simulation-harness defect and
+as a deterministic non-silent ES5506 path. It is not closed as perfect MAME
+equivalence or original-PCB warble removal: exact command replay into an
+isolated ES5506 comparator and a real MiSTer/PCB audio capture remain the next
+evidence threshold. No RBF was built.
