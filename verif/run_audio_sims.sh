@@ -10,10 +10,17 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 65536
 OUT="${TMPDIR:-/tmp}/ssv-audio"
 mkdir -p "$OUT" sim_output/diff
 CYCLES="${TRACE_CYCLES:-120000000}"
-IRQ_SCHED="${IRQ_SCHED:-sim_output/diff/mame_irq_schedule_8s.txt}"
-if [[ ! -f "$IRQ_SCHED" ]]; then
-  IRQ_SCHED="sim_output/diff/mame_irq_schedule_long.txt"
-fi
+# The MAME retire-indexed IRQ3 schedule is deliberately NOT injected.
+# Measured 2026-08-25 (dynagear, tb_ssv_realrom_boot, 300M cycles): driving
+# irq3_pulse from mame_irq_schedule_8s.txt deadlocks the game. IRQ3 is
+# dynagear's only interrupt source (cfg sets neither irq_level1_line0 nor
+# irq_level2_line120), the schedule's first entry is retire 731058, and the
+# retire indices do not track this RTL's retire stream, so boot stalls and
+# the watchdog trips (SSV_WDOG_TRIP at cycle 144951920, host_writes frozen
+# at 2092, audio_peak=0). The free-running raster IRQ3 is the hardware
+# source and is what these gates have actually run on since ssv_core split
+# irq3_pulse away from vblank_pulse; the bench force was a no-op for the IRQ
+# path from that split until it was corrected.
 AUDIO_ISOLATION_ARGS=()
 if [[ "${AUDIO_ISOLATION_DIAGNOSTIC:-0}" == 1 ]]; then
   # This deliberately allows the simulation-only renderer deadline guard to
@@ -116,14 +123,13 @@ if ! verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_realrom_boot \
   echo "BUILD FAIL tb_ssv_realrom_boot"; tail -80 "$OUT/boot/build.log"; exit 1
 fi
 
-echo "=== RUN TRACE_CYCLES=$CYCLES REQUIRE_VE REQUIRE_AUDIO + IRQ schedule ==="
+echo "=== RUN TRACE_CYCLES=$CYCLES REQUIRE_VE REQUIRE_AUDIO (raster IRQ3) ==="
 verilator-safe status
 boot_bin="$OUT/boot/tb_ssv_realrom_boot"; [[ -f "$boot_bin.exe" ]] && boot_bin="$boot_bin.exe"
 verilator-sim-safe -- "$boot_bin" \
   "+TRACE_CYCLES=$CYCLES" \
   +REQUIRE_VE \
   +REQUIRE_AUDIO \
-  "+DIFF_IRQ_SCHEDULE=$IRQ_SCHED" \
   "+SAMPLES=sim_output/rom/samples.bin" \
   "+ROM=sim_output/rom/maincpu.bin" \
   "${AUDIO_ISOLATION_ARGS[@]}" | tee "$OUT/boot/run.log"

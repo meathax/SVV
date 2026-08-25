@@ -591,7 +591,7 @@ string irq_schedule_path, ppm_path, ppm_prefix;
 integer ppm_fd, ppm_frame, ppm_pixels;
 integer ppm_start, ppm_count, ppm_step, ppm_shots_done;
 integer irq_schedule_fd, irq_scan_result;
-logic diff_irq_enabled, diff_vblank_pulse, diff_count_started;
+logic diff_irq_enabled, diff_irq3_pulse, diff_count_started;
 longint unsigned retire_count, next_irq_retire;
 longint unsigned cpu_activity_count;
 longint unsigned last_vb_retire, last_irq_entry_retire;
@@ -1366,7 +1366,7 @@ always_ff @(posedge clk_sys) begin
 end
 
 always_comb begin
-    diff_vblank_pulse =
+    diff_irq3_pulse =
         diff_irq_enabled && diff_count_started && ce_cpu &&
         dut.cpu.st == 7'd3 &&
         retire_count + 1 == next_irq_retire;
@@ -3057,7 +3057,27 @@ initial begin
         if (irq_scan_result != 1)
             $fatal(1, "empty IRQ schedule: %s", irq_schedule_path);
         diff_irq_enabled = 1'b1;
-        force dut.vblank_pulse = diff_vblank_pulse;
+        // Drive the IRQ3 source, not the raster vblank strobe. When this force
+        // was written ssv_core had one vblank_pulse net feeding both the IRQ
+        // controller and the video front end. The raster split them since:
+        // irq3_pulse is the line-240 interrupt source, while vblank_pulse
+        // (end of active line 239) re-arms the descriptor cache, the line
+        // ring frame_sync and the next_render_y kick counter every frame.
+        // Forcing vblank_pulse therefore stopped reaching the IRQ path
+        // altogether and instead pinned the video front end low until the
+        // schedule's first entry (retire 731058, ~20.6M clk of boot), so
+        // frame 1 opened with next_render_y already saturated and the first
+        // line-0 consumption underran the ring at hcnt 335, active_width-1.
+        //
+        // No committed gate enables this any more. Measured 2026-08-25 on
+        // dynagear over 300M cycles, injecting the retire-indexed schedule on
+        // the correct net deadlocks the game instead: IRQ3 is dynagear's only
+        // interrupt source, and the schedule's retire indices do not track
+        // this RTL's retire stream, so boot stalls and the watchdog trips
+        // (SSV_WDOG_TRIP cycle 144951920, host_writes frozen at 2092,
+        // audio_peak 0). The free-running raster IRQ3 passes the same gate
+        // with audio_peak 21824.
+        force dut.irq3_pulse = diff_irq3_pulse;
 `endif
     end
 
