@@ -202,10 +202,28 @@ reg  [1:0] wr_be_p;
 // as the sole highest-priority client (game logic is held reset during it).
 reg       read_valid;
 reg [2:0] read_grant;
+// On the real PCB the ES5506 owns a dedicated sample ROM bus and never waits
+// for anyone. Here p4 shares one controller with video and the CPU, and its
+// two interpolation taps must both land inside a 16-tick voice slot: the voice
+// engine paces a slot's FLOOR but cannot cap it, so a fetch that loses
+// arbitration stretches the slot, slips the 32-voice scan, and drags the whole
+// output stream below 31.25 kHz (measured 31,118 Hz under race load with
+// round-robin, against 31,237 Hz on the zero-latency behavioural model).
+// Granting p4 ahead of the rotation restores the dedicated-bus property. It
+// cannot starve the others: a voice fetches at most twice per 1 us slot and
+// only while it is running, so even 32 active voices ask ~2 Mword/s out of a
+// ~96 MHz controller, and the rotation pointer below is deliberately NOT
+// advanced on these grants so every other port keeps its place in line.
+reg       sound_first;
 always @* begin
     read_valid = 1'b1;
     read_grant = rr_next;
-    case (rr_next)
+    sound_first = 1'b0;
+    if (p4_pend) begin
+        read_grant  = 3'd4;
+        sound_first = 1'b1;
+    end
+    else case (rr_next)
         3'd0: if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else read_valid=0;
         3'd1: if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else read_valid=0;
         3'd2: if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else read_valid=0;
@@ -471,7 +489,11 @@ always @(posedge clk) begin
                 else begin
                     grant <= read_grant;
                     is_write <= 1'b0;
-                    rr_next <= (read_grant == 3'd5) ? 3'd0 : read_grant + 1'd1;
+                    // A priority sound grant is inserted into the stream, not
+                    // taken from the rotation, so it must not consume the next
+                    // port's turn.
+                    if (!sound_first)
+                        rr_next <= (read_grant == 3'd5) ? 3'd0 : read_grant + 1'd1;
                     case (read_grant)
                         3'd0: begin a = p0_addr_p;           rd_total <= 4'd1; end
                         3'd1: begin a = {p1_addr_p, 2'b00};  rd_total <= 4'd4; end

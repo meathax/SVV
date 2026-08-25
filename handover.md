@@ -1,5 +1,273 @@
 # Session handover — 2026-08-21/22
 
+## 2026-08-25 — ES5506 IRQV ack race: real RTL bug, NOT the random-sound cause
+
+> **Correction (same session, after the entry below was written).** The
+> "root cause" claim in this section is **FALSIFIED for Drift Out**. A MAME
+> 0.289 `drifto94` tap on `$300070-$30007F` over 1,800 frames of attract and
+> 3,600 frames with `coin_start` shows the driver reads IRQV **exactly twice**,
+> both during init at PC `C01C3A`-`C01C7D`, both returning `$80`. There is no
+> IRQV polling loop, so the acknowledge race below can essentially never fire
+> in this title, and it cannot be the producer of the reported random sounds.
+> The RTL-side telemetry agrees: zero races and no stats milestone in the
+> 120,000,000-cycle real-ROM lane. The fix is retained because it is a genuine
+> spec/MAME-behaviour defect proven by a directed test, but it is **not** a
+> symptom fix. See the falsification log at the end of this section.
+
+**Observation:** Drift Out and Vasara play random uncommanded sounds/voices/
+notes on hardware. Prior audits cleared voice arithmetic, stale engine voices,
+sample fetch, and CR writeback races; the symptom is hardware-random and never
+reproduced by short deterministic replays.
+
+**Evidence:** **KNOWN** — code inspection of `rtl/audio/ssv_es5506_regs.sv`:
+the host IRQV read snapshots `irqv_r` on the byte-0 steal cycle N and cleared
+`irq_vector` unconditionally at N+1. An engine promotion (`irq_set`) landing
+exactly on cycle N (vector free, so the snapshot latched 0x80) writes voice v
+into `irq_vector`, and `ssv_es5506_voice.sv` consumes that voice's CR.IRQ
+pending bit at promotion (S_MIX, `eng_cr_clr` includes CR_IRQ). The N+1
+unconditional clear then wiped v: the loop-end event was lost permanently.
+**KNOWN** — MAME 0.289 `es5506.cpp` cannot lose the event: `generate_irq`
+consumes CR.IRQ only when `m_irqv & 0x80` (vector free) and the IRQV read +
+`update_internal_irq_state()` are one atomic host access. **KNOWN** — MAME
+0.289 `ssv.cpp` does not wire the ES5506 IRQ to the V60; SSV drivers poll
+IRQV (matches the earlier overlay's continuous `irq_promote` speckle), so
+every poll opens the 1-cycle loss window. A lost loop-end leaves a looping
+voice sounding indefinitely / desyncs the driver's per-voice sequencer —
+random, timing-dependent, exactly the reported symptom class, and invisible
+to the prior stale-voice audit (the chip state is self-consistent; the
+*driver* missed an event).
+
+**Hypotheses:** (1) unconditional IRQV-read clear discards a
+promoted-but-unread vector — **CONFIRMED** by directed TB (below); (2) voice
+arithmetic / stale voices / CR writeback — previously falsified; (3) V60
+command-cadence drift — real but separate (waveform mismatch lane), cannot by
+itself key uncommanded voices.
+
+**Smallest change:** guard the release with the snapshot's own validity:
+`if ((reg_r == 4'he) && (page_r < 7'h40) && !irqv_r[7]) irq_vector <= 8'h80;`
+When the snapshot held a valid vector the vector cannot have changed (occupied
+blocks promotion), so the release still removes exactly the vector the host
+read; when the snapshot held 0x80 there is nothing to release and a
+just-promoted vector survives for the next poll. No clock, reset, CDC, width,
+latency, memory, or interface change.
+
+**Verification:** `verif/tb_ssv_es5506_regs.sv` gained a directed race test
+(promotion driven on the same posedge as the IRQV byte-0 steal). Pre-fix RTL
+fails it — "FAIL IRQV race: promotion on steal cycle wiped by read release" —
+fixed RTL passes. All four audio unit/CDC TBs pass under Verilator 5.032/WSL
+(`tb_ssv_es5506_regs`, `tb_ssv_es5506_ulaw`, `tb_ssv_es5506_voice`,
+`tb_ssv_audio_cdc`), and the committed real-ROM 120,000,000-cycle audio lane
+(`tb_ssv_realrom_boot`, `+REQUIRE_VE +REQUIRE_AUDIO`, 8s IRQ schedule) passes
+on the fixed RTL: 2,448 host writes, 612 commits, 46,720 sample requests,
+zero underruns, audio_peak 21,824. That lane needs
+`+ALLOW_RENDERER_OVERRUN_DIAGNOSTIC` because of a **pre-existing** video-side
+fatal (`SSV_RENDERER_OWNERSHIP cause=line_deadline` at sim time 8050905000,
+frame 0, hpos 335) — proven byte-identical with pre-fix RTL, so it is
+independent of this audio fix and is tracked as a separate bench/renderer
+item.
+
+A `SIMULATION`-only telemetry probe now prints
+`ES5506_IRQV_RACE_SURVIVED` whenever an IRQV read completes with a
+steal-cycle-promoted vector present (the exact events the old RTL
+destroyed). It fires once in the directed unit test and zero times in the
+2.5-second boot lane — consistent with a rare statistical window that needs
+minutes of music-driver polling, which is why the symptom was hardware-random
+and absent from short deterministic replays. Long journal replays and soaks
+will now count occurrences for free.
+
+**Regression scope:** every SSV title's sound driver event servicing; no
+video, CPU, or memory path touched. No Quartus build or RBF was produced —
+the fix is not in any shipped RBF until `/mister-rbf-build` is explicitly
+authorized and run.
+
+**Known unknowns:** hit frequency on hardware is a function of the title's
+loop-end IRQ rate × poll rate. Measured for Drift Out that rate is
+effectively zero (see the correction at the top of this section), so this
+fix changes no audible behaviour in that title. The separate music-running
+waveform divergence (V60/ST010 cadence lane) remains open.
+
+### Falsification log — candidates eliminated for the random-sound symptom
+
+Each of these was checked against MAME 0.289 `es5506.cpp` / the OTTO spec and
+found **already correct in RTL**, so none can produce uncommanded voices:
+
+- **IRQV acknowledge race** — real bug, fixed, but the driver does not poll
+  IRQV (2 reads at init in 60 s of `drifto94` including gameplay). Cannot be
+  the symptom's producer.
+- **Address accumulator width** — `ADDRESS_INTEGER_BIT_ES5506` 21 +
+  `ADDRESS_FRAC_BIT_ES5506` 11 = 32, so MAME's `m_address_acc_mask` is
+  `0xFFFFFFFF` and the RTL's unmasked 32-bit `accum` is exactly equivalent. A
+  voice cannot run past END through a missing mask.
+- **End-of-sample / loop handling** — RTL `S_PROC` forward and reverse cases
+  match `check_for_end_forward`/`check_for_end_reverse` case for case
+  (non-looping STOP0, LPE wrap, BLE to LEI, bidirectional DIR flip), including
+  the `!(control & LEI)` guard.
+- **Sample ROM bank select** — MAME `CONTROL_BS1 = 0x8000`, `BS0 = 0x4000`;
+  RTL uses `cr[15:14]`. Same bits, so voices cannot address the wrong bank.
+- **Stop-bit semantics** — MAME `CONTROL_STOPMASK = STOP1|STOP0`; RTL
+  `CR_STOP = 16'h0003` with `stopped = !cr_valid || |(cr & CR_STOP)`. A
+  STOP1-only voice (`cr=0002`, as the boot lane reports) is stopped in both.
+- **Sample-fetch handshake** — `sdram.sv` delivers `p4_dout` and `p4_ack` on
+  the same edge and stretches the ack two `clk` cycles so the `clk_sys` engine
+  samples exactly one rising edge; the voice clears `sdr_req` on that ack, and
+  the arbiter latches the address on the request's rising edge. No
+  data/address mis-association by construction.
+
+### 2026-08-25 — key-on content comparison: the driver's commands are correct
+
+**Observation:** The reported random sounds are not explained by the V60 or its
+sound driver keying the wrong samples.
+
+**Evidence — KNOWN.** Both lanes were driven through the same drifto94
+coin+start gameplay scenario and every voice key-on was reconstructed as
+(bank, START, END, FC):
+
+- MAME 0.289 live session, tap on `$300000-$30007F`, scenario-matched relative
+  frames 30-1400: 394 key-ons, 21 distinct regions (`.mame_mcp/
+  ssv_keyon_mame_scenario.txt`); a separate free-run capture adds 11 more,
+  32 regions in the union.
+- RTL `tb_ssv_frame_crc` scenario `drifto94_gameplay`, frames 0-900, key-ons
+  reconstructed from the core's own host-commit stream: 208 key-ons,
+  14 distinct regions (`sim_output/keyon_long/rtl_keyon.txt`).
+
+**Every region the RTL keys is a region MAME also keys — the RTL-only set is
+empty.** Per-region counts track the reference (e.g. `0:10ACF800..112D2800`
+50 vs 50, `1:DE7F8800..E484C800` 5 vs 5); the differences are all regions the
+shorter RTL window had not reached yet. An earlier apparent RTL-only region
+was an artifact of comparing different game phases and disappeared once the
+MAME capture was phase-matched — phase matching is mandatory for this
+comparator.
+
+**Falsified:** the hypothesis that the CPU/driver issues commands MAME never
+issues. Combined with the ES5506-internal eliminations above, nothing in
+simulation explains an uncommanded voice: the chip is told the right things
+and plays the right sample regions.
+
+**Remaining gap — the one thing every passing lane has in common:** all of it
+ran on the *behavioural* SDRAM model, where a p4 sample fetch always returns
+on a fixed latency. On hardware that fetch must win arbitration against video
+and the CPU. Correct commands plus a wrong or late sample word is exactly
+"right music, random wrong noises", and it is invisible to every comparison
+run so far. A `+REAL_SDRAM` run of the same scenario, with a sample-underrun
+counter added to the testbench, is the current experiment.
+
+### 2026-08-25 — real-SDRAM lane: an ST010 preload gap, and a measured rate slip
+
+**Observation 1 (harness defect, fixed):** `+REAL_SDRAM` preloaded the V60
+program, graphics and samples but **never ST010**. Drift Out needs the DSP, so
+under the real controller it fetched unwritten memory and produced a black
+screen (`post-VE nonblack too low: 0`). The lane closest to hardware had
+therefore never run at all for any ST010 title. `verif/tb_ssv_frame_crc.sv`
+now preloads `SDR_ST010_BASE` from the `+ST010ROM=` image using the same
+little-endian pairing as `st010_word()`/`ssv_rom_loader`, and the lane boots
+and passes (`nonblack=11,276,656` real vs `11,276,640` behavioural, identical
+43 key-ons).
+
+**Observation 2 (KNOWN, measured):** the realised ES5506 output rate is
+load-dependent. Same 300-frame drifto94 scenario, only the memory model
+changed:
+
+| SDRAM model  | realised rate | worst fetch wait |
+|--------------|---------------|------------------|
+| behavioural  | 31,237 Hz     | 2 clk_sys        |
+| real         | 31,203 Hz     | 36 clk_sys       |
+
+Spec is 31,250 Hz. The mechanism is structural and documented in
+`rtl/audio/ssv_es5506_voice.sv:132-138`: `slot_cnt` paces each voice to a
+**floor** of `SLOT_TICKS`, but nothing caps a slot. When a p4 sample fetch is
+slow the slot stretches, the 32-voice scan slips, and the whole output rate
+falls. That file's own comment records the same failure mode from an earlier
+bug: "the rate moved with voice count AND with SDRAM latency ... music (many
+voices) played at the wrong pitch and drifted as instruments entered and
+left." The floor fixed the voice-count half; the latency half remains.
+
+The race-load run has since completed, and the slip does scale with video
+traffic:
+
+| lane                              | realised rate | vs spec |
+|-----------------------------------|---------------|---------|
+| behavioural, 300 frames           | 31,237 Hz     | -0.04%  |
+| real SDRAM, 300 frames (menus)    | 31,203 Hz     | -0.15%  |
+| real SDRAM, 900 frames (race)     | 31,118 Hz     | -0.42%  |
+
+`max_fetch_wait` held at 36 clk_sys and `SAMPLE_UNDERRUNS` stayed 0, so no
+fetch ever missed outright — the loss is pure slot stretching. Key-ons were
+identical to the behavioural run (208), confirming the commands do not change
+with the memory model.
+
+**Status: this is a real, measured, load-dependent defect, but it is NOT
+established as the cause of the reported random sounds.** -0.42% is about
+7 cents of pitch error; that is a subtle drift, not an uncommanded voice.
+
+### 2026-08-25 — fix: the sample port gets its dedicated bus back
+
+**Selected explanation:** the ES5506 on the real PCB owns a dedicated sample
+ROM bus and never arbitrates for it. In this core p4 shares one controller with
+video and the CPU and sat fifth in a round-robin behind p2's eight-word
+bursts, so its worst-case latency (36 clk_sys) exceeded what two serialised
+interpolation taps can absorb inside a 16-tick slot (~48 clk_sys).
+
+**Smallest change** (`rtl/mem/sdram.sv`): grant p4 ahead of the rotation, and
+do **not** advance `rr_next` on such a grant, so every other port keeps its
+place in line. Nothing else changed — no clock, reset, CDC, width, latency,
+memory map, or audio RTL. Starvation is impossible by construction: a voice
+fetches at most twice per 1 us slot and only while running, so even 32 active
+voices ask ~2 Mword/s of a ~96 MHz controller.
+
+A one-burst fetch of both taps was rejected: `S_REQ2` wraps the +1 tap inside
+the bank (matching MAME's `get_integer_addr(accum, 1)`), so the pair is not
+always adjacent and a burst would silently read the wrong second word at the
+wrap.
+
+**Verification** — identical 900-frame drifto94 race scenario, real SDRAM:
+
+| | realised rate | worst fetch wait | overruns | max_line_entries |
+|---|---|---|---|---|
+| before | 31,118 Hz | 36 | bg=0 obj=0 | 71 |
+| after  | 31,229 Hz | 22 | bg=0 obj=0 | 71 |
+
+Pitch error drops from -0.42% to -0.067%, i.e. to the zero-latency
+behavioural model's own figure (31,237 Hz) — the arbitration component is
+gone. Video paid nothing: renderer overruns stay zero and peak per-line
+demand is unchanged at 71. Key-ons stayed 208 and `SAMPLE_UNDERRUNS` stayed 0.
+(All three lanes share the same small measurement bias: `audio_cycles` counts
+from time zero including boot, so absolute rates read a few Hz low. The
+comparison between lanes is unaffected.)
+
+`tb_ssv_es5506_ulaw` and `tb_ssv_es5506_voice` still pass.
+`verif/run_realsdram_attract_regress.sh` (new) runs a real-SDRAM attract pass
+per set and reports overruns plus the realised rate:
+
+- `dynagear` OK, bg=0 obj=0, 31,229 Hz, worst wait 21
+- `vasara`   OK, bg=0 obj=0, 31,228 Hz, worst wait 0
+- `drifto94` OK, bg=0 obj=0, 31,230 Hz, worst wait 0
+- `twineag2` FAIL — `SSV_RENDERER_OWNERSHIP cause=line_deadline pc=00e02f37
+  frame=163 scanline=81 hpos=335`
+
+**The twineag2 failure is pre-existing, not a regression.** A baseline model
+built from an out-of-tree `sdram.sv` with the priority branch and the
+`rr_next` guard removed fails **byte-identically**: same sim time
+`1311427965000`, same PC, same frame/scanline/hpos. It is a separate
+real-SDRAM renderer-deadline defect for that title and is tracked on its own.
+
+**This fixes a pitch/timing defect. It is still NOT shown to be the
+random-sound symptom** — that remains open, and the honest next step is a
+hardware listen on a build containing this change to hear whether the
+artifact the user reports is this drift or something else.
+
+**Next evidence threshold (superseded in part — see above):** the earlier
+untested hypothesis
+is that the ES5506 is being *told* to play the wrong things — i.e. the V60 or
+its sound driver issues commands MAME never issues. The decisive experiment is
+a content comparison, not a timing comparison: reconstruct the per-voice
+(bank, START, END, FC) set actually keyed by MAME and by RTL over the same
+long window and check whether RTL keys sample regions MAME never keys. Ordered
+timing/phase differences are already known and are not evidence; a keyed
+region that exists only in RTL would be. If that also matches, the symptom is
+hardware-only (real SDRAM contention on the p4 sample path, or the audio
+output/CDC), and needs a board capture rather than more simulation.
+
+
 ## Current correction — debug overlay fully removed (2026-08-23)
 
 The temporary ES5506 screenshot overlay was not a valid release feature. It

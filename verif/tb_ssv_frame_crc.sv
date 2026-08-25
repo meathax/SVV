@@ -3140,6 +3140,21 @@ initial begin
         end
         else
             $display("REAL_SDRAM no sample image (+SMPROM=) - audio path unexercised");
+        // ST010 program/data at SDR_ST010_BASE. Without this the DSP fetches
+        // unwritten memory under the real controller and an ST010 title
+        // (drifto94) never produces a picture -- which is why the real-SDRAM
+        // lane had never been exercised for those sets at all. Stored as
+        // little-endian SDRAM words, matching st010_word()'s behavioural
+        // pairing and ssv_rom_loader.
+        if (sim_cfg.has_st010) begin
+            if (st010_count != STREAM_ST010_SIZE)
+                $fatal(1, "REAL_SDRAM needs the ST010 image (+ST010ROM=), got %0d/%0d",
+                       st010_count, STREAM_ST010_SIZE);
+            for (i = 0; i < STREAM_ST010_SIZE / 2; i = i + 1)
+                u_sdram.chip.preload_word(((SDR_ST010_BASE >> 1) + i),
+                                          st010_word(i * 2));
+            $display("REAL_SDRAM ST010 preloaded (%0d bytes)", st010_count);
+        end
         $display("REAL_SDRAM preload done");
     end
 `endif
@@ -3487,5 +3502,118 @@ always @(posedge clk_sys) begin
     end
 end
 `endif
+
+// ---------------------------------------------------------------------------
+// ES5506 key-on capture (verification-only).
+//
+// Reconstructs, from the core's own host-commit stream, which sample region
+// each voice was actually told to play. The MAME side reconstructs the same
+// thing from a write tap on $300000-$30007F, so the two logs are directly
+// comparable: a (bank, START, END) region present in one lane and absent from
+// the other means the CPU/driver issued a command the reference never issued.
+// Ordering and timing differences are expected and are NOT evidence.
+//
+// Enable with +KEYON_OUT=<path>. Costs nothing when the plusarg is absent.
+// ---------------------------------------------------------------------------
+integer keyon_fd = 0;
+string  keyon_path;
+logic [31:0] kv_start [0:31];
+logic [31:0] kv_end   [0:31];
+logic [16:0] kv_fc    [0:31];
+logic [15:0] kv_cr    [0:31];
+integer keyon_count = 0;
+
+// Read the host-commit stream straight off the ES5506 register file. Those
+// ports are unconditional, unlike the debug_* fan-out which only exists under
+// SSV_HEADLESS_DIFF, so this capture works in any build of this testbench.
+wire        kc_commit = dut.sound_registers.commit;
+wire [6:0]  kc_page   = dut.sound_registers.commit_page;
+wire [3:0]  kc_reg    = dut.sound_registers.commit_reg;
+wire [31:0] kc_data   = dut.sound_registers.commit_data;
+
+initial begin
+    for (int i = 0; i < 32; i++) begin
+        kv_start[i] = 32'd0;
+        kv_end[i]   = 32'd0;
+        kv_fc[i]    = 17'd0;
+        kv_cr[i]    = 16'h0003;   // both stop bits, as after chip reset
+    end
+    if ($value$plusargs("KEYON_OUT=%s", keyon_path)) begin
+        keyon_fd = $fopen(keyon_path, "w");
+        if (keyon_fd == 0)
+            $fatal(1, "KEYON_OUT open failed: %s", keyon_path);
+        $fdisplay(keyon_fd, "# rtl es5506 keyon capture");
+    end
+end
+
+always @(posedge clk_sys) begin
+    if (keyon_fd != 0 && kc_commit && (kc_page < 7'h40)) begin
+        automatic int v = int'(kc_page[4:0]);
+        automatic bit was_running = (kv_cr[v][1:0] == 2'b00);
+        case (kc_reg)
+            4'h0: begin
+                kv_cr[v] = kc_data[15:0];
+                if ((kv_cr[v][1:0] == 2'b00) && !was_running) begin
+                    keyon_count = keyon_count + 1;
+                    $fdisplay(keyon_fd,
+                        "KEYON f=%0d v=%0d bank=%0d cr=%04X start=%08X end=%08X fc=%05X",
+                        post_ve_frames, v, kv_cr[v][15:14], kv_cr[v],
+                        kv_start[v], kv_end[v], kv_fc[v]);
+                end
+            end
+            4'h1: if (kc_page < 7'h20) kv_fc[v]    = kc_data[16:0];
+                  else                 kv_start[v] = kc_data;
+            4'h2: if (kc_page >= 7'h20) kv_end[v]  = kc_data;
+            default: ;
+        endcase
+    end
+end
+
+// Sample-fetch health, reported alongside the key-on capture. Under the
+// behavioural SDRAM model a fetch always returns on a fixed latency; the real
+// controller has to win arbitration against video and the CPU, so this is the
+// counter that separates "the chip was told the right thing" from "the chip
+// got the right sample words".
+integer sample_underruns = 0;
+logic   sample_underrun_d = 1'b0;
+always @(posedge clk_sys) begin
+    sample_underrun_d <= dut.sound_underrun;
+    if (dut.sound_underrun && !sample_underrun_d)
+        sample_underruns <= sample_underruns + 1;
+end
+
+// Output sample rate and worst fetch latency.
+//
+// The voice engine paces each voice to a FLOOR of SLOT_TICKS, but nothing
+// caps a slot: if an SDRAM fetch returns late the slot stretches, the 32-voice
+// scan slips, and the whole output sample rate drops below the chip's 31.25
+// kHz. That is audible as pitch drift and warble, and it cannot appear under
+// the behavioural SDRAM model, whose latency is fixed and short. Counting
+// ticks against elapsed clk_sys cycles measures the realised rate directly;
+// max_fetch_wait is the worst observed fetch latency in clk_sys cycles.
+longint unsigned audio_ticks = 0;
+longint unsigned audio_cycles = 0;
+integer max_fetch_wait = 0;
+always @(posedge clk_sys) begin
+    audio_cycles <= audio_cycles + 1;
+    if (dut.sound_sample_tick) audio_ticks <= audio_ticks + 1;
+    if (int'(dut.sound_voices.wait_cnt) > max_fetch_wait)
+        max_fetch_wait <= int'(dut.sound_voices.wait_cnt);
+end
+
+final begin
+    if (keyon_fd != 0) begin
+        $fdisplay(keyon_fd, "# total_keyons=%0d sample_underruns=%0d",
+                  keyon_count, sample_underruns);
+        $fclose(keyon_fd);
+    end
+    $display("RTL_KEYON_TOTAL=%0d SAMPLE_UNDERRUNS=%0d", keyon_count, sample_underruns);
+    // clk_sys is 48.3 MHz; the ES5506 stream rate should be 31.25 kHz.
+    $display("AUDIO_RATE ticks=%0d cycles=%0d hz=%0d max_fetch_wait=%0d",
+             audio_ticks, audio_cycles,
+             (audio_cycles == 0) ? 0
+                 : (audio_ticks * 48300000) / audio_cycles,
+             max_fetch_wait);
+end
 
 endmodule
