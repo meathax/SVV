@@ -569,9 +569,23 @@ always_ff @(posedge clk_sys) begin
         render_line_y <= 9'd0;
         render_kick_q <= 1'b0;
     end
-    else if (video_enable && vblank_pulse) begin
+    else if (vblank_pulse) begin
         // Same edge as the line buffer's frame_sync: both ring pointers and
         // the line counter restart from one deterministic aligned state.
+        //
+        // Unconditional on video_enable, unlike cache_start below. The CPU's
+        // lockout bit ($21000e bit 7) can drop mid-active-line and come back
+        // mid-vblank of a later frame -- twineag2's attract transition does
+        // exactly this -- which would otherwise miss the one
+        // video_enable&&vblank_pulse edge that realigns the ring. Missing it
+        // once left next_render_y resuming from its stale pre-blank value
+        // instead of 0: it then crossed active_height mid-frame instead of at
+        // the frame boundary, render_kick_ok's bound latched shut for the
+        // rest of that frame, and scanout drained the ring's remaining stale
+        // lines dry -- SSV_RENDERER_OWNERSHIP cause=line_deadline. Kicking
+        // itself, and the descriptor-cache rebuild, still require
+        // video_enable live (no point spending SDRAM/sprite-RAM bandwidth on
+        // a blanked screen); only the realignment must not be skippable.
         next_render_y <= 9'd0;
         render_kick_q <= 1'b0;
     end
@@ -704,11 +718,14 @@ end
 
 ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst),
-    // Same edge that re-arms the descriptor cache build (cache_start below)
-    // and resets next_render_y above: once per frame, during vblank, strictly
-    // before this frame's first consumption. It resets both ring pointers to
-    // one deterministic aligned state.
-    .frame_sync(video_enable && vblank_pulse),
+    // Same edge that resets next_render_y above: once per frame, during
+    // vblank, strictly before this frame's first consumption. It resets both
+    // ring pointers to one deterministic aligned state.
+    //
+    // Unconditional on video_enable -- see the comment on next_render_y's
+    // reset above for why the ring must realign every frame even while the
+    // display is blanked, while cache_start below stays gated.
+    .frame_sync(vblank_pulse),
     .line_start(line_buffer_consume),
     .render_start(renderer_line_start),
     .render_done(renderer_done),
