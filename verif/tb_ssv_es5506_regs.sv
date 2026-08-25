@@ -422,6 +422,39 @@ initial begin
     read_reg(4'he, value);
     expect32(value, 32'h0000_0013, "stacked IRQV promotion");
 
+    // An engine promotion landing on the IRQV byte-0 steal cycle itself is
+    // invisible to that read (the snapshot already latched 0x80), and the
+    // voice's CR.IRQ pending bit is consumed at promotion.  The read's
+    // release must therefore not fire, or the event is lost permanently:
+    // the driver never sees the loop-end, the voice loops on -- the random
+    // stuck notes/voices heard on hardware.
+    if (irq_n !== 1'b1) begin
+        $display("FAIL IRQV race precondition: vector not free");
+        $fatal(1);
+    end
+    @(negedge clk);
+    host_addr = {4'he, 2'd0};
+    host_re   = 1'b1;
+    irq_voice = 5'd7;
+    irq_set   = 1'b1;   // promote on the same posedge as the steal
+    @(negedge clk);
+    host_re   = 1'b0;
+    irq_set   = 1'b0;
+    // Snapshot cycle read 0x80; the release cycle follows.  The promoted
+    // vector must survive it.
+    repeat (2) @(posedge clk);
+    #1;
+    if (irq_n !== 1'b0) begin
+        $display("FAIL IRQV race: promotion on steal cycle wiped by read release");
+        $fatal(1);
+    end
+    read_reg(4'he, value);
+    expect32(value, 32'h0000_0007, "IRQV promotion survives ack race");
+    if (irq_n !== 1'b1) begin
+        $display("FAIL IRQV race acknowledge");
+        $fatal(1);
+    end
+
     // PAR and global serial registers are readable on their documented pages.
     read_reg(4'hd, value);
     expect32(value, 32'h0000_0155, "PAR");

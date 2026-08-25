@@ -96,6 +96,14 @@ module ssv_es5506_regs (
 logic [31:0] write_latch;
 logic [31:0] read_latch;
 logic  [7:0] irq_vector;
+`ifdef SIMULATION
+// Telemetry only (never read by hardware logic): IRQV poll/promotion/race
+// rates, so a replay can report whether the driver polls IRQV at all and how
+// often the acknowledge race is actually hit.
+logic [31:0] dbg_irqv_reads = 32'd0;
+logic [31:0] dbg_irqv_promotions = 32'd0;
+logic [31:0] dbg_irqv_races = 32'd0;
+`endif
 logic [31:0] voice_control_valid;
 logic        cold_init_active;
 logic [4:0]  cold_init_voice;
@@ -827,13 +835,43 @@ always_ff @(posedge clk) begin
                     active_voices, mode, par_data, irqv_r, page_r,
                     word_clock_start, word_clock_end, lr_clock_end
                 );
-                // Spec: reading IRQV clears the pending vector (after snapshot).
-                if ((reg_r == 4'he) && (page_r < 7'h40))
+                // Spec: reading IRQV releases the vector the host just read
+                // (after snapshot).  Release only when that snapshot carried
+                // a valid vector: a promotion landing on the steal cycle
+                // itself was never visible to this read, and its CR.IRQ
+                // pending bit was already consumed at promotion, so an
+                // unconditional clear here discarded that voice's loop-end
+                // event permanently.  MAME's read+ack is atomic and cannot
+                // lose it; the OTTO spec ties the release to the vector the
+                // host actually observed.
+                if ((reg_r == 4'he) && (page_r < 7'h40) && !irqv_r[7])
                     irq_vector <= 8'h80;
+`ifdef SIMULATION
+                // Race telemetry only: an IRQV read completing while a
+                // vector promoted on the steal cycle sits unread.  The old
+                // unconditional release destroyed exactly these events.
+                if ((reg_r == 4'he) && (page_r < 7'h40)) begin
+                    dbg_irqv_reads <= dbg_irqv_reads + 32'd1;
+                    if (irqv_r[7] && !irq_vector[7]) begin
+                        dbg_irqv_races <= dbg_irqv_races + 32'd1;
+                        $display("ES5506_IRQV_RACE_SURVIVED voice=%0d time=%0t",
+                                 irq_vector[4:0], $time);
+                    end
+                    if (dbg_irqv_reads[11:0] == 12'd0)
+                        $display({"ES5506_IRQV_STATS reads=%0d promotions=%0d ",
+                                  "races=%0d time=%0t"},
+                                 dbg_irqv_reads, dbg_irqv_promotions,
+                                 dbg_irqv_races, $time);
+                end
+`endif
             end
 
-            if (irq_set && irq_vector[7])
+            if (irq_set && irq_vector[7]) begin
                 irq_vector <= {3'd0, irq_voice};
+`ifdef SIMULATION
+                dbg_irqv_promotions <= dbg_irqv_promotions + 32'd1;
+`endif
+            end
 
             if (host_we) begin
                 write_latch <= assembled_write;
