@@ -1,5 +1,71 @@
 # Session handover — 2026-08-21/22
 
+## 2026-08-25/26 — random warped music fragments: root-cause audit round 2
+
+**New hardware evidence (user, on the 20260825 RBF):** the random sounds are
+notes/fragments OF THE GAME'S OWN soundtrack, slightly WARPED, that COME IN
+AND OUT on top of the normal music (drifto94: riffs from coin+start; vasara:
+gongs and player scream/pain voices in gameplay). Unchanged by the sample-port
+arbitration fix.
+
+**Constraint established this round (KNOWN):** the host command stream is NOT
+the producer. Equal-window key-on comparison (RTL frames 0-900 vs MAME abs
+10267-11167 of the same scenario): 208 vs 207 key-ons, per-(bank,START,END)
+counts exactly equal. Whatever sounds extra does it WITHOUT a key-on.
+
+A read-only deep audit of `ssv_es5506_regs.sv`/`ssv_es5506_voice.sv` against
+MAME 0.289 then found, ranked by symptom fit:
+
+1. **CONFIRMED DEFECT (fixed): stale-mask supersede clear checked the
+   PREVIOUS commit.** The host-CR-write mask clear was gated on
+   `commit_reg`/`commit_page` — registered values still holding the previous
+   commit on the cycle `host_commit` pulses — so a note-on's trailing CR write
+   usually left the previous note's engine transition masks (transwave
+   `eset={LEI}, eclr={LPE,BLE}`, DIR flips, STOP0) armed. `cr_apply()` stamped
+   them over the fresh CR and the snapshot flush made it permanent. A voice
+   with LEI forced on never runs its end-of-loop test and plays straight
+   through the sample bank at the new note's FC — warped fragments of
+   neighbouring samples (music riffs, gongs, screams — bank neighbours), with
+   a live envelope (in and out), and no extra key-on. Fixed by building the
+   condition from the same-cycle decode (`host_reg`/`current_page`/`voice`).
+   A SIMULATION probe (`ES5506_STALE_CR_MASK`) counts old-vs-new disagreement;
+   it fires once in the existing unit suite. The unit TB passes both before
+   and after (the changed clears were not covered).
+
+2. **CONFIRMED DEFECT (fixed): snapshot blind spot reverts host writes.** The
+   engine snapshot reads through a registered MLAB address + read_latch, so
+   the data captured at `eng_snap` predates the previous cycle's host commit
+   — but `eng_snap` cleared that voice's `host_fresh_*` bits anyway, letting
+   the engine's writeback revert the host's write (lost mute, lost ACCUM,
+   and via the mask flush a reverted CR = lost note-off, loop left running).
+   Additionally the synthesized MLAB is `read_during_write_mode_mixed_ports
+   ="DONT_CARE"` with combinational q off a registered address, so SILICON
+   AND THE BEHAVIOURAL MODEL GENUINELY DISAGREE in this window — the
+   hardware-random ingredient. Fixed with a one-cycle delayed commit record
+   that re-asserts the fresh bit after the snapshot clear, plus a per-voice
+   `cr_scan_void` flag that drops CR transitions computed by a scan whose
+   snapshot missed a host CR write (the next scan redoes them from the stored
+   value — MAME's serialized order).
+
+3. **Fixed in passing:** the deferred writeback replay now re-tests the OTTO
+   11.5 ECOUNT group abort for LVOL/RVOL/K1/K2 (previously only each field's
+   own fresh bit).
+
+Falsified this round: envelope wraparound (ramps clamp exactly like MAME),
+CA output-channel routing (MAME folds `% m_channels` to channel 0, same
+audible result as RTL's no-CA mixing; all captured CRs have CA=0), u-law
+decode (bit-exact vs MAME lookup), and cross-lane PCM onset diffing as a
+method (V60 phase drift defeats naive time alignment).
+
+**Honest status of the causal link:** the 900-frame drifto94 sim scenario
+never opens either defect window (`ES5506_STALE_CR_MASK_TOTAL=0`; pre-fix and
+post-fix PCM byte-identical), so the fixes are mechanism-proven and
+MAME-semantics-aligned but not sim-reproduced against this scenario. The
+window (tens of µs after each loop-end transition, and a 1-cycle blind spot
+per snapshot) times thousands of host commits/second over minutes of play is
+consistent with the observed hardware randomness; hardware listening on a new
+RBF is the remaining test.
+
 ## 2026-08-25 — ES5506 IRQV ack race: real RTL bug, NOT the random-sound cause
 
 > **Correction (same session, after the entry below was written).** The

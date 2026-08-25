@@ -103,6 +103,8 @@ logic  [7:0] irq_vector;
 logic [31:0] dbg_irqv_reads = 32'd0;
 logic [31:0] dbg_irqv_promotions = 32'd0;
 logic [31:0] dbg_irqv_races = 32'd0;
+logic [31:0] dbg_stale_mask_hits = 32'd0;
+final $display("ES5506_STALE_CR_MASK_TOTAL=%0d", dbg_stale_mask_hits);
 `endif
 logic [31:0] voice_control_valid;
 logic        cold_init_active;
@@ -266,6 +268,34 @@ logic [31:0] host_fresh_ecount;
 logic [31:0] host_fresh_o4n1, host_fresh_o3n1, host_fresh_o3n2;
 logic [31:0] host_fresh_o2n1, host_fresh_o2n2, host_fresh_o1n1;
 
+// The engine snapshot reads the MLAB through a registered address plus the
+// read_latch stage: the data captured at eng_snap reflects memory as of the
+// END OF THE CYCLE BEFORE LAST. A host commit on the immediately preceding
+// cycle is therefore invisible to that snapshot -- but eng_snap used to clear
+// the voice's host_fresh_* bits anyway, so the engine's later writeback
+// reverted the host's write (a lost mute, a lost ACCUM restart). Worse, the
+// synthesized MLAB's mixed-port read-during-write is DONT_CARE, so silicon
+// and the behavioural model genuinely disagree in that window: the defect is
+// timing-random on hardware and near-invisible in simulation. Keep a
+// one-cycle-delayed record of the last commit and re-assert its fresh bit
+// after the snapshot clear (NBA ordering: the later assignment wins), so a
+// write the snapshot could not see keeps its protection until the NEXT
+// snapshot, exactly matching MAME's fully serialized write-then-sample order.
+logic        d_commit;
+logic [4:0]  d_voice;
+logic        d_cr;
+logic        d_accum, d_lvol, d_rvol, d_k1, d_k2, d_ecount;
+logic        d_o4n1, d_o3n1, d_o3n2, d_o2n1, d_o2n2, d_o1n1;
+
+// A scan whose snapshot missed a host CR write (same cycle or the cycle
+// before) computed its loop/stop transitions from a stale CR. Its CR mask
+// merge and flush must be voided for that pass -- the next snapshot redoes
+// the work from the stored (new) value, which is MAME's serialization.
+logic [31:0] cr_scan_void;
+wire cr_commit_now  = host_commit && (host_reg == 4'h0) && (current_page < 7'h40);
+wire cr_snap_missed = (d_commit && d_cr && (d_voice == eng_voice)) ||
+                      (cr_commit_now && (voice == eng_voice));
+
 always_ff @(posedge clk) begin
     if (rst) begin
         host_fresh_accum   <= '0;
@@ -313,6 +343,52 @@ always_ff @(posedge clk) begin
             if (we_o2n2)    host_fresh_o2n2[voice]    <= 1'b1;
             if (we_o1n1)    host_fresh_o1n1[voice]    <= 1'b1;
         end
+        // Re-assert the previous cycle's commit after a same-cycle snapshot
+        // clear: that write is invisible to the snapshot data (see the
+        // d_commit declaration comment), so its protection must survive
+        // until the voice's NEXT snapshot. Last NBA assignment wins.
+        if (d_commit) begin
+            if (d_accum)  host_fresh_accum[d_voice]  <= 1'b1;
+            if (d_lvol)   host_fresh_lvol[d_voice]   <= 1'b1;
+            if (d_rvol)   host_fresh_rvol[d_voice]   <= 1'b1;
+            if (d_k1)     host_fresh_k1[d_voice]     <= 1'b1;
+            if (d_k2)     host_fresh_k2[d_voice]     <= 1'b1;
+            if (d_ecount) host_fresh_ecount[d_voice] <= 1'b1;
+            if (d_o4n1)   host_fresh_o4n1[d_voice]   <= 1'b1;
+            if (d_o3n1)   host_fresh_o3n1[d_voice]   <= 1'b1;
+            if (d_o3n2)   host_fresh_o3n2[d_voice]   <= 1'b1;
+            if (d_o2n1)   host_fresh_o2n1[d_voice]   <= 1'b1;
+            if (d_o2n2)   host_fresh_o2n2[d_voice]   <= 1'b1;
+            if (d_o1n1)   host_fresh_o1n1[d_voice]   <= 1'b1;
+        end
+    end
+end
+
+// Delayed record of the last host commit (one commit per cycle at most).
+always_ff @(posedge clk) begin
+    if (rst) begin
+        d_commit <= 1'b0;
+        d_cr     <= 1'b0;
+        {d_accum, d_lvol, d_rvol, d_k1, d_k2, d_ecount} <= '0;
+        {d_o4n1, d_o3n1, d_o3n2, d_o2n1, d_o2n2, d_o1n1} <= '0;
+        d_voice  <= '0;
+    end
+    else begin
+        d_commit <= host_commit;
+        d_voice  <= voice;
+        d_cr     <= cr_commit_now;
+        d_accum  <= host_commit && we_accum;
+        d_lvol   <= host_commit && we_lvol;
+        d_rvol   <= host_commit && we_rvol;
+        d_k1     <= host_commit && we_k1;
+        d_k2     <= host_commit && we_k2;
+        d_ecount <= host_commit && we_ecount;
+        d_o4n1   <= host_commit && we_o4n1;
+        d_o3n1   <= host_commit && we_o3n1;
+        d_o3n2   <= host_commit && we_o3n2;
+        d_o2n1   <= host_commit && we_o2n1;
+        d_o2n2   <= host_commit && we_o2n2;
+        d_o1n1   <= host_commit && we_o1n1;
     end
 end
 
@@ -442,10 +518,17 @@ always_comb begin
         // This can only ever drop a write the host has already superseded.
         wr_addr = pend_voice;
         we_accum = pend_accum && !host_fresh_accum[pend_voice];
-        we_lvol = pend_lvol && !host_fresh_lvol[pend_voice];
-        we_rvol = pend_rvol && !host_fresh_rvol[pend_voice];
-        we_k1 = pend_k1 && !host_fresh_k1[pend_voice];
-        we_k2 = pend_k2 && !host_fresh_k2[pend_voice];
+        // The OTTO 11.5 group abort must hold on the replay too: a host
+        // ECOUNT write landing between capture and this replay aborts the
+        // whole LVOL/RVOL/K1/K2 ramp step, not only ECOUNT's own register.
+        we_lvol = pend_lvol && !host_fresh_lvol[pend_voice] &&
+                  !host_fresh_ecount[pend_voice];
+        we_rvol = pend_rvol && !host_fresh_rvol[pend_voice] &&
+                  !host_fresh_ecount[pend_voice];
+        we_k1 = pend_k1 && !host_fresh_k1[pend_voice] &&
+                !host_fresh_ecount[pend_voice];
+        we_k2 = pend_k2 && !host_fresh_k2[pend_voice] &&
+                !host_fresh_ecount[pend_voice];
         we_ecount = pend_ecount && !host_fresh_ecount[pend_voice];
         we_o4n1 = pend_o4n1 && !host_fresh_o4n1[pend_voice];
         we_o3n1 = pend_o3n1 && !host_fresh_o3n1[pend_voice];
@@ -480,7 +563,10 @@ always_comb begin
         // port is free (host_commit/eng_pending own the earlier branches, and
         // writebacks never coincide with a snapshot), and after the flush the
         // stored word equals the adjusted view every reader already saw.
-        if (eng_snap && cr_masks_nz_ev && !cold_init_active) begin
+        if (eng_snap && cr_masks_nz_ev && !cold_init_active &&
+            !cr_snap_missed) begin
+            // cr_snap_missed: q_control predates a host CR write from the
+            // last cycle; flushing masks over it would revert that write.
             we_control = 1'b1;
             w_control  = cr_apply(q_control, cr_eset_ev, cr_eclr_ev);
         end
@@ -728,6 +814,7 @@ always_ff @(posedge clk) begin
             cr_eset[i] <= '0;
             cr_eclr[i] <= '0;
         end
+        cr_scan_void     <= '0;
         page_r           <= 7'd0;
         reg_r            <= 4'd0;
         irqv_r           <= 8'h80;
@@ -755,27 +842,35 @@ always_ff @(posedge clk) begin
             // Dropping hold with steal alone lets eng_* sample host voice data.
             eng_hold        <= host_rd_steal || host_rd_pending;
 
+            // A snapshot that could not see a just-landed host CR write
+            // voids this scan's CR transitions: they were computed from the
+            // stale word. The next snapshot redoes them from the stored
+            // (new) CR -- MAME's serialized write-then-sample order.
+            if (eng_snap)
+                cr_scan_void[eng_voice] <= cr_snap_missed;
+
             // Sticky engine-CR masks. Merge on every engine CR writeback
             // (pure flops -- no port, no collision, no drop); newest
             // direction wins per bit. Cleared when they flush into the MLAB
             // at the voice's snapshot, or when a host CR write to the voice
-            // supersedes them.
-            if (eng_wr_cr) begin
+            // supersedes them. A voided scan's transitions are dropped, not
+            // merged -- they derive from a CR the host has already replaced.
+            if (eng_wr_cr && !cr_scan_void[eng_voice]) begin
                 cr_eset[eng_voice] <=
                     (cr_eset[eng_voice] & ~cr_pack(eng_cr_clr)) | cr_pack(eng_cr_set);
                 cr_eclr[eng_voice] <=
                     (cr_eclr[eng_voice] & ~cr_pack(eng_cr_set)) | cr_pack(eng_cr_clr);
             end
             else if (eng_snap && cr_masks_nz_ev && !cold_init_active &&
-                     !host_commit && !eng_pending) begin
+                     !host_commit && !eng_pending && !cr_snap_missed) begin
                 // Mirrors the combinational flush branch exactly: the write
                 // fired this cycle, so the stored word now equals the
                 // adjusted view and the masks retire.
                 cr_eset[eng_voice] <= '0;
                 cr_eclr[eng_voice] <= '0;
             end
-            if (host_commit && (commit_reg == 4'h0) && (commit_page < 7'h40) &&
-                !(eng_wr_cr && (commit_page[4:0] == eng_voice))) begin
+            if (host_commit && (host_reg == 4'h0) && (current_page < 7'h40) &&
+                !(eng_wr_cr && (voice == eng_voice))) begin
                 // (The eng_wr_cr exclusion: on an exact same-cycle collision
                 // the engine transition merges and survives the host write --
                 // a one-clock-stale CR bit is recoverable, a dropped BLE->LEI
@@ -785,9 +880,35 @@ always_ff @(posedge clk) begin
                 // the transition was visible to every read the host did
                 // before this write (the masks adjust the read paths), so
                 // discarding it now cannot lose information the host lacked.
-                cr_eset[commit_page[4:0]] <= '0;
-                cr_eclr[commit_page[4:0]] <= '0;
+                //
+                // This condition MUST be built from the same-cycle decode
+                // (host_reg / current_page / voice), never from
+                // commit_reg / commit_page: those are flops that still hold
+                // the PREVIOUS commit on the cycle host_commit pulses. The
+                // old registered form only cleared the masks when the
+                // preceding commit happened to be a CR write to the same
+                // voice, so a note-on's trailing CR write usually left the
+                // previous note's transition masks armed. cr_apply() then
+                // stamped them (LEI set, LPE/BLE cleared, DIR flipped) over
+                // the fresh CR and the snapshot flush made it permanent -- a
+                // voice with LEI forced on never runs its end-of-loop test
+                // and plays straight through the sample bank: the random
+                // warped music-fragment/voice playback reported on hardware.
+                cr_eset[voice] <= '0;
+                cr_eclr[voice] <= '0;
             end
+`ifdef SIMULATION
+            // Telemetry: how often the OLD (registered) condition would have
+            // left armed masks uncleared across a host CR write.
+            if (host_commit && (host_reg == 4'h0) && (current_page < 7'h40) &&
+                (|{cr_eset[voice], cr_eclr[voice]}) &&
+                !((commit_reg == 4'h0) && (commit_page[4:0] == voice) &&
+                  (commit_page < 7'h40))) begin
+                dbg_stale_mask_hits <= dbg_stale_mask_hits + 32'd1;
+                $display("ES5506_STALE_CR_MASK voice=%0d eset=%02x eclr=%02x time=%0t",
+                         voice, cr_eset[voice], cr_eclr[voice], $time);
+            end
+`endif
 
             if (host_rd_steal) begin
                 page_r <= current_page;

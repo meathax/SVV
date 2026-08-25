@@ -3582,6 +3582,28 @@ always @(posedge clk_sys) begin
         sample_underruns <= sample_underruns + 1;
 end
 
+// PCM capture (verification-only): dump the chip's stereo output as raw
+// s16le at the native 31.25 kHz stream rate. Enable with +PCM_OUT=<path>.
+// This exists so a divergence can be HEARD: the note-onset content of this
+// stream against MAME's WAV of the same scenario is what distinguishes
+// "cadence drift" from "extra notes playing".
+integer pcm_fd = 0;
+string  pcm_path;
+initial begin
+    if ($value$plusargs("PCM_OUT=%s", pcm_path)) begin
+        pcm_fd = $fopen(pcm_path, "wb");
+        if (pcm_fd == 0) $fatal(1, "PCM_OUT open failed: %s", pcm_path);
+    end
+end
+always @(posedge clk_sys) begin
+    if (pcm_fd != 0 && dut.sound_sample_tick) begin
+        $fwrite(pcm_fd, "%c%c%c%c",
+                audio_l[7:0], audio_l[15:8],
+                audio_r[7:0], audio_r[15:8]);
+    end
+end
+final if (pcm_fd != 0) $fclose(pcm_fd);
+
 // Output sample rate and worst fetch latency.
 //
 // The voice engine paces each voice to a FLOOR of SLOT_TICKS, but nothing
