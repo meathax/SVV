@@ -8,6 +8,7 @@ param(
     [int]$BusStartFrame = -1,
     [int]$BusStopFrame = -1,
     [switch]$InstructionCapture,
+    [switch]$SoundPcTrace,
     [switch]$DebuggerInstructionTrace,
     [switch]$DebuggerRegisterChangeTrace,
     [switch]$StateCrcCapture,
@@ -135,7 +136,8 @@ foreach ($name in @('SSV_HEADLESS_SCENARIO_FILE','SSV_HEADLESS_NEUTRAL_AFTER_FRA
         'SSV_HEADLESS_MAME_SHA256','SSV_HEADLESS_JOURNAL_SHA256',
         'SSV_HEADLESS_STRICT_ONLY',
         'SSV_HEADLESS_STATE_CAPTURE','SSV_HEADLESS_STATE_ADDRESS','SSV_HEADLESS_STATE_PC',
-        'SSV_HEADLESS_INSN_CAPTURE','SSV_HEADLESS_DEBUGGER_INSN_TRACE',
+        'SSV_HEADLESS_INSN_CAPTURE','SSV_HEADLESS_SOUND_PC_TRACE',
+        'SSV_HEADLESS_DEBUGGER_INSN_TRACE',
         'SSV_HEADLESS_DEBUGGER_REG_CHANGE_TRACE','SSV_HEADLESS_IRQ_HANDLER_PC',
         'SSV_HEADLESS_STATE_CRC_CAPTURE','SSV_HEADLESS_STATE_CRC_OUTPUT',
         'SSV_HEADLESS_DSW1','SSV_HEADLESS_DSW2',
@@ -174,6 +176,7 @@ if ($BarrierSidecar) {
     $env:SSV_HEADLESS_BARRIER_DIR = $barrierDir.Replace('\','/')
 }
 $env:SSV_HEADLESS_INSN_CAPTURE = if ($InstructionCapture) { '1' } else { '0' }
+$env:SSV_HEADLESS_SOUND_PC_TRACE = if ($SoundPcTrace) { '1' } else { '0' }
 $env:SSV_HEADLESS_DEBUGGER_INSN_TRACE = if ($DebuggerInstructionTrace) { '1' } else { '0' }
 $env:SSV_HEADLESS_DEBUGGER_REG_CHANGE_TRACE = if ($DebuggerRegisterChangeTrace) { '1' } else { '0' }
 $stateCrcPath = Join-Path $sessionPath 'mame-state.crc'

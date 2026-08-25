@@ -49,6 +49,10 @@ local state_crc_path = os.getenv("SSV_HEADLESS_STATE_CRC_OUTPUT") or
 -- boundary without mutating the machine.  It is diagnostic-only and remains
 -- absent from normal canonical captures.
 local instruction_capture = os.getenv("SSV_HEADLESS_INSN_CAPTURE") == "1"
+-- Optional, read-only PC annotation for sound-device bus records.  Unlike
+-- instruction_capture this installs no ROM tap or instruction hook, so it
+-- preserves the canonical MAME execution path.
+local sound_pc_capture = os.getenv("SSV_HEADLESS_SOUND_PC_TRACE") == "1"
 -- Optional, read-only instruction-hook trace.  Unlike the ROM read tap above,
 -- MAME's debugger tracer runs from device_debug::instruction_hook before every
 -- executed instruction, including instructions satisfied from the V60's
@@ -57,6 +61,11 @@ local instruction_capture = os.getenv("SSV_HEADLESS_INSN_CAPTURE") == "1"
 -- unchanged when it is disabled.
 local debugger_instruction_trace =
     os.getenv("SSV_HEADLESS_DEBUGGER_INSN_TRACE") == "1"
+-- Optional, read-only ST010 instruction trace.  It uses the same bounded
+-- debugger window as the V60 trace, but targets the actual :dsp device so a
+-- host-visible poll can be paired with the producer's instruction stream.
+local dsp_debugger_instruction_trace =
+    os.getenv("SSV_HEADLESS_DSP_DEBUGGER_TRACE") == "1"
 -- Low-volume architectural transition trace.  A debugger registerpoint runs
 -- at the real instruction hook and logs only boundaries where R2 or R23
 -- changed since the preceding boundary.  This is intentionally separate from
@@ -99,6 +108,8 @@ end
 local machine = manager.machine
 local screen = assert(machine.screens[":screen"], "SSV :screen missing")
 local maincpu = assert(machine.devices[":maincpu"], "SSV :maincpu missing")
+local dsp = dsp_debugger_instruction_trace and
+    assert(machine.devices[":dsp"], "SSV :dsp missing") or nil
 local program = assert(maincpu.spaces["program"], "V60 program space missing")
 local ports = machine.ioport.ports
 local p1 = assert(ports[":P1"], "P1 missing")
@@ -184,6 +195,7 @@ end
 local receipt_written = false
 local debugger_trace_active = false
 local debugger_trace_path = root .. "/mame-v60-debugger.tr"
+local dsp_debugger_trace_path = root .. "/mame-st010-debugger.tr"
 local debugger_register_change_installed = false
 
 local function update_debugger_post_epoch_frame()
@@ -212,6 +224,9 @@ end
 local function stop_debugger_instruction_trace()
     if not debugger_trace_active then return end
     machine.debugger:command("trace off,:maincpu")
+    if dsp_debugger_instruction_trace then
+        machine.debugger:command("trace off,:dsp")
+    end
     machine.debugger:command("traceflush")
     debugger_trace_active = false
     trace:write(string.format(
@@ -246,6 +261,14 @@ local function start_debugger_instruction_trace()
     local command = string.format(
         'trace "%s",:maincpu,noloop,%s', debugger_trace_path, action)
     machine.debugger:command(command)
+    if dsp_debugger_instruction_trace then
+        -- The default debugger trace line contains the DSP disassembly and
+        -- PC, avoiding assumptions about debugger expression names for this
+        -- custom CPU.  It is kept in its own artifact and bounded by the
+        -- same frame window as the V60 trace.
+        machine.debugger:command(
+            string.format('trace "%s",:dsp,noloop', dsp_debugger_trace_path))
+    end
     debugger_trace_active = true
     trace:write(string.format(
         '{"record":"barrier","name":"mame_debugger_instruction_trace_start","phase":"completed","frame":%d,"post_epoch_frame":%d,"artifact":"%s","register_aliases":["AP","FP","SP"],"loop_suppression":false}\n',
@@ -466,11 +489,11 @@ local function emit_bus(rw, address, data, mask)
         trace:write(string.format('{"record":"barrier","name":"reset_release","phase":"completed","frame":%d}\n', frame))
         first_event = false
     end
-    if strict_only then
+    if strict_only and not (sound_pc_capture and device == 9) then
         trace:write(string.format(
             '{"domain":"mainbus","seq":%d,"event":"bus","phase":"completed","rw":"%s","address":%d,"data":%d,"byte_enable":%d,"device":%d}\n',
             seq, rw, address & 0xfffffe, data & lane_mask & 0xffff, be, device))
-    elseif instruction_capture then
+    elseif instruction_capture or (sound_pc_capture and device == 9) then
         trace:write(string.format(
             '{"domain":"mainbus","seq":%d,"event":"bus","phase":"completed","rw":"%s","address":%d,"data":%d,"byte_enable":%d,"device":%d,"pc":%d,"instruction_pc":%d,"reset_epoch":%d,"frame":%d,"scanline":%d,"hpos":%d}\n',
             seq, rw, address & 0xfffffe, data & lane_mask & 0xffff, be,
@@ -644,7 +667,7 @@ local function write_ppm(target_frame)
 end
 
 apply_inputs(0)
-trace:write(string.format('{"record":"contract","schema":"mister-raw-trace-v4","producer":"mame-0.289-headless","mame_version":"%s","mame_sha256":"%s","headless":true,"display_backend":"none","strict_candidate":"cpu_data","diagnostic_domain":"mainbus","program_rom_device_excluded":1,"strict_only":%s,"set":"%s","geometry":{"width":%d,"height":%d},"expected_frames":%d,"scenario_file":"%s","journal_sha256":"%s","coin_impulse":%d,"bus_capture":"%s","bus_start_frame":%d,"bus_stop_frame":%d,"debugger_instruction_trace":%s,"debugger_register_change_trace":%s,"irq_handler_pc":%d,"irq_entry_trace":%s}\n', mame_version, mame_sha256, strict_only and "true" or "false", setname, width, height, max_frames, scenario_file, journal_sha256, coin_impulse, bus_capture, bus_start_frame, bus_stop_frame, debugger_instruction_trace and "true" or "false", debugger_register_change_trace and "true" or "false", irq_handler_pc or -1, irq_handler_pc and "true" or "false"))
+trace:write(string.format('{"record":"contract","schema":"mister-raw-trace-v4","producer":"mame-0.289-headless","mame_version":"%s","mame_sha256":"%s","headless":true,"display_backend":"none","strict_candidate":"cpu_data","diagnostic_domain":"mainbus","program_rom_device_excluded":1,"strict_only":%s,"set":"%s","geometry":{"width":%d,"height":%d},"expected_frames":%d,"scenario_file":"%s","journal_sha256":"%s","coin_impulse":%d,"bus_capture":"%s","bus_start_frame":%d,"bus_stop_frame":%d,"sound_pc_trace":%s,"debugger_instruction_trace":%s,"debugger_register_change_trace":%s,"irq_handler_pc":%d,"irq_entry_trace":%s}\n', mame_version, mame_sha256, strict_only and "true" or "false", setname, width, height, max_frames, scenario_file, journal_sha256, coin_impulse, bus_capture, bus_start_frame, bus_stop_frame, sound_pc_capture and "true" or "false", debugger_instruction_trace and "true" or "false", debugger_register_change_trace and "true" or "false", irq_handler_pc or -1, irq_handler_pc and "true" or "false"))
 install_debugger_register_change_trace()
 
 emu.register_frame_done(function()

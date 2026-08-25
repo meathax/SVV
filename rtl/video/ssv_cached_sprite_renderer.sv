@@ -17,11 +17,9 @@ module ssv_cached_sprite_renderer #(
     input  logic         rst,
     input  ssv_pkg::ssv_cfg_t cfg,
     input  logic         cache_start,
-    // One-cycle pulse: the CPU completed a write to sprite RAM or the video
-    // registers while the build was reading them. The build must restart or
-    // it captures a mix of two frames' state -- the torn-frame seam and HUD
-    // shimmer observed on hardware. The core gates this to early vblank so a
-    // late write cannot push the rebuild past the raster deadline.
+    // One-cycle pulse on the first accepted sprite-list/scroll write in the
+    // measured update window. Later writes are coalesced by the core so a
+    // dense list cannot chase the build into an empty deadline publication.
     input  logic         cache_restart,
     // Asserted once the raster reaches the lines where the first display rows
     // must be prepared. The vblank descriptor build must give up by then --
@@ -539,6 +537,9 @@ endfunction
 
 wire signed [10:0] global_y_base_s = signed10(global_y_base);
 
+// The modulo-2^10 axis sums are captured from the paired sprite-RAM
+// outputs at BUILD_LOCAL_1, after both global and offset terms are registered.
+
 wire [3:0] build_offset_index = {global_w0[7:5], 1'b0};
 wire [4:0] build_tilemap_base = {local_w0[2:0], 2'b00};
 wire [15:0] build_tile_scroll_x =
@@ -599,6 +600,28 @@ logic signed [17:0] build_tile_scroll_x_work;
 logic [16:0] build_tile_map_y_bias;
 logic [19:0] build_code;
 logic build_flip_x, build_flip_y;
+// The paired sprite-RAM outputs are valid in BUILD_LOCAL_1. Capture the
+// modulo-2^10 axis work there so BUILD_EVALUATE does not carry the local-word
+// adder through visibility and line-address selection in one cycle. The
+// cache restart path holds the CPU-writable controls stable for this capture.
+wire [9:0] build_sx_capture_sum_low =
+    spr_data[9:0] + build_gx_off_r[9:0];
+wire [9:0] build_sy_capture_sum_low =
+    spr_data_next[9:0] + build_gy_off_r[9:0];
+logic signed [16:0] build_sx_work_capture;
+logic signed [16:0] build_sy_work_capture;
+
+always_comb begin
+    build_sx_work_capture = signed10({6'd0, build_sx_capture_sum_low});
+    build_sy_work_capture = signed10({6'd0, build_sy_capture_sum_low});
+    if (flip_control[14]) begin
+        build_sy_work_capture = -build_sy_work_capture;
+        if (!flip_control[15])
+            build_sy_work_capture = build_sy_work_capture - 17'sd16;
+    end
+    if (flip_control[12])
+        build_sx_work_capture = -build_sx_work_capture + 17'sd256;
+end
 
 always_comb begin
     calc_xbits = 2'd0;
@@ -663,22 +686,10 @@ always_comb begin
                    (flip_control[12] && !flip_control[13]);
     build_flip_y = local_w1[14] ^
                    (flip_control[14] && !flip_control[13]);
-
-    build_sx_work = signed10(local_w2 + build_gx_off_r);
-    build_sy_work = signed10(local_w3 + build_gy_off_r);
     build_offsx = signed8(flip_control);
     build_offsy = -(signed10(global_y_base) +
                     $signed({1'b0, global_y_adjust}) + 17'sd1);
-
-    if (flip_control[14]) begin
-        build_sy_work = -build_sy_work;
-        if (!flip_control[15])
-            build_sy_work = build_sy_work - 17'sd16;
-    end
-    if (flip_control[12])
-        build_sx_work = -build_sx_work + 17'sd256;
-
-    if (coordinate_control == 16'h7140) begin
+if (coordinate_control == 16'h7140) begin
         build_sx = build_offsx + build_sx_work;
         build_sy = build_offsy - build_sy_work;
     end
@@ -1049,6 +1060,8 @@ always_ff @(posedge clk) begin
         build_offset_y <= 16'd0;
         build_gx_off_r <= 16'd0;
         build_gy_off_r <= 16'd0;
+        build_sx_work <= 17'sd0;
+        build_sy_work <= 17'sd0;
         sprite_code <= 20'd0;
         sprite_xnum <= 4'd0;
         sprite_ynum <= 4'd0;
@@ -1177,16 +1190,12 @@ always_ff @(posedge clk) begin
         // it reflects the post-write state. Deadline containment above wins
         // if both fire on the same edge.
         //
-        // BUILD_CLEAR_LINES is excluded because it has read no descriptor yet:
-        // it only walks line_count clearing counters, so no CPU write can have
-        // torn anything it holds, and rewinding it just repeats the 240-cycle
-        // clear. That mattered more than it looks -- measured on vasara, every
-        // one of the 2255 restarts seen across 90 frames (~25 per frame) was in
-        // this state, so the build spent the whole protected window restarting
-        // its clear phase instead of making progress. Letting the clear run to
-        // completion leaves the descriptor walk itself protected exactly as
-        // before, since cache_restart still aborts every state after this one.
-        else if (cache_busy && cache_restart && (state != BUILD_CLEAR_LINES)) begin
+        // The core coalesces the measured vblank write burst, so this restart
+        // is also allowed during BUILD_CLEAR_LINES. The first write can arrive
+        // before the descriptor walk starts; rewinding once is cheaper than
+        // letting the walk capture a pre-write frame, while later writes in the
+        // same window cannot restart the clear again.
+        else if (cache_busy && cache_restart) begin
 `ifdef SIMULATION
             $display("CACHE_RESTART state=%0d writes=%0d", state,
                      cache_write_count);
@@ -1292,6 +1301,8 @@ always_ff @(posedge clk) begin
             BUILD_LOCAL_1: begin
                 local_w2 <= spr_data;
                 local_w3 <= spr_data_next;
+                build_sx_work <= build_sx_work_capture;
+                build_sy_work <= build_sy_work_capture;
                 if (local_index == 0)
                     tilemaps_offsy <= spr_data_next;
                 state <= BUILD_EVALUATE;

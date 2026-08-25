@@ -111,6 +111,7 @@ module ssv_core #(
     output logic       frame_tick,
     output logic signed [15:0] audio_l,
     output logic signed [15:0] audio_r,
+    output logic       audio_tick,
     // Sticky one-shot after exactly WDOG_TIMEOUT_CYCLES without the correct
     // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
@@ -145,14 +146,39 @@ module ssv_core #(
     , output logic        debug_watchdog_kick
     , output logic        debug_watchdog_reset
     , output logic        debug_st010_retire
+    , output logic [23:0] debug_st010_ir
     , output logic [13:0] debug_st010_pc
+    , output logic  [5:0] debug_st010_flaga
+    , output logic  [5:0] debug_st010_flagb
     , output logic        debug_st010_host_access
     , output logic        debug_st010_fetch_req
     , output logic        debug_st010_fetch_done
+    , output logic [13:0] debug_st010_prg_addr
+    , output logic [23:0] debug_st010_prg_data
+    , output logic        debug_st010_ram_write
+    , output logic [10:0] debug_st010_ram_addr
+    , output logic [15:0] debug_st010_ram_wdata
+    , output logic [10:0] debug_st010_host_ram_addr
+    , output logic        debug_st010_host_ram_high
+    , output logic [15:0] debug_st010_host_ram_q
+    , output logic  [7:0] debug_st010_host_ram_dout
+    , output logic  [2:0] debug_st010_state
     , output logic        debug_sound_commit
     , output logic  [6:0] debug_sound_page
     , output logic  [3:0] debug_sound_reg
     , output logic [31:0] debug_sound_data
+    , output logic        debug_sound_engine_cr_write
+    , output logic  [4:0] debug_sound_engine_voice
+    , output logic [15:0] debug_sound_engine_cr
+    , output logic [15:0] debug_sound_engine_cr_set
+    , output logic [15:0] debug_sound_engine_cr_clr
+    , output logic [16:0] debug_sound_engine_fc
+    , output logic [31:0] debug_sound_engine_start
+    , output logic [31:0] debug_sound_engine_end
+    , output logic [31:0] debug_sound_engine_accum
+    , output logic        debug_sound_engine_snapshot
+    , output logic        debug_sound_engine_accum_write
+    , output logic [31:0] debug_sound_engine_accum_w
     , output logic        debug_sound_irq_promote
     , output logic        debug_sound_voice_writeback
     , output logic  [4:0] debug_sound_voice
@@ -191,6 +217,7 @@ logic  [1:0] m_be;
 logic        cpu_irq_ack;
 logic        irq_n;
 logic  [7:0] irq_vector;
+wire [31:0] cpu_trace_pc;
 
 // Dedicated wide instruction-fetch port (FAST_IFETCH): prefetch reads whole
 // 8-byte ROM icache lines at clk_sys latency, bypassing the ce-gated 16-bit
@@ -223,7 +250,7 @@ s32_v60 #(.START_PC(32'hFFFF_FFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) cpu (
     .bus_size(c_size), .bus_wdata(c_wdata),
     .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(irq_n), .irq_vector(irq_vector), .irq_ack(cpu_irq_ack),
-    .nmi_n(1'b1)
+    .nmi_n(1'b1), .trace_pc(cpu_trace_pc)
 `ifdef SIMULATION
     , .dbg_pc(debug_pc), .dbg_halted(cpu_halted),
     .dbg_retire(debug_v60_retire), .dbg_retire_pc(cpu_retire_pc),
@@ -650,6 +677,31 @@ assign renderer_shadow_4bit = obj_busy ? obj_shadow_4bit : bg_shadow_4bit;
 assign renderer_busy = bg_busy | obj_busy;
 assign renderer_done = obj_done;
 
+// Sprite-list writes are clustered in the first nine visible-height lines of
+// vblank. Restarting the cache on every accepted write made the build chase
+// the CPU's list walk: a late write could abort BUILD_REINDEX and the repeated
+// rebuilds then reached cache_deadline with no publishable index. Issue one
+// restart on the first accepted write and suppress the rest of that window;
+// this preserves the full remaining vblank budget for the rebuild.
+logic cache_write_pending;
+wire cache_list_write_accept = m_req && m_we &&
+                               (sel_sprlist || sel_scroll) &&
+                               ack_r && !ack_r_d;
+wire cache_write_window = (vcnt >= active_height) &&
+                          (vcnt < active_height + 9'd9);
+wire cache_restart_flush = cache_list_write_accept &&
+                            cache_write_window && !cache_write_pending;
+wire cache_write_window_end = ce_pixel && (hcnt == 9'd0) &&
+                              (vcnt == active_height + 9'd9);
+always_ff @(posedge clk_sys) begin
+    if (rst)
+        cache_write_pending <= 1'b0;
+    else if (cache_write_window_end)
+        cache_write_pending <= 1'b0;
+    else if (cache_restart_flush)
+        cache_write_pending <= 1'b1;
+end
+
 ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst),
     // Same edge that re-arms the descriptor cache build (cache_start below)
@@ -713,12 +765,10 @@ ssv_cached_sprite_renderer sprite_renderer (
     // committed cache mixed two frames' lists and sprites appeared for one
     // frame and vanished the next -- the flicker reported on vasara/vasara2.
     // Covering through 248 closes that hole. It is affordable only because the
-    // trigger is now scoped to sel_sprlist: the payload streaming that resumes
-    // on line 250 is excluded, so a wider window cannot livelock the build.
-    .cache_restart(m_req && m_we && (sel_sprlist || sel_scroll) &&
-                   ack_r && !ack_r_d &&
-                   (vcnt >= active_height) &&
-                   (vcnt < active_height + 9'd9)),
+    // The first accepted write in the measured window is coalesced above.
+    // Payload streaming that resumes on line 250 is excluded, so later writes
+    // cannot livelock the build.
+    .cache_restart(cache_restart_flush),
     .cache_deadline(cache_deadline),
     .start(bg_done),
     .target_y(render_line_y),
@@ -1213,10 +1263,18 @@ wire [15:0] st010_rdata;
 logic [1:0] st010_rd_cnt;
 `ifdef SIMULATION
 wire        st010_debug_retire;
+wire [23:0] st010_debug_ir;
 wire [13:0] st010_debug_pc;
 wire [15:0] st010_debug_a, st010_debug_b;
+wire  [5:0] st010_debug_flaga, st010_debug_flagb;
 wire [15:0] st010_debug_dp, st010_debug_dr, st010_debug_sr;
 wire [15:0] st010_debug_k, st010_debug_l, st010_debug_m, st010_debug_n;
+wire        st010_debug_ram_write;
+wire [10:0] st010_debug_ram_addr, st010_debug_host_ram_addr;
+wire [15:0] st010_debug_ram_wdata, st010_debug_host_ram_q;
+wire        st010_debug_host_ram_high;
+wire  [7:0] st010_debug_host_ram_dout;
+wire  [2:0] st010_debug_state;
 `endif
 
 // The project ships one universal RBF, so this daughterboard must always be
@@ -1247,11 +1305,20 @@ upd96050_st010 st010 (
     .int_req(1'b0), .p0(), .p1()
 
 `ifdef SIMULATION
-    , .dbg_retire(st010_debug_retire), .dbg_pc(st010_debug_pc),
+    , .dbg_retire(st010_debug_retire), .dbg_ir(st010_debug_ir),
+    .dbg_pc(st010_debug_pc),
     .dbg_a(st010_debug_a), .dbg_b(st010_debug_b),
+    .dbg_flaga(st010_debug_flaga), .dbg_flagb(st010_debug_flagb),
     .dbg_dp(st010_debug_dp), .dbg_dr(st010_debug_dr),
     .dbg_sr(st010_debug_sr), .dbg_k(st010_debug_k),
-    .dbg_l(st010_debug_l), .dbg_m(st010_debug_m), .dbg_n(st010_debug_n)
+    .dbg_l(st010_debug_l), .dbg_m(st010_debug_m), .dbg_n(st010_debug_n),
+    .dbg_ram_write(st010_debug_ram_write), .dbg_ram_addr(st010_debug_ram_addr),
+    .dbg_ram_wdata(st010_debug_ram_wdata),
+    .dbg_host_ram_addr(st010_debug_host_ram_addr),
+    .dbg_host_ram_high(st010_debug_host_ram_high),
+    .dbg_host_ram_q(st010_debug_host_ram_q),
+    .dbg_host_ram_dout(st010_debug_host_ram_dout),
+    .dbg_state(st010_debug_state)
 `endif
 );
 
@@ -1274,10 +1341,15 @@ wire sound_host_we = m_req && m_we && sel_sound && !ack_r && m_be[0];
 wire sound_host_re = m_req && !m_we && sel_sound &&
                      !ack_r && m_be[0] && (sound_rd_cnt == 2'd0);
 wire sound_irq_n;
+wire [6:0] sound_current_page;
 wire sound_commit;
 wire [6:0] sound_commit_page;
 wire [3:0] sound_commit_reg;
 wire [31:0] sound_commit_data;
+wire        sound_debug_host_commit;
+wire [6:0]  sound_debug_host_page;
+wire [3:0]  sound_debug_host_reg;
+wire [31:0] sound_debug_host_data;
 wire [4:0] sound_active_voices;
 wire [4:0] eng_voice;
 wire       eng_snap;
@@ -1298,6 +1370,71 @@ wire [8:0]  eng_ecount_w;
 wire        eng_irq_set;
 wire [4:0]  eng_irq_voice;
 wire        sound_sample_tick, sound_underrun;
+// Hardware-only Signal Tap history: retain the last sound-register commit so a
+// sample-qualified capture still carries the command that armed the voice.
+logic [31:0] stp_last_commit_pc;
+logic [23:0] stp_last_commit_addr;
+logic [7:0]  stp_last_commit_byte;
+logic [31:0] stp_last_commit_data;
+logic [6:0]  stp_last_commit_page;
+logic [3:0]  stp_last_commit_reg;
+logic        stp_last_commit_valid;
+
+always_ff @(posedge clk_sys) begin
+    if (rst) begin
+        stp_last_commit_pc    <= 32'd0;
+        stp_last_commit_addr  <= 24'd0;
+        stp_last_commit_byte  <= 8'd0;
+        stp_last_commit_data  <= 32'd0;
+        stp_last_commit_page  <= 7'd0;
+        stp_last_commit_reg   <= 4'd0;
+        stp_last_commit_valid <= 1'b0;
+    end
+    else if (sound_debug_host_commit) begin
+        stp_last_commit_pc    <= cpu_trace_pc;
+        stp_last_commit_addr  <= a;
+        stp_last_commit_byte  <= m_wdata[7:0];
+        stp_last_commit_data  <= sound_debug_host_data;
+        stp_last_commit_page  <= sound_debug_host_page;
+        stp_last_commit_reg   <= sound_debug_host_reg;
+        stp_last_commit_valid <= 1'b1;
+    end
+end
+
+// Preserved vector consumed by the audio-clock Signal Tap instance. It carries
+// only the command, interrupt, sample-tick, underrun, and SDRAM evidence
+// needed to locate the first corrupt-audio producer. It is observation-only.
+(* noprune, preserve *) reg [179:0] stp_core_trace;
+always @(posedge clk_sys) begin
+    if (rst) begin
+        stp_core_trace <= 180'd0;
+    end
+    else begin
+        stp_core_trace[31:0]   <= sound_debug_host_commit ? cpu_trace_pc : stp_last_commit_pc;
+        stp_core_trace[55:32]  <= sound_debug_host_commit ? a : stp_last_commit_addr;
+        stp_core_trace[63:56]  <= sound_debug_host_commit ? m_wdata[7:0] : stp_last_commit_byte;
+        stp_core_trace[95:64]  <= sound_debug_host_commit ? sound_debug_host_data : stp_last_commit_data;
+        stp_core_trace[102:96] <= sound_debug_host_commit ? sound_debug_host_page : stp_last_commit_page;
+        stp_core_trace[106:103] <= sound_debug_host_commit ? sound_debug_host_reg : stp_last_commit_reg;
+        stp_core_trace[113:107] <= sound_current_page;
+        stp_core_trace[114] <= ce_cpu;
+        stp_core_trace[115] <= rst;
+        stp_core_trace[116] <= sound_debug_host_commit;
+        stp_core_trace[117] <= stp_last_commit_valid | sound_debug_host_commit;
+        stp_core_trace[118] <= sound_irq_n;
+        stp_core_trace[119] <= eng_irq_set;
+        stp_core_trace[124:120] <= eng_irq_voice;
+        stp_core_trace[125] <= cpu_irq_ack;
+        stp_core_trace[133:126] <= irq_vector;
+        stp_core_trace[134] <= sound_sample_tick;
+        stp_core_trace[135] <= sound_underrun;
+        stp_core_trace[136] <= sdr_p4_req;
+        stp_core_trace[137] <= sdr_p4_ack;
+        stp_core_trace[163:138] <= sdr_p4_addr;
+        stp_core_trace[179:164] <= sdr_p4_dout;
+    end
+end
+
 
 // Share the CPU enable so voice and V60 stay phase-aligned (saves a second
 // fractional accumulator and matches board 16 MHz OTTO / V60 clocking).
@@ -1316,7 +1453,7 @@ ssv_es5506_regs sound_registers (
     .irq_set(eng_irq_set),
     .irq_voice(eng_irq_voice),
     .irq_n(sound_irq_n),
-    .current_page(),
+    .current_page(sound_current_page),
     .active_voices(sound_active_voices),
     .mode(),
     .word_clock_start(),
@@ -1326,6 +1463,10 @@ ssv_es5506_regs sound_registers (
     .commit_page(sound_commit_page),
     .commit_reg(sound_commit_reg),
     .commit_data(sound_commit_data),
+    .debug_host_commit(sound_debug_host_commit),
+    .debug_host_page(sound_debug_host_page),
+    .debug_host_reg(sound_debug_host_reg),
+    .debug_host_data(sound_debug_host_data),
     .eng_voice(eng_voice),
     .eng_snap(eng_snap),
     .eng_cr(eng_cr), .eng_cr_valid(eng_cr_valid),
@@ -1389,6 +1530,8 @@ ssv_es5506_voice sound_voices (
     .sample_tick(sound_sample_tick), .underrun(sound_underrun),
     .eng_snap(eng_snap)
 );
+
+assign audio_tick = sound_sample_tick;
 
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;
@@ -1641,14 +1784,39 @@ always_comb begin
     debug_watchdog_kick = wdog_kick;
     debug_watchdog_reset = wdog_rst;
     debug_st010_retire = st010_debug_retire;
+    debug_st010_ir = st010_debug_ir;
     debug_st010_pc = st010_debug_pc;
+    debug_st010_flaga = st010_debug_flaga;
+    debug_st010_flagb = st010_debug_flagb;
     debug_st010_host_access = debug_mainbus_complete && sel_st010;
     debug_st010_fetch_req = st010_prg_req;
     debug_st010_fetch_done = st010_prg_valid;
+    debug_st010_prg_addr = st010_prg_addr;
+    debug_st010_prg_data = st010_prg_data;
+    debug_st010_ram_write = st010_debug_ram_write;
+    debug_st010_ram_addr = st010_debug_ram_addr;
+    debug_st010_ram_wdata = st010_debug_ram_wdata;
+    debug_st010_host_ram_addr = st010_debug_host_ram_addr;
+    debug_st010_host_ram_high = st010_debug_host_ram_high;
+    debug_st010_host_ram_q = st010_debug_host_ram_q;
+    debug_st010_host_ram_dout = st010_debug_host_ram_dout;
+    debug_st010_state = st010_debug_state;
     debug_sound_commit = sound_commit;
     debug_sound_page = sound_commit_page;
     debug_sound_reg = sound_commit_reg;
     debug_sound_data = sound_commit_data;
+    debug_sound_engine_cr_write = eng_wr_cr;
+    debug_sound_engine_voice = eng_voice;
+    debug_sound_engine_cr = eng_cr;
+    debug_sound_engine_cr_set = eng_cr_set;
+    debug_sound_engine_cr_clr = eng_cr_clr;
+    debug_sound_engine_fc = eng_fc;
+    debug_sound_engine_start = eng_start;
+    debug_sound_engine_end = eng_end;
+    debug_sound_engine_accum = eng_accum;
+    debug_sound_engine_snapshot = eng_snap;
+    debug_sound_engine_accum_write = eng_wr_accum;
+    debug_sound_engine_accum_w = eng_accum_w;
     debug_sound_irq_promote = eng_irq_set;
     debug_sound_voice_writeback = eng_wr_accum || eng_wr_cr ||
                                   eng_wr_filt || eng_wr_env;

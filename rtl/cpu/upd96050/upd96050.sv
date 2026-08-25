@@ -128,6 +128,7 @@ module upd96050 (
     // Simulation-only DSP observability.  Release synthesis has no debug
     // mirror outputs or associated fanout.
     output              dbg_retire,
+    output       [23:0] dbg_ir,
     output       [13:0] dbg_pc,
     output       [15:0] dbg_a,
     output       [15:0] dbg_b,
@@ -145,7 +146,15 @@ module upd96050 (
     output       [15:0] dbg_sr,
     output       [15:0] dbg_so,
     output       [15:0] dbg_idb,
-    output        [3:0] dbg_sp
+    output        [3:0] dbg_sp,
+    output              dbg_ram_write,
+    output       [10:0] dbg_ram_addr,
+    output       [15:0] dbg_ram_wdata,
+    output       [10:0] dbg_host_ram_addr,
+    output              dbg_host_ram_high,
+    output       [15:0] dbg_host_ram_q,
+    output        [7:0] dbg_host_ram_dout,
+    output        [2:0] dbg_state
 `endif
 );
 
@@ -584,12 +593,21 @@ integer i;
 logic retire_r;
 `ifdef SIMULATION
 assign dbg_retire = retire_r;
+assign dbg_ir = ir;
 assign dbg_pc = pc; assign dbg_a = areg; assign dbg_b = breg;
 assign dbg_flaga = flaga; assign dbg_flagb = flagb;
 assign dbg_k = k; assign dbg_l = l; assign dbg_m = m; assign dbg_n = n;
 assign dbg_dp = dp; assign dbg_rp = rp; assign dbg_tr = tr; assign dbg_trb = trb;
 assign dbg_dr = dr; assign dbg_sr = sr_val; assign dbg_so = so;
 assign dbg_idb = idb; assign dbg_sp = sp;
+assign dbg_ram_write = ram_we && (state == S_EXEC) && !ram_clear_active;
+assign dbg_ram_addr = dsp_ram_addr;
+assign dbg_ram_wdata = ram_wdata;
+assign dbg_host_ram_addr = host_ram_addr;
+assign dbg_host_ram_high = host_ram_high;
+assign dbg_host_ram_q = host_ram_q;
+assign dbg_host_ram_dout = host_ram_dout;
+assign dbg_state = state;
 `endif
 
 always_ff @(posedge clk) begin

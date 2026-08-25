@@ -30,6 +30,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_cached_sprite_rende
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_mlab32_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_audio_cdc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_scandoubler.sv
 # Vendored from rmonic79's CRT Adjust (GPLv3+), see rtl/crt_adjust.LICENSE. One

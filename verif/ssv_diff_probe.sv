@@ -36,14 +36,39 @@ module ssv_diff_probe (
     input logic watchdog_kick,
     input logic watchdog_reset,
     input logic st010_retire,
+    input logic [23:0] st010_ir,
     input logic [13:0] st010_pc,
+    input logic [5:0] st010_flaga,
+    input logic [5:0] st010_flagb,
     input logic st010_host_access,
     input logic st010_fetch_req,
     input logic st010_fetch_done,
+    input logic [13:0] st010_prg_addr,
+    input logic [23:0] st010_prg_data,
+    input logic st010_ram_write,
+    input logic [10:0] st010_ram_addr,
+    input logic [15:0] st010_ram_wdata,
+    input logic [10:0] st010_host_ram_addr,
+    input logic st010_host_ram_high,
+    input logic [15:0] st010_host_ram_q,
+    input logic [7:0] st010_host_ram_dout,
+    input logic [2:0] st010_state,
     input logic sound_commit,
     input logic [6:0] sound_page,
     input logic [3:0] sound_reg,
     input logic [31:0] sound_data,
+    input logic sound_engine_cr_write,
+    input logic [4:0] sound_engine_voice,
+    input logic [15:0] sound_engine_cr,
+    input logic [15:0] sound_engine_cr_set,
+    input logic [15:0] sound_engine_cr_clr,
+    input logic [16:0] sound_engine_fc,
+    input logic [31:0] sound_engine_start,
+    input logic [31:0] sound_engine_end,
+    input logic [31:0] sound_engine_accum,
+    input logic sound_engine_snapshot,
+    input logic sound_engine_accum_write,
+    input logic [31:0] sound_engine_accum_w,
     input logic sound_irq_promote,
     input logic sound_voice_writeback,
     input logic [4:0] sound_voice,
@@ -64,11 +89,22 @@ string reg_trace_path;
 longint unsigned cycle;
 longint unsigned mainbus_seq, cpu_data_seq, retire_seq, ifetch_seq, irq_seq;
 longint unsigned watchdog_seq, st010_seq, sound_seq, video_seq;
+longint unsigned st010_host_seq;
+longint unsigned sound_diag_seq;
+longint unsigned audio_slot_seq;
+longint unsigned st010_diag_seq;
+longint unsigned audio_slot_frame;
+logic [31:0] audio_slot_seen;
 integer expected_watchdog_resets, expected_watchdog_min_frame, expected_watchdog_max_frame;
 longint unsigned start_cycle, stop_cycle, start_frame, stop_frame;
 longint unsigned max_events, total_events;
 bit frame_window_enabled;
 bit strict_only;
+bit sound_only;
+bit st010_retire_trace;
+bit st010_control_trace;
+bit st010_host_trace;
+bit audio_slot_trace;
 integer gpr_i;
 logic rst_d, video_enable_d;
 logic [7:0] irq_requested_d, irq_enabled_d;
@@ -78,6 +114,8 @@ longint unsigned reg_change_seq;
 logic reg_state_seen;
 logic [31:0] prev_r2, prev_r23, prev_retire_pc;
 logic [7:0] prev_retire_opcode;
+logic [13:0] prev_st010_pc;
+bit st010_pc_seen;
 
 function automatic logic enabled_now();
     enabled_now = (cycle >= start_cycle) &&
@@ -108,7 +146,13 @@ initial begin
     expected_watchdog_min_frame = 0;
     expected_watchdog_max_frame = 0;
     st010_seq = 0;
+    st010_host_seq = 0;
     sound_seq = 0;
+    sound_diag_seq = 0;
+    audio_slot_seq = 0;
+    st010_diag_seq = 0;
+    audio_slot_frame = '1;
+    audio_slot_seen = '0;
     video_seq = 0;
     total_events = 0;
     rst_d = 1'b1;
@@ -123,6 +167,8 @@ initial begin
     prev_r23 = 32'd0;
     prev_retire_pc = 32'd0;
     prev_retire_opcode = 8'd0;
+    prev_st010_pc = 14'd0;
+    st010_pc_seen = 1'b0;
     start_cycle = 0;
     stop_cycle = 0;
     start_frame = 0;
@@ -130,6 +176,10 @@ initial begin
     frame_window_enabled = 1'b0;
     max_events = 0;
     strict_only = 1'b0;
+    sound_only = 1'b0;
+    st010_retire_trace = 1'b0;
+    st010_control_trace = 1'b0;
+    st010_host_trace = 1'b0;
     void'($value$plusargs("TRACE_START_CYCLE=%d", start_cycle));
     void'($value$plusargs("TRACE_STOP_CYCLE=%d", stop_cycle));
     if ($value$plusargs("TRACE_START_FRAME=%d", start_frame))
@@ -140,6 +190,11 @@ initial begin
         $fatal(1, "TRACE_STOP_FRAME must be >= TRACE_START_FRAME");
     void'($value$plusargs("TRACE_MAX_EVENTS=%d", max_events));
     strict_only = $test$plusargs("TRACE_STRICT_ONLY");
+    sound_only = $test$plusargs("TRACE_SOUND_ONLY");
+    st010_retire_trace = $test$plusargs("ST010_RETIRE_TRACE");
+    st010_control_trace = $test$plusargs("ST010_CONTROL_TRACE");
+    st010_host_trace = $test$plusargs("ST010_HOST_TRACE");
+    audio_slot_trace = $test$plusargs("AUDIO_SLOT_TRACE");
     void'($value$plusargs("GAMEPLAY_ENTRY_FRAME=%d", gameplay_entry_frame));
     void'($value$plusargs("EXPECTED_WATCHDOG_RESETS=%d", expected_watchdog_resets));
     void'($value$plusargs("EXPECTED_WATCHDOG_MIN_FRAME=%d", expected_watchdog_min_frame));
@@ -148,8 +203,12 @@ initial begin
         trace_fd = $fopen(trace_path, "w");
         if (!trace_fd) $fatal(1, "cannot open MISTER_TRACE_OUT=%s", trace_path);
         $fwrite(trace_fd,
-            "{\"record\":\"contract\",\"schema\":\"mister-raw-trace-v4\",\"producer\":\"ssv-headless-rtl\",\"headless\":true,\"display_backend\":\"none\",\"strict_candidate\":\"cpu_data\",\"diagnostic_domain\":\"mainbus\",\"program_rom_device_excluded\":1,\"strict_only\":%s}\n",
-            strict_only ? "true" : "false");
+            "{\"record\":\"contract\",\"schema\":\"mister-raw-trace-v4\",\"producer\":\"ssv-headless-rtl\",\"headless\":true,\"display_backend\":\"none\",\"strict_candidate\":\"cpu_data\",\"diagnostic_domain\":\"mainbus\",\"program_rom_device_excluded\":1,\"strict_only\":%s,\"sound_only\":%s,\"st010_retire_trace\":%s,\"st010_control_trace\":%s,\"st010_host_trace\":%s,\"audio_slot_trace\":%s}\n",
+            strict_only ? "true" : "false", sound_only ? "true" : "false",
+            st010_retire_trace ? "true" : "false",
+            st010_control_trace ? "true" : "false",
+            st010_host_trace ? "true" : "false",
+            audio_slot_trace ? "true" : "false");
     end
     if ($value$plusargs("MISTER_REG_TRACE_OUT=%s", reg_trace_path)) begin
         reg_trace_fd = $fopen(reg_trace_path, "w");
@@ -240,7 +299,8 @@ always @(posedge clk) begin
                 cycle, frame);
             gameplay_entry_seen <= 1'b1;
         end
-        if (mainbus_complete) begin
+        if (mainbus_complete && !st010_control_trace &&
+            (!sound_only || mainbus_device == 8'd9 || mainbus_device == 8'd10)) begin
             reserve_event();
             if (strict_only)
                 $fwrite(trace_fd,
@@ -257,7 +317,7 @@ always @(posedge clk) begin
             if (mainbus_device != 8'd1)
                 cpu_data_seq <= cpu_data_seq + 1;
         end
-        if (!strict_only && ifetch_complete) begin
+        if (!strict_only && !sound_only && ifetch_complete) begin
             reserve_event();
             $fwrite(trace_fd,
                 "{\"domain\":\"v60_ifetch\",\"seq\":%0d,\"event\":\"fetch64\",\"phase\":\"completed\",\"address\":%0d,\"data\":%0d,\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n",
@@ -266,7 +326,7 @@ always @(posedge clk) begin
                 $fwrite(trace_fd, "{\"record\":\"barrier\",\"name\":\"first_fetch\",\"phase\":\"completed\",\"cycle\":%0d}\n", cycle);
             ifetch_seq <= ifetch_seq + 1;
         end
-        if (!strict_only && retire) begin
+        if (!strict_only && !sound_only && retire) begin
             reserve_event();
             $fwrite(trace_fd,
                 "{\"domain\":\"v60_retire\",\"seq\":%0d,\"event\":\"instruction_boundary\",\"phase\":\"completed\",\"pc\":%0d,\"opcode\":%0d,\"psw\":%0d,\"cycle\":%0d,\"frame\":%0d,\"post_epoch_frame\":%0d,\"scanline\":%0d",
@@ -288,28 +348,48 @@ always @(posedge clk) begin
                 irq_enabled, irq_vector, pc, cycle, frame, scanline);
             irq_seq <= irq_seq + 1;
         end
-        if (!strict_only && (watchdog_kick || watchdog_reset)) begin
+        if (!strict_only && !sound_only && (watchdog_kick || watchdog_reset)) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"watchdog\",\"seq\":%0d,\"event\":\"%s\",\"phase\":\"completed\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d}\n", watchdog_seq, watchdog_reset ? "reset" : "kick", pc, cycle, frame);
             watchdog_seq <= watchdog_seq + 1;
         end
-        if (!strict_only && st010_retire) begin
-            reserve_event();
-            $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"retire\",\"phase\":\"completed\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq, st010_pc, cycle, frame, scanline);
+        if (!strict_only && (!sound_only || st010_retire_trace) && st010_retire) begin
+            if (!st010_control_trace || !st010_pc_seen ||
+                st010_pc != (prev_st010_pc + 14'd1)) begin
+                reserve_event();
+                if (st010_control_trace)
+                    $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"control\",\"phase\":\"completed\",\"previous_pc\":%0d,\"pc\":%0d,\"ir\":%0d,\"flaga\":%0d,\"flagb\":%0d,\"prg_addr\":%0d,\"prg_data\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq, prev_st010_pc, st010_pc, st010_ir, st010_flaga, st010_flagb, st010_prg_addr, st010_prg_data, cycle, frame, scanline);
+                else
+                    $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"retire\",\"phase\":\"completed\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq, st010_pc, cycle, frame, scanline);
+            end
+            prev_st010_pc <= st010_pc;
+            st010_pc_seen <= 1'b1;
         end
-        if (!strict_only && st010_host_access) begin
+        if (!strict_only && st010_host_access && (!sound_only || st010_host_trace)) begin
             reserve_event();
-            $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"host_access\",\"phase\":\"completed\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq + st010_retire, st010_pc, cycle, frame, scanline);
+            $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"host_access\",\"phase\":\"completed\",\"rw\":\"%s\",\"address\":%0d,\"data\":%0d,\"byte_enable\":%0d,\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"post_epoch_frame\":%0d,\"scanline\":%0d}\n", st010_host_seq, mainbus_write ? "W" : "R", mainbus_addr, mainbus_data, mainbus_be, st010_pc, cycle, frame, post_epoch_frame, scanline);
+            st010_host_seq <= st010_host_seq + 1;
         end
-        if (!strict_only && st010_fetch_req) begin
+        if (!strict_only && !sound_only && st010_fetch_req) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"program_fetch_request\",\"phase\":\"accepted\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq + st010_retire + st010_host_access, st010_pc, cycle, frame, scanline);
         end
-        if (!strict_only && st010_fetch_done) begin
+        if (!strict_only && !sound_only && st010_fetch_done) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"st010\",\"seq\":%0d,\"event\":\"program_fetch_complete\",\"phase\":\"completed\",\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", st010_seq + st010_retire + st010_host_access + st010_fetch_req, st010_pc, cycle, frame, scanline);
         end
-        if (!strict_only && (st010_retire || st010_host_access || st010_fetch_req || st010_fetch_done))
+        if (!strict_only && st010_ram_write) begin
+            reserve_event();
+            $fwrite(trace_fd,
+                "{\"domain\":\"st010\",\"diag_seq\":%0d,\"event\":\"dsp_ram_write\",\"phase\":\"completed\",\"address\":%0d,\"data\":%0d,\"host_word\":%0d,\"host_high\":%0d,\"host_q\":%0d,\"host_dout\":%0d,\"state\":%0d,\"pc\":%0d,\"cycle\":%0d,\"frame\":%0d,\"post_epoch_frame\":%0d,\"scanline\":%0d}\n",
+                st010_diag_seq, st010_ram_addr, st010_ram_wdata,
+                st010_host_ram_addr, st010_host_ram_high, st010_host_ram_q,
+                st010_host_ram_dout, st010_state, st010_pc, cycle, frame,
+                post_epoch_frame, scanline);
+            st010_diag_seq <= st010_diag_seq + 1;
+        end
+        if (!strict_only && !sound_only &&
+            (st010_retire || st010_host_access || st010_fetch_req || st010_fetch_done))
             st010_seq <= st010_seq + st010_retire + st010_host_access +
                          st010_fetch_req + st010_fetch_done;
 
@@ -317,7 +397,7 @@ always @(posedge clk) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"host_commit\",\"phase\":\"completed\",\"page\":%0d,\"register\":%0d,\"data\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq, sound_page, sound_reg, sound_data, cycle, frame, scanline);
         end
-        if (!strict_only && sound_voice_writeback) begin
+        if (!strict_only && !sound_only && sound_voice_writeback) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"voice_writeback\",\"phase\":\"completed\",\"voice\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit, sound_voice, cycle, frame, scanline);
         end
@@ -325,29 +405,59 @@ always @(posedge clk) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"irq_promote\",\"phase\":\"completed\",\"voice\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback, sound_voice, cycle, frame, scanline);
         end
-        if (!strict_only && sample_req) begin
+        if (!strict_only && !sound_only && sample_req) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"sample_request\",\"phase\":\"accepted\",\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback + sound_irq_promote, cycle, frame, scanline);
         end
-        if (!strict_only && sample_done) begin
+        if (!strict_only && !sound_only && sample_done) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"sample_complete\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback + sound_irq_promote + sample_req, cycle, frame, scanline);
         end
-        if (!strict_only && sample_tick) begin
+        if (!strict_only && !sound_only && sample_tick) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"sample_tick\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback + sound_irq_promote + sample_req + sample_done, cycle, frame, scanline);
         end
-        if (!strict_only && sample_underrun) begin
+        if (!strict_only && !sound_only && sample_underrun) begin
             reserve_event();
             $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"underrun\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback + sound_irq_promote + sample_req + sample_done + sample_tick, cycle, frame, scanline);
         end
-        if (!strict_only && (sound_commit || sound_voice_writeback || sound_irq_promote ||
-            sample_req || sample_done || sample_tick || sample_underrun)
-        )
-            sound_seq <= sound_seq + sound_commit + sound_voice_writeback +
-                         sound_irq_promote + sample_req + sample_done +
-                         sample_tick + sample_underrun;
-        if (!strict_only && (video_enable != video_enable_d || line_boundary || frame_boundary || renderer_overrun)) begin
+        if (!strict_only && sound_engine_cr_write) begin
+            reserve_event();
+            $fwrite(trace_fd, "{\"domain\":\"es5506\",\"seq\":%0d,\"event\":\"engine_cr_write\",\"phase\":\"completed\",\"voice\":%0d,\"cr\":%0d,\"cr_set\":%0d,\"cr_clr\":%0d,\"fc\":%0d,\"start\":%0d,\"end\":%0d,\"accum\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_seq + sound_commit + sound_voice_writeback + sound_irq_promote + sample_req + sample_done + sample_tick + sample_underrun, sound_engine_voice, sound_engine_cr, sound_engine_cr_set, sound_engine_cr_clr, sound_engine_fc, sound_engine_start, sound_engine_end, sound_engine_accum, cycle, frame, scanline);
+        end
+        if (!strict_only && sound_engine_voice == 5'd30 && sound_engine_snapshot) begin
+            reserve_event();
+            $fwrite(trace_fd, "{\"domain\":\"es5506\",\"diag_seq\":%0d,\"event\":\"engine_snapshot\",\"phase\":\"completed\",\"voice\":%0d,\"cr\":%0d,\"fc\":%0d,\"start\":%0d,\"end\":%0d,\"accum\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_diag_seq, sound_engine_voice, sound_engine_cr, sound_engine_fc, sound_engine_start, sound_engine_end, sound_engine_accum, cycle, frame, scanline);
+            sound_diag_seq <= sound_diag_seq + 1;
+        end
+        if (!strict_only && audio_slot_trace && sound_engine_snapshot) begin
+            if (audio_slot_frame != frame) begin
+                audio_slot_frame = frame;
+                audio_slot_seen = '0;
+            end
+            if (!audio_slot_seen[sound_engine_voice]) begin
+                reserve_event();
+                $fwrite(trace_fd, "{\"domain\":\"es5506\",\"slot_seq\":%0d,\"event\":\"engine_slot_snapshot\",\"phase\":\"completed\",\"voice\":%0d,\"cr\":%0d,\"fc\":%0d,\"start\":%0d,\"end\":%0d,\"accum\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", audio_slot_seq, sound_engine_voice, sound_engine_cr, sound_engine_fc, sound_engine_start, sound_engine_end, sound_engine_accum, cycle, frame, scanline);
+                audio_slot_seen[sound_engine_voice] = 1'b1;
+                audio_slot_seq <= audio_slot_seq + 1;
+            end
+        end
+        if (!strict_only && sound_engine_voice == 5'd30 && sound_engine_accum_write) begin
+            reserve_event();
+            $fwrite(trace_fd, "{\"domain\":\"es5506\",\"diag_seq\":%0d,\"event\":\"engine_accum_write\",\"phase\":\"completed\",\"voice\":%0d,\"accum_w\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d}\n", sound_diag_seq, sound_engine_voice, sound_engine_accum_w, cycle, frame, scanline);
+            sound_diag_seq <= sound_diag_seq + 1;
+        end
+        if (!strict_only && (sound_commit || sound_irq_promote ||
+            sound_engine_cr_write ||
+            (!sound_only && (sound_voice_writeback || sample_req || sample_done ||
+                             sample_tick || sample_underrun))))
+            sound_seq <= sound_seq + sound_commit + sound_irq_promote +
+                         sound_engine_cr_write +
+                         (!sound_only ?
+                         (sound_voice_writeback + sample_req + sample_done +
+                          sample_tick + sample_underrun) : 0);
+        if (!strict_only && !sound_only &&
+            (video_enable != video_enable_d || line_boundary || frame_boundary || renderer_overrun)) begin
             reserve_event();
             $fwrite(trace_fd,
                 "{\"domain\":\"video\",\"seq\":%0d,\"event\":\"%s\",\"phase\":\"completed\",\"video_enable\":%0d,\"cycle\":%0d,\"frame\":%0d,\"scanline\":%0d,\"hpos\":%0d}\n",
@@ -358,7 +468,7 @@ always @(posedge clk) begin
             if (frame_boundary)
                 $fwrite(trace_fd, "{\"record\":\"barrier\",\"name\":\"frame_complete\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d}\n", cycle, frame);
         end
-        if (!strict_only && mainbus_complete && mainbus_write &&
+        if (!strict_only && !sound_only && mainbus_complete && mainbus_write &&
             (mainbus_device == 3 || mainbus_device == 4 || mainbus_device == 6)) begin
             reserve_event();
             $fwrite(trace_fd,
@@ -368,7 +478,8 @@ always @(posedge clk) begin
                 mainbus_device, mainbus_addr, mainbus_data,
                 mainbus_be, cycle, frame, scanline);
         end
-        if (!strict_only && ((video_enable != video_enable_d || line_boundary || frame_boundary ||
+        if (!strict_only && !sound_only &&
+            ((video_enable != video_enable_d || line_boundary || frame_boundary ||
              renderer_overrun) ||
             (mainbus_complete && mainbus_write &&
              (mainbus_device == 3 || mainbus_device == 4 || mainbus_device == 6))))
@@ -390,7 +501,8 @@ final begin
                 "{\"record\":\"barrier\",\"name\":\"stop\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d}\n",
                 cycle, frame);
             $fwrite(trace_fd,
-                "{\"record\":\"receipt\",\"reason\":\"stop_barrier\",\"complete\":true,\"dropped\":0,\"expected_watchdog\":{\"resets\":%0d,\"min_post_video_frame\":%0d,\"max_post_video_frame\":%0d},\"counts\":{\"mainbus\":%0d,\"cpu_data\":%0d,\"v60_retire\":%0d,\"v60_ifetch\":%0d,\"irq\":%0d,\"watchdog\":%0d,\"st010\":%0d,\"es5506\":%0d,\"video\":%0d}}\n",
+                "{\"record\":\"receipt\",\"reason\":\"stop_barrier\",\"complete\":true,\"dropped\":0,\"strict_only\":%s,\"sound_only\":%s,\"expected_watchdog\":{\"resets\":%0d,\"min_post_video_frame\":%0d,\"max_post_video_frame\":%0d},\"counts\":{\"mainbus\":%0d,\"cpu_data\":%0d,\"v60_retire\":%0d,\"v60_ifetch\":%0d,\"irq\":%0d,\"watchdog\":%0d,\"st010\":%0d,\"es5506\":%0d,\"video\":%0d}}\n",
+                strict_only ? "true" : "false", sound_only ? "true" : "false",
                 expected_watchdog_resets, expected_watchdog_min_frame, expected_watchdog_max_frame,
                 mainbus_seq, cpu_data_seq, retire_seq, ifetch_seq, irq_seq, watchdog_seq,
                 st010_seq, sound_seq, video_seq);
@@ -400,7 +512,8 @@ final begin
                 "{\"record\":\"barrier\",\"name\":\"aborted\",\"phase\":\"completed\",\"cycle\":%0d,\"frame\":%0d}\n",
                 cycle, frame);
             $fwrite(trace_fd,
-                "{\"record\":\"receipt\",\"reason\":\"aborted\",\"complete\":false,\"dropped\":0,\"counts\":{\"mainbus\":%0d,\"cpu_data\":%0d,\"v60_retire\":%0d,\"v60_ifetch\":%0d,\"irq\":%0d,\"watchdog\":%0d,\"st010\":%0d,\"es5506\":%0d,\"video\":%0d}}\n",
+                "{\"record\":\"receipt\",\"reason\":\"aborted\",\"complete\":false,\"dropped\":0,\"strict_only\":%s,\"sound_only\":%s,\"counts\":{\"mainbus\":%0d,\"cpu_data\":%0d,\"v60_retire\":%0d,\"v60_ifetch\":%0d,\"irq\":%0d,\"watchdog\":%0d,\"st010\":%0d,\"es5506\":%0d,\"video\":%0d}}\n",
+                strict_only ? "true" : "false", sound_only ? "true" : "false",
                 mainbus_seq, cpu_data_seq, retire_seq, ifetch_seq, irq_seq, watchdog_seq,
                 st010_seq, sound_seq, video_seq);
         end

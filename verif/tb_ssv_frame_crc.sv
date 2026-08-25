@@ -164,9 +164,10 @@ logic [15:0] beh_p0_dout, beh_p4_dout;
 logic [127:0] beh_p2_dout;
 logic        beh_p5_ack;
 logic [63:0] beh_p5_dout;
-logic        real_p0_ack, real_p2_ack, real_wr_ack, real_p4_ack;
+logic        real_p0_ack, real_p2_ack, real_wr_ack, real_p4_ack, real_p5_ack;
 logic [15:0] real_p0_dout, real_p4_dout;
 logic [127:0] real_p2_dout;
+logic [63:0] real_p5_dout;
 logic        sdram_ready;
 
 // clk_ram is exactly twice clk_sys on hardware (96.6 / 48.3 MHz). Getting this
@@ -216,7 +217,7 @@ ssv_sdram_harness #(
     .p4_req(sdr_p4_req), .p4_addr(sdr_p4_addr),
     .p4_dout(real_p4_dout), .p4_ack(real_p4_ack),
     .p5_req(sdr_p5_req), .p5_addr(sdr_p5_addr),
-    .p5_dout(sdr_p5_dout), .p5_ack(sdr_p5_ack)
+    .p5_dout(real_p5_dout), .p5_ack(real_p5_ack)
 );
 `else
 // Live lockstep uses the deterministic one-cycle behavioural ports below.
@@ -285,9 +286,11 @@ assign sdr_p0_ack  = use_real_sdram ? real_p0_ack  : beh_p0_ack;
 assign sdr_p2_ack  = use_real_sdram ? real_p2_ack  : beh_p2_ack;
 assign sdr_wr_ack  = use_real_sdram ? real_wr_ack  : beh_wr_ack;
 assign sdr_p4_ack  = use_real_sdram ? real_p4_ack  : beh_p4_ack;
+assign sdr_p5_ack  = use_real_sdram ? real_p5_ack  : beh_p5_ack;
 assign sdr_p0_dout = use_real_sdram ? real_p0_dout : beh_p0_dout;
 assign sdr_p2_dout = use_real_sdram ? real_p2_dout : beh_p2_dout;
 assign sdr_p4_dout = use_real_sdram ? real_p4_dout : beh_p4_dout;
+assign sdr_p5_dout = use_real_sdram ? real_p5_dout : beh_p5_dout;
 `endif
 logic [23:0] rgb;
 logic ce_pixel, hs, vs, hb, vb;
@@ -316,13 +319,31 @@ logic debug_watchdog_kick;
 logic debug_watchdog_reset;
 logic debug_st010_retire, debug_st010_host_access;
 logic debug_st010_fetch_req, debug_st010_fetch_done;
+logic [13:0] debug_st010_prg_addr;
+logic [23:0] debug_st010_prg_data;
+logic [23:0] debug_st010_ir;
 logic [13:0] debug_st010_pc;
+logic [5:0] debug_st010_flaga, debug_st010_flagb;
+logic debug_st010_ram_write;
+logic [10:0] debug_st010_ram_addr, debug_st010_host_ram_addr;
+logic [15:0] debug_st010_ram_wdata, debug_st010_host_ram_q;
+logic debug_st010_host_ram_high;
+logic [7:0] debug_st010_host_ram_dout;
+logic [2:0] debug_st010_state;
 logic debug_sound_commit, debug_sound_irq_promote;
 logic debug_sound_voice_writeback;
 logic [4:0] debug_sound_voice;
 logic [6:0] debug_sound_page;
 logic [3:0] debug_sound_reg;
 logic [31:0] debug_sound_data;
+logic debug_sound_engine_cr_write;
+logic [4:0] debug_sound_engine_voice;
+logic [15:0] debug_sound_engine_cr;
+logic [15:0] debug_sound_engine_cr_set, debug_sound_engine_cr_clr;
+logic [16:0] debug_sound_engine_fc;
+logic [31:0] debug_sound_engine_start, debug_sound_engine_end, debug_sound_engine_accum;
+logic debug_sound_engine_snapshot, debug_sound_engine_accum_write;
+logic [31:0] debug_sound_engine_accum_w;
 logic debug_sample_req, debug_sample_done, debug_sample_tick, debug_sample_underrun;
 logic debug_video_enable, debug_line_boundary, debug_frame_boundary;
 `endif
@@ -388,10 +409,14 @@ integer sample_fd, sample_count;
 integer st010_fd, st010_count;
 string sample_path;
 string st010_path;
-// XRAM (128 KiB), CPU RAM (256 KiB), and Cairblad NVRAM (64 KiB) share the
-// external SDRAM behavioural window. The NVRAM is descriptor-selected and
-// uses the otherwise unused tail immediately above SDR_CPU_RAM_BASE.
-logic [15:0] external_ram [0:229375];
+// XRAM, CPU RAM, and descriptor-selected NVRAM share the external SDRAM
+// behavioural window. Cover the complete supported NVRAM tail: the previous
+// bound ended exactly at SDR_NVRAM_BASE, so the first $580000 read indexed one
+// word past the behavioural array and returned unrelated simulator storage.
+localparam int EXTERNAL_RAM_WORDS = int'(
+    (SDR_NVRAM_BASE + 27'd65536 - SDR_XRAM_BASE) >> 1);
+localparam logic [26:0] EXTERNAL_RAM_END = SDR_NVRAM_BASE + 27'd65536;
+logic [15:0] external_ram [0:EXTERNAL_RAM_WORDS-1];
 
 string main_path, sprite_path, crc_path, state_path, scenario;
 string game_name;
@@ -524,6 +549,7 @@ logic p0_seen, p1_seen, wr_seen, p4_seen, p5_seen;
 logic [3:0] p0_hold, p1_hold, wr_hold, p4_hold, p5_hold;
 logic [SDR_AW:0] p0_byte_addr, p1_byte_addr, p4_byte_addr, p5_byte_addr;
 integer st010_byte_offset;
+integer st010_p5_debug_count;
 integer ext_index, sprite_index, packed_code, packed_row, sample_offset;
 integer raw_q0_index, raw_q1_index, raw_q2_index;
 integer stuck, last_pc_i;
@@ -661,12 +687,36 @@ ssv_core dut (
     .debug_irq_requested(debug_irq_requested), .debug_irq_enabled(debug_irq_enabled),
     .debug_watchdog_kick(debug_watchdog_kick),
     .debug_watchdog_reset(debug_watchdog_reset),
-    .debug_st010_retire(debug_st010_retire), .debug_st010_pc(debug_st010_pc),
+    .debug_st010_retire(debug_st010_retire), .debug_st010_ir(debug_st010_ir),
+    .debug_st010_pc(debug_st010_pc),
+    .debug_st010_flaga(debug_st010_flaga), .debug_st010_flagb(debug_st010_flagb),
     .debug_st010_host_access(debug_st010_host_access),
     .debug_st010_fetch_req(debug_st010_fetch_req),
     .debug_st010_fetch_done(debug_st010_fetch_done),
+    .debug_st010_prg_addr(debug_st010_prg_addr),
+    .debug_st010_prg_data(debug_st010_prg_data),
+    .debug_st010_ram_write(debug_st010_ram_write),
+    .debug_st010_ram_addr(debug_st010_ram_addr),
+    .debug_st010_ram_wdata(debug_st010_ram_wdata),
+    .debug_st010_host_ram_addr(debug_st010_host_ram_addr),
+    .debug_st010_host_ram_high(debug_st010_host_ram_high),
+    .debug_st010_host_ram_q(debug_st010_host_ram_q),
+    .debug_st010_host_ram_dout(debug_st010_host_ram_dout),
+    .debug_st010_state(debug_st010_state),
     .debug_sound_commit(debug_sound_commit), .debug_sound_page(debug_sound_page),
     .debug_sound_reg(debug_sound_reg), .debug_sound_data(debug_sound_data),
+    .debug_sound_engine_cr_write(debug_sound_engine_cr_write),
+    .debug_sound_engine_voice(debug_sound_engine_voice),
+    .debug_sound_engine_cr(debug_sound_engine_cr),
+    .debug_sound_engine_cr_set(debug_sound_engine_cr_set),
+    .debug_sound_engine_cr_clr(debug_sound_engine_cr_clr),
+    .debug_sound_engine_fc(debug_sound_engine_fc),
+    .debug_sound_engine_start(debug_sound_engine_start),
+    .debug_sound_engine_end(debug_sound_engine_end),
+    .debug_sound_engine_accum(debug_sound_engine_accum),
+    .debug_sound_engine_snapshot(debug_sound_engine_snapshot),
+    .debug_sound_engine_accum_write(debug_sound_engine_accum_write),
+    .debug_sound_engine_accum_w(debug_sound_engine_accum_w),
     .debug_sound_irq_promote(debug_sound_irq_promote),
     .debug_sound_voice_writeback(debug_sound_voice_writeback),
     .debug_sound_voice(debug_sound_voice),
@@ -699,11 +749,33 @@ ssv_diff_probe diff_probe (
     .irq_vector(debug_irq_vector), .irq_requested(debug_irq_requested),
     .irq_enabled(debug_irq_enabled), .watchdog_kick(debug_watchdog_kick),
     .watchdog_reset(debug_watchdog_reset),
-    .st010_retire(debug_st010_retire), .st010_pc(debug_st010_pc),
+    .st010_retire(debug_st010_retire), .st010_ir(debug_st010_ir),
+    .st010_pc(debug_st010_pc),
+    .st010_flaga(debug_st010_flaga), .st010_flagb(debug_st010_flagb),
     .st010_host_access(debug_st010_host_access),
     .st010_fetch_req(debug_st010_fetch_req), .st010_fetch_done(debug_st010_fetch_done),
+    .st010_prg_addr(debug_st010_prg_addr), .st010_prg_data(debug_st010_prg_data),
+    .st010_ram_write(debug_st010_ram_write), .st010_ram_addr(debug_st010_ram_addr),
+    .st010_ram_wdata(debug_st010_ram_wdata),
+    .st010_host_ram_addr(debug_st010_host_ram_addr),
+    .st010_host_ram_high(debug_st010_host_ram_high),
+    .st010_host_ram_q(debug_st010_host_ram_q),
+    .st010_host_ram_dout(debug_st010_host_ram_dout),
+    .st010_state(debug_st010_state),
     .sound_commit(debug_sound_commit), .sound_page(debug_sound_page),
     .sound_reg(debug_sound_reg), .sound_data(debug_sound_data),
+    .sound_engine_cr_write(debug_sound_engine_cr_write),
+    .sound_engine_voice(debug_sound_engine_voice),
+    .sound_engine_cr(debug_sound_engine_cr),
+    .sound_engine_cr_set(debug_sound_engine_cr_set),
+    .sound_engine_cr_clr(debug_sound_engine_cr_clr),
+    .sound_engine_fc(debug_sound_engine_fc),
+    .sound_engine_start(debug_sound_engine_start),
+    .sound_engine_end(debug_sound_engine_end),
+    .sound_engine_accum(debug_sound_engine_accum),
+    .sound_engine_snapshot(debug_sound_engine_snapshot),
+    .sound_engine_accum_write(debug_sound_engine_accum_write),
+    .sound_engine_accum_w(debug_sound_engine_accum_w),
     .sound_irq_promote(debug_sound_irq_promote),
     .sound_voice_writeback(debug_sound_voice_writeback),
     .sound_voice(debug_sound_voice), .sample_req(debug_sample_req),
@@ -1052,6 +1124,7 @@ always_ff @(posedge clk_sys) begin
         p0_hold <= 4'd0; p1_hold <= 4'd0;
         wr_hold <= 4'd0; p4_hold <= 4'd0; p5_hold <= 4'd0;
         p1_transactions <= 0;
+        st010_p5_debug_count <= 0;
         visual_p2_nonzero_code_logs <= 0;
         visual_p2_max_code <= 0;
         visual_p2_code_valid <= 1'b0;
@@ -1120,7 +1193,8 @@ always_ff @(posedge clk_sys) begin
             // External RAM physically occupies the gap between the program
             // and graphics slots. Test it first: `< SDR_GFX_BASE` aliases
             // XRAM/CPU-RAM reads onto main_rom[] (Twin Eagle II stack pops).
-            if (p0_byte_addr >= SDR_XRAM_BASE && p0_byte_addr < SDR_SAMPLES_BASE) begin
+            if (p0_byte_addr >= SDR_XRAM_BASE &&
+                p0_byte_addr < EXTERNAL_RAM_END) begin
                 ext_index = (p0_byte_addr - SDR_XRAM_BASE) >> 1;
                 beh_p0_dout <= external_ram[ext_index];
             end else if (p0_byte_addr < SDR_XRAM_BASE)
@@ -1204,7 +1278,7 @@ always_ff @(posedge clk_sys) begin
         if (sdr_wr_req && !wr_seen) begin
             wr_seen <= 1'b1;
             if ({sdr_wr_addr, 1'b0} >= SDR_XRAM_BASE &&
-                {sdr_wr_addr, 1'b0} < SDR_SAMPLES_BASE) begin
+                {sdr_wr_addr, 1'b0} < EXTERNAL_RAM_END) begin
                 ext_index = ({sdr_wr_addr, 1'b0} - SDR_XRAM_BASE) >> 1;
                 if (sdr_wr_be[0])
                     external_ram[ext_index][7:0] <= sdr_wr_din[7:0];
@@ -1266,6 +1340,15 @@ always_ff @(posedge clk_sys) begin
             p5_seen <= 1'b1;
             p5_byte_addr = {sdr_p5_addr, 3'b000};
             st010_byte_offset = integer'(p5_byte_addr - SDR_ST010_BASE);
+            if ($test$plusargs("ST010_CONTROL_TRACE") && st010_p5_debug_count < 16) begin
+                $display("P5LOG req %0d byteaddr=%07h offset=%0d words=%04h,%04h,%04h,%04h",
+                    st010_p5_debug_count, p5_byte_addr, st010_byte_offset,
+                    st010_word(st010_byte_offset + 6),
+                    st010_word(st010_byte_offset + 4),
+                    st010_word(st010_byte_offset + 2),
+                    st010_word(st010_byte_offset + 0));
+                st010_p5_debug_count <= st010_p5_debug_count + 1;
+            end
             beh_p5_dout <= {
                 st010_word(st010_byte_offset + 6),
                 st010_word(st010_byte_offset + 4),
@@ -3045,7 +3128,7 @@ initial begin
     if (crc_fd == 0)
         $fatal(1, "cannot open FRAME_CRC path %s", crc_path);
 
-    for (i = 0; i < 229376; i = i + 1)
+    for (i = 0; i < EXTERNAL_RAM_WORDS; i = i + 1)
         external_ram[i] = 16'd0;
 
     apply_inputs(0);

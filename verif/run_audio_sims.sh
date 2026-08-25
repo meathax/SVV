@@ -46,6 +46,7 @@ CORE=(
   rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_srmp7_bank.sv
   rtl/audio/ssv_es5506_voice.sv
+  rtl/audio/ssv_audio_cdc.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally
   # and gates it on cfg.has_st010, so these are needed by every core build.
@@ -89,6 +90,17 @@ verilator-safe status
 voice_bin="$OUT/voice/tb_ssv_es5506_voice"; [[ -f "$voice_bin.exe" ]] && voice_bin="$voice_bin.exe"
 verilator-sim-safe -- "$voice_bin" | tee "$OUT/voice/run.log"
 
+echo "=== BUILD/RUN tb_ssv_audio_cdc ==="
+mkdir -p "$OUT/cdc"
+verilator-safe status
+verilator-safe "${VFLAGS[@]}" --top-module tb_ssv_audio_cdc \
+  --Mdir "$OUT/cdc" -o tb_ssv_audio_cdc \
+  rtl/audio/ssv_audio_cdc.sv verif/tb_ssv_audio_cdc.sv \
+  >"$OUT/cdc/build.log" 2>&1
+verilator-safe status
+cdc_bin="$OUT/cdc/tb_ssv_audio_cdc"; [[ -f "$cdc_bin.exe" ]] && cdc_bin="$cdc_bin.exe"
+verilator-sim-safe -- "$cdc_bin" | tee "$OUT/cdc/run.log"
+
 if [[ "${UNIT_ONLY:-0}" == 1 ]]; then
   echo "ALL AUDIO CHIP UNIT SIMS PASS"
   exit 0
@@ -114,8 +126,7 @@ verilator-sim-safe -- "$boot_bin" \
   "+DIFF_IRQ_SCHEDULE=$IRQ_SCHED" \
   "+SAMPLES=sim_output/rom/samples.bin" \
   "+ROM=sim_output/rom/maincpu.bin" \
-  "${AUDIO_ISOLATION_ARGS[@]}" \
-  | tee "$OUT/boot/run.log"
+  "${AUDIO_ISOLATION_ARGS[@]}" | tee "$OUT/boot/run.log"
 
 if [[ "${AUDIO_ISOLATION_DIAGNOSTIC:-0}" == 1 ]]; then
   echo "AUDIO ISOLATION DIAGNOSTIC PASS (not full-core acceptance)"

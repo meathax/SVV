@@ -126,7 +126,10 @@ module s32_v60 #(
     input             irq_n,         // level, active low
     input       [7:0] irq_vector,    // external vector (s32_intc), +0x40 applied here
     output reg        irq_ack,       // pulses when vector consumed
-    input             nmi_n
+    input             nmi_n,
+    // Synthesizable read-only observation point for hardware diagnosis.
+    // It is not part of the CPU functional contract.
+    output     [31:0] trace_pc
 
 `ifdef SIMULATION
     // Simulation-only CPU observability.  Release synthesis has no debug
@@ -157,6 +160,7 @@ initial begin
         r[init_reg_i] = 32'd0;
 end
 reg [31:0] pc;
+assign trace_pc = pc;
 reg [31:0] sbr, sycw, tkcw, pir, psw2;
 reg [31:0] isp, l0sp, l1sp, l2sp, l3sp;   // shadow stacks (inactive copies)
 reg [31:0] atbr0, atlr0, atbr1, atlr1, atbr2, atlr2, atbr3, atlr3;

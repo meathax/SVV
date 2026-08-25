@@ -19,6 +19,11 @@ param(
     [switch]$AssertIrqCadence,
     [switch]$IgnoreNonblack,
     [switch]$StrictOnly,
+    [switch]$SoundOnlyTrace,
+    [switch]$St010RetireTrace,
+    [switch]$St010ControlTrace,
+    [switch]$St010HostTrace,
+    [switch]$AudioSlotTrace,
     [switch]$NoStateCrc,
     [switch]$Acceleration,
     [string]$Restore = '',
@@ -157,6 +162,11 @@ if ($TraceStopFrame -ge 0) { $arguments += "+TRACE_STOP_FRAME=$TraceStopFrame" }
 if ($TraceMaxEvents -ne 0) { $arguments += "+TRACE_MAX_EVENTS=$TraceMaxEvents" }
 if ($CpuIncOverride -ne 0) { $arguments += "+CPU_INC_OVERRIDE=$CpuIncOverride" }
 if ($StrictOnly) { $arguments += '+TRACE_STRICT_ONLY' }
+if ($SoundOnlyTrace) { $arguments += '+TRACE_SOUND_ONLY' }
+if ($St010RetireTrace) { $arguments += '+ST010_RETIRE_TRACE' }
+if ($St010ControlTrace) { $arguments += '+ST010_CONTROL_TRACE' }
+if ($St010HostTrace) { $arguments += '+ST010_HOST_TRACE' }
+if ($AudioSlotTrace) { $arguments += '+AUDIO_SLOT_TRACE' }
 if ($Restore) {
     if (-not $Acceleration) { throw '-Restore requires -Acceleration' }
     $arguments += "+HEADLESS_RESTORE=$Restore"

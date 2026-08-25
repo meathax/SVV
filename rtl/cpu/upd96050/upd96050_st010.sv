@@ -118,16 +118,27 @@ module upd96050_st010 (
     ,
     // Simulation-only verification taps; omitted from the release wrapper.
     output              dbg_retire,
+    output       [23:0] dbg_ir,
     output       [13:0] dbg_pc,
     output       [15:0] dbg_a,
     output       [15:0] dbg_b,
+    output        [5:0] dbg_flaga,
+    output        [5:0] dbg_flagb,
     output       [15:0] dbg_dp,
     output       [15:0] dbg_dr,
     output       [15:0] dbg_sr,
     output       [15:0] dbg_k,
     output       [15:0] dbg_l,
     output       [15:0] dbg_m,
-    output       [15:0] dbg_n
+    output       [15:0] dbg_n,
+    output              dbg_ram_write,
+    output       [10:0] dbg_ram_addr,
+    output       [15:0] dbg_ram_wdata,
+    output       [10:0] dbg_host_ram_addr,
+    output              dbg_host_ram_high,
+    output       [15:0] dbg_host_ram_q,
+    output        [7:0] dbg_host_ram_dout,
+    output        [2:0] dbg_state
 `endif
 );
 
@@ -230,12 +241,16 @@ upd96050 dsp (
     .int_req(int_req), .p0(p0), .p1(p1)
 `ifdef SIMULATION
     ,
-    .dbg_retire(dbg_retire), .dbg_pc(dbg_pc),
+    .dbg_retire(dbg_retire), .dbg_ir(dbg_ir), .dbg_pc(dbg_pc),
     .dbg_a(dbg_a), .dbg_b(dbg_b),
-    .dbg_flaga(), .dbg_flagb(),
+    .dbg_flaga(dbg_flaga), .dbg_flagb(dbg_flagb),
     .dbg_k(dbg_k), .dbg_l(dbg_l), .dbg_m(dbg_m), .dbg_n(dbg_n),
     .dbg_dp(dbg_dp), .dbg_rp(), .dbg_tr(), .dbg_trb(),
-    .dbg_dr(dbg_dr), .dbg_sr(dbg_sr), .dbg_so(), .dbg_idb(), .dbg_sp()
+    .dbg_dr(dbg_dr), .dbg_sr(dbg_sr), .dbg_so(), .dbg_idb(), .dbg_sp(),
+    .dbg_ram_write(dbg_ram_write), .dbg_ram_addr(dbg_ram_addr),
+    .dbg_ram_wdata(dbg_ram_wdata), .dbg_host_ram_addr(dbg_host_ram_addr),
+    .dbg_host_ram_high(dbg_host_ram_high), .dbg_host_ram_q(dbg_host_ram_q),
+    .dbg_host_ram_dout(dbg_host_ram_dout), .dbg_state(dbg_state)
 `endif
 );
 

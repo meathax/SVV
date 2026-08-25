@@ -769,6 +769,9 @@ wire [23:0] core_rgb;
 wire core_ce, core_hs, core_vs, core_hb, core_vb;
 wire renderer_overrun;
 wire signed [15:0] core_audio_l, core_audio_r;
+wire core_audio_tick;
+wire signed [15:0] audio_cdc_l, audio_cdc_r;
+wire audio_cdc_ready, audio_cdc_valid;
 
 ssv_core core (
     .cfg(game_cfg),
@@ -800,9 +803,38 @@ ssv_core core (
     .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
+    .audio_tick(core_audio_tick),
     .wdog_rst(wdog_rst),
     .coin_lockout(), .renderer_overrun(renderer_overrun), .motor_output()
 );
+
+ssv_audio_cdc audio_cdc (
+    .src_clk(clk_sys), .src_rst(RESET | core_reset),
+    .src_valid(core_audio_tick), .src_l(core_audio_l), .src_r(core_audio_r),
+    .src_ready(audio_cdc_ready),
+    .dst_clk(CLK_AUDIO), .dst_rst(RESET | core_reset),
+    .dst_l(audio_cdc_l), .dst_r(audio_cdc_r), .dst_valid(audio_cdc_valid)
+);
+
+// Preserved output-boundary vector for the clk_audio Signal Tap instance.
+// This is observation-only; it is not in the AUDIO_L/AUDIO_R datapath.
+(* noprune, preserve *) reg [68:0] stp_output_audio_trace;
+always @(posedge CLK_AUDIO) begin
+    if (RESET || core_reset) begin
+        stp_output_audio_trace <= 69'd0;
+    end
+    else begin
+        stp_output_audio_trace[15:0] <= core_audio_l;
+        stp_output_audio_trace[31:16] <= core_audio_r;
+        stp_output_audio_trace[47:32] <= audio_cdc_l;
+        stp_output_audio_trace[63:48] <= audio_cdc_r;
+        stp_output_audio_trace[64] <= core_audio_tick;
+        stp_output_audio_trace[65] <= audio_cdc_valid;
+        stp_output_audio_trace[66] <= audio_cdc_ready;
+        stp_output_audio_trace[67] <= RESET;
+        stp_output_audio_trace[68] <= core_reset;
+    end
+end
 
 // ---------------------------------------------------------------------------
 // High score save/load (rtl/hiscore.v, alanswx / JimmyStones).
@@ -1220,8 +1252,8 @@ video_freak u_video_freak (
     .SCALE(scale_mode)
 );
 
-assign AUDIO_L = game_pause ? 16'd0 : core_audio_l;
-assign AUDIO_R = game_pause ? 16'd0 : core_audio_r;
+assign AUDIO_L = game_pause ? 16'd0 : audio_cdc_l;
+assign AUDIO_R = game_pause ? 16'd0 : audio_cdc_r;
 assign AUDIO_MIX = status[47:46];
 
 // {override, activity}: make a renderer deadline/cache overflow visible on
@@ -1230,7 +1262,7 @@ assign LED_DISK = {1'b1, renderer_overrun};
 
 // DDRAM_BUSY, DDRAM_DOUT and DDRAM_DOUT_READY are now genuinely consumed by
 // u_ddr_rom_loader above and must not be folded into this sink.
-wire unused_inputs = &{1'b0, CLK_AUDIO, SD_MISO,
+wire unused_inputs = &{1'b0, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,
                        clk_aux};
 
