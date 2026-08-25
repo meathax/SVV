@@ -714,10 +714,16 @@ wire         bob_deint;
 	ascal 
 	#(
 		.RAMBASE(32'h20000000),
-		// SSV's active image is 336 pixels wide.  Keep the scaler's maximum
-		// input-line width bounded even if downscaling is enabled in a later
-		// build; the default 2048-pixel width wastes RAM on this core.
-		.IHRES(512),
+		// Bound the scaler's downscale line buffer instead of taking the 2048
+		// default.  It is only elaborated under DownLine:IF DOWNSCALE GENERATE
+		// (ascal.vhd), which MISTER_DISABLE_DOWNSCALE in Arcade-SSV.qsf turns
+		// off, so this costs nothing today and only matters if a later build
+		// re-enables downscaling.  1024, not the 512 this said before: 336 is
+		// the NATIVE active width, but the core's line doubler feeds ascal a
+		// 672-pixel active line (908 total) whenever Video Fx or a forced
+		// scandoubler is on, and 512 would have been too small for exactly the
+		// build this bound was meant to protect.
+		.IHRES(1024),
 	`ifdef MISTER_SMALL_VBUF
 		.RAMSIZE(32'h00200000),
 	`else

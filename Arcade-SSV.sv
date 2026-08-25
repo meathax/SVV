@@ -102,8 +102,19 @@ import ssv_pkg::SDR_AW;
 localparam CONF_STR = {
     "SSV;;",
     "-;",
-    "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-    "O[44:43],Scale,Normal,Integer (Horizontal),V-Integer (Vertical),HV-Integer;",
+    // Both entries below are properties of the HDMI scaler (sys/video_freak.sv
+    // -> ascal), and sys_top forces HDMI_WIDTH/HDMI_HEIGHT to zero while Direct
+    // Video is on (sys/sys_top.v:1804). Neither can do anything on a raw native
+    // raster, so both are hidden behind the same H0 mask bit as Rotation rather
+    // than being offered as controls that silently do nothing.
+    "H0O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+    // Maps to sys/video_freak.sv SCALE. The previous list named entry 1
+    // "Integer (Horizontal)" and entry 3 "HV-Integer" and drove BOTH to SCALE=4,
+    // so two of the four entries were the same mode under different names and
+    // there was no way to reach the wider variant. Entries 0..2 keep the exact
+    // SCALE values they had, so a saved setting still means what it did; only
+    // entry 3 changes, from a duplicate of entry 1 to SCALE=3.
+    "H0O[44:43],Scale,Normal,HV-Integer,V-Integer,HV-Integer+;",
     // Framebuffer-only rotation. Direct Video is a raw native raster path; a
     // vertical cabinet is rotated physically, while HDMI rotation uses DDRAM.
     "H0O[50:49],Rotation,Horizontal,Vertical (CW),Vertical (CCW),Horizontal (Flipped);",
@@ -155,7 +166,16 @@ assign VGA_F1 = 1'b0;
 assign VGA_SCALER = 1'b0;
 assign VGA_DISABLE = 1'b0;
 assign HDMI_FREEZE = 1'b0;
-assign HDMI_BLACKOUT = 1'b0;
+// swblack in sys/ascal.vhd. It is a level ENABLE, not a blanking control: the
+// only thing it does is make ascal emit three black frames when the measured
+// input resolution changes (sys/ascal.vhd:1996). This core changes input
+// resolution more often than most -- Video Fx switches the line rate between
+// 15 and 31 kHz, CRT Adjust H-Size changes the pixels per line live, and the
+// SSV games themselves resize the active area through the CRTC registers --
+// and with this tied low each of those switches puts the torn/garbage frames
+// ascal produces while it re-measures straight on the HDMI output. Enabling it
+// costs nothing while the resolution is stable.
+assign HDMI_BLACKOUT = 1'b1;
 assign HDMI_BOB_DEINT = 1'b0;
 assign FB_FORCE_BLANK = 1'b0;
 assign AUDIO_S = 1'b1;
@@ -1084,6 +1104,19 @@ wire       vid_ce_x2 = crt_on ? crt_x2_tick : ce_pix_x2;
 // build a DE window that rises with the NATIVE active region and falls with the
 // adjusted one: the image moves, the OSD stays put on the physical screen.
 //
+// With one correction. In HPOS_CONTENTSHIFT the module's active window moves
+// with the content (crt_adjust.sv: pass_q compares rdcnt against hb1/hb0 with
+// hoffset added to both), so for a NEGATIVE H-Position the content starts
+// before the native active region does. Rising on the native edge alone
+// therefore did not merely leave the OSD in place, it CLIPPED up to 32 pixels
+// off the left of the picture -- VGA_DE is not a cosmetic signal here, it is
+// what sys_top blanks RGB with (sys/sys_top.v: din(de_emu ? {r,g,b} : 24'd0))
+// on the analog and Direct Video paths, and what ascal takes as the capture
+// window on HDMI. Rising on whichever of the two comes FIRST keeps the whole
+// picture; the OSD anchor is then fixed for H-Position >= 0 as before, and
+// follows the image only when it is shifted left, which is the direction where
+// the alternative was losing image.
+//
 // The native HSync rise is once per line, which is the cadence the reference
 // glue gets from a hcnt == HTOTAL-1 tick; sampling VBlank on it also delivers
 // the one-line delay the read side needs (it is emitting the previous line).
@@ -1110,11 +1143,12 @@ wire crt_adj_active = ~crt_hb;
 reg  crt_adj_active_d;
 always_ff @(posedge clk_sys) if (crt_rd_ce) crt_adj_active_d <= crt_adj_active;
 wire crt_adj_fall = crt_adj_active_d & ~crt_adj_active;
+wire crt_adj_rise = crt_adj_active & ~crt_adj_active_d;
 
 reg crt_de_osd;
 always_ff @(posedge clk_sys) begin
-    if      (crt_native_rise) crt_de_osd <= 1'b1;
-    else if (crt_adj_fall)    crt_de_osd <= 1'b0;
+    if      (crt_native_rise | crt_adj_rise) crt_de_osd <= 1'b1;
+    else if (crt_adj_fall)                   crt_de_osd <= 1'b0;
 end
 
 // Any Fx selection implies doubling, the same rule arcade_video used. The
@@ -1149,7 +1183,16 @@ assign VGA_G    = sd_on ? sd_rgb[15:8]  : vid_g;
 assign VGA_B    = sd_on ? sd_rgb[7:0]   : vid_b;
 assign VGA_HS   = sd_on ? sd_hs : vid_hs;
 assign VGA_VS   = sd_on ? sd_vs : vid_vs;
-assign VGA_SL   = status[4:3];
+// Gated by sd_on, not taken raw from the OSD bits. sys_top applies scanlines
+// itself (sys/sys_top.v: scanlines #(0) VGA_scanlines) to whatever this core
+// emits, on the analog, Direct Video and HDMI paths alike -- it has no idea
+// whether the raster is doubled. u_video_mode_guard deliberately defers the
+// doubler switch to the next VBlank line boundary, so between the OSD write and
+// that commit the raster is still native while status[4:3] already asks for
+// scanlines, and every second NATIVE line gets dimmed: a half-brightness comb
+// over the picture rather than a scanline effect. One frame of it on a scaled
+// HDMI display, and for the whole time the request is pending on a 15 kHz set.
+assign VGA_SL   = sd_on ? status[4:3] : 2'd0;
 
 wire vga_de_in = sd_on   ? ~(sd_hb | sd_vb)
                : crt_on  ? crt_de_osd
@@ -1169,15 +1212,23 @@ wire [11:0] scale_aspect_y = (aspect == 0)
     ? (rotation_active ? 12'd4 : 12'd3)
     : 12'd0;
 
-// Keep the established modes and expose the upstream best-fit HV-integer mode
-// explicitly for users who want it. Integer (Horizontal) remains the existing
-// best-fit path; HV-Integer is the same upstream mode as a named option.
+// sys/video_freak.sv SCALE encoding (video_scale_int, the case at cnt==13):
+//   0 normal, 1 V-integer, 2 HV-integer narrow, 3 HV-integer wide,
+//   4 HV-integer best fit (picks narrow or wide by aspect error).
+// Entries 0..2 hold the values the previous mapping gave them. Entry 3 was a
+// second copy of entry 1 (both 3'd4) and is now the wide variant, which was
+// otherwise unreachable from the OSD.
+//
+// SCALE is dead while Direct Video is on -- sys_top zeroes HDMI_WIDTH/HEIGHT
+// there, and video_scale_int's first divide (HDMI_HEIGHT/vsize) then returns 0,
+// which is its own "integer scaling is impossible" path back to the plain
+// aspect. That is why the menu entry is hidden behind H0 above.
 logic [2:0] scale_mode;
 always_comb begin
     case (scale_select)
         2'd1: scale_mode = 3'd4;
         2'd2: scale_mode = 3'd1;
-        2'd3: scale_mode = 3'd4;
+        2'd3: scale_mode = 3'd3;
         default: scale_mode = 3'd0;
     endcase
 end

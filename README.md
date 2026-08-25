@@ -51,7 +51,16 @@ For a normal landscape HDMI display, leave Direct Video disabled (`direct_video=
 so MiSTer's DDRAM framebuffer rotation can present the six vertical profiles.
 The core hides its framebuffer Rotation menu while Direct Video is enabled,
 because that presentation-layer rotation cannot transform the raw Direct Video
-signal. The complete profile audit is reproducible with:
+signal. Aspect ratio and Scale are hidden for the same reason: both are HDMI
+scaler settings, and MiSTer reports a zero HDMI size to the core while Direct
+Video is on, so neither can act on a raw native raster.
+
+Video Fx does still apply under Direct Video. It switches the core's own line
+doubler, so `None` gives the native 15 kHz raster for a CRT through a DAC, and
+any scanline level gives a 31 kHz raster for a VGA-rate analog display. The
+scanline levels themselves are only emitted while the doubler is running.
+
+The complete profile audit is reproducible with:
 
 ```powershell
 python tools/verify_ssv_video_profiles.py
