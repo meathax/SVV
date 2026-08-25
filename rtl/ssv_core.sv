@@ -1346,10 +1346,6 @@ wire sound_commit;
 wire [6:0] sound_commit_page;
 wire [3:0] sound_commit_reg;
 wire [31:0] sound_commit_data;
-wire        sound_debug_host_commit;
-wire [6:0]  sound_debug_host_page;
-wire [3:0]  sound_debug_host_reg;
-wire [31:0] sound_debug_host_data;
 wire [4:0] sound_active_voices;
 wire [4:0] eng_voice;
 wire       eng_snap;
@@ -1370,72 +1366,6 @@ wire [8:0]  eng_ecount_w;
 wire        eng_irq_set;
 wire [4:0]  eng_irq_voice;
 wire        sound_sample_tick, sound_underrun;
-// Hardware-only Signal Tap history: retain the last sound-register commit so a
-// sample-qualified capture still carries the command that armed the voice.
-logic [31:0] stp_last_commit_pc;
-logic [23:0] stp_last_commit_addr;
-logic [7:0]  stp_last_commit_byte;
-logic [31:0] stp_last_commit_data;
-logic [6:0]  stp_last_commit_page;
-logic [3:0]  stp_last_commit_reg;
-logic        stp_last_commit_valid;
-
-always_ff @(posedge clk_sys) begin
-    if (rst) begin
-        stp_last_commit_pc    <= 32'd0;
-        stp_last_commit_addr  <= 24'd0;
-        stp_last_commit_byte  <= 8'd0;
-        stp_last_commit_data  <= 32'd0;
-        stp_last_commit_page  <= 7'd0;
-        stp_last_commit_reg   <= 4'd0;
-        stp_last_commit_valid <= 1'b0;
-    end
-    else if (sound_debug_host_commit) begin
-        stp_last_commit_pc    <= cpu_trace_pc;
-        stp_last_commit_addr  <= a;
-        stp_last_commit_byte  <= m_wdata[7:0];
-        stp_last_commit_data  <= sound_debug_host_data;
-        stp_last_commit_page  <= sound_debug_host_page;
-        stp_last_commit_reg   <= sound_debug_host_reg;
-        stp_last_commit_valid <= 1'b1;
-    end
-end
-
-// Preserved vector consumed by the audio-clock Signal Tap instance. It carries
-// only the command, interrupt, sample-tick, underrun, and SDRAM evidence
-// needed to locate the first corrupt-audio producer. It is observation-only.
-(* noprune, preserve *) reg [179:0] stp_core_trace;
-always @(posedge clk_sys) begin
-    if (rst) begin
-        stp_core_trace <= 180'd0;
-    end
-    else begin
-        stp_core_trace[31:0]   <= sound_debug_host_commit ? cpu_trace_pc : stp_last_commit_pc;
-        stp_core_trace[55:32]  <= sound_debug_host_commit ? a : stp_last_commit_addr;
-        stp_core_trace[63:56]  <= sound_debug_host_commit ? m_wdata[7:0] : stp_last_commit_byte;
-        stp_core_trace[95:64]  <= sound_debug_host_commit ? sound_debug_host_data : stp_last_commit_data;
-        stp_core_trace[102:96] <= sound_debug_host_commit ? sound_debug_host_page : stp_last_commit_page;
-        stp_core_trace[106:103] <= sound_debug_host_commit ? sound_debug_host_reg : stp_last_commit_reg;
-        stp_core_trace[113:107] <= sound_current_page;
-        stp_core_trace[114] <= ce_cpu;
-        stp_core_trace[115] <= rst;
-        stp_core_trace[116] <= sound_debug_host_commit;
-        stp_core_trace[117] <= stp_last_commit_valid | sound_debug_host_commit;
-        stp_core_trace[118] <= sound_irq_n;
-        stp_core_trace[119] <= eng_irq_set;
-        stp_core_trace[124:120] <= eng_irq_voice;
-        stp_core_trace[125] <= cpu_irq_ack;
-        stp_core_trace[133:126] <= irq_vector;
-        stp_core_trace[134] <= sound_sample_tick;
-        stp_core_trace[135] <= sound_underrun;
-        stp_core_trace[136] <= sdr_p4_req;
-        stp_core_trace[137] <= sdr_p4_ack;
-        stp_core_trace[163:138] <= sdr_p4_addr;
-        stp_core_trace[179:164] <= sdr_p4_dout;
-    end
-end
-
-
 // Share the CPU enable so voice and V60 stay phase-aligned (saves a second
 // fractional accumulator and matches board 16 MHz OTTO / V60 clocking).
 wire ce_snd = ce_cpu;
@@ -1463,10 +1393,6 @@ ssv_es5506_regs sound_registers (
     .commit_page(sound_commit_page),
     .commit_reg(sound_commit_reg),
     .commit_data(sound_commit_data),
-    .debug_host_commit(sound_debug_host_commit),
-    .debug_host_page(sound_debug_host_page),
-    .debug_host_reg(sound_debug_host_reg),
-    .debug_host_data(sound_debug_host_data),
     .eng_voice(eng_voice),
     .eng_snap(eng_snap),
     .eng_cr(eng_cr), .eng_cr_valid(eng_cr_valid),

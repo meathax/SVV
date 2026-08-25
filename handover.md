@@ -700,3 +700,42 @@ alignment is not isolated, the exact PCB audio behavior is unmeasured, and
 the physical audio CDC/output path remains unverified on MiSTer. A core audio
 RTL fix remains blocked until an exact-command replay, stronger board evidence,
 or a causal V60/raster/DSP timing divergence is proven. No final RBF was built.
+
+## 10. 2026-08-25 SignalTap removal
+
+**Observation:** **KNOWN** — Arcade-SSV.qsf enabled the complete SSV_20audio
+SignalTap analyzer section, and the tracked ssv_audio.stp project file
+consumed dedicated stp_core_trace and stp_output_audio_trace registers.
+
+**Evidence:** The QSF analyzer block was lines 439–756 before this change.
+rtl/ssv_core.sv contained the 180-bit core trace and retained last-commit
+history; Arcade-SSV.sv contained the 69-bit audio-boundary trace. The
+ES5506 debug_host_* outputs were consumed only by that trace. The functional
+audio assignments and the SIMULATION-guarded verification debug ports have
+no dependency on this hardware analyzer.
+
+**Hypotheses:** Removing only the QSF enable could leave preserved trace logic
+in the design. Removing the analyzer and its dedicated trace plumbing could
+alter audio only if those observation-only registers fed the datapath.
+
+**Selected explanation:** **INFERRED** — SignalTap was isolated diagnostic
+infrastructure. No functional audio producer, clock, reset, CDC, or SDC path
+requires it.
+
+**Smallest change:** Remove the QSF analyzer section, tracked .stp file and
+decoder utility, dedicated trace/history registers, and ES5506 debug_host_*
+outputs. Preserve
+simulation debug ports, audio logic, timing constraints, and generated outputs.
+
+**Verification:** Re-scan tracked sources for SignalTap/SLD/stp references,
+run git diff --check, then run strict headless Verilator lint/build and the
+ES5506/audio smoke tests. Quartus/RBF is not part of this cleanup turn.
+
+**Regression scope:** Core source closure, ES5506 register unit test, full
+headless elaboration, and the existing Drift Out gameplay-audio smoke. Hardware
+fit/timing and physical MiSTer validation remain pending.
+
+**Known unknowns:** Existing untracked SignalTap captures/scripts remain as
+user evidence outside the core. The next clean Quartus run must prove that no
+SignalTap/SLD analyzer fabric is regenerated and must remeasure resources and
+timing.

@@ -816,26 +816,6 @@ ssv_audio_cdc audio_cdc (
     .dst_l(audio_cdc_l), .dst_r(audio_cdc_r), .dst_valid(audio_cdc_valid)
 );
 
-// Preserved output-boundary vector for the clk_audio Signal Tap instance.
-// This is observation-only; it is not in the AUDIO_L/AUDIO_R datapath.
-(* noprune, preserve *) reg [68:0] stp_output_audio_trace;
-always @(posedge CLK_AUDIO) begin
-    if (RESET || core_reset) begin
-        stp_output_audio_trace <= 69'd0;
-    end
-    else begin
-        stp_output_audio_trace[15:0] <= core_audio_l;
-        stp_output_audio_trace[31:16] <= core_audio_r;
-        stp_output_audio_trace[47:32] <= audio_cdc_l;
-        stp_output_audio_trace[63:48] <= audio_cdc_r;
-        stp_output_audio_trace[64] <= core_audio_tick;
-        stp_output_audio_trace[65] <= audio_cdc_valid;
-        stp_output_audio_trace[66] <= audio_cdc_ready;
-        stp_output_audio_trace[67] <= RESET;
-        stp_output_audio_trace[68] <= core_reset;
-    end
-end
-
 // ---------------------------------------------------------------------------
 // High score save/load (rtl/hiscore.v, alanswx / JimmyStones).
 //

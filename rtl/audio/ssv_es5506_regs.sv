@@ -41,12 +41,6 @@ module ssv_es5506_regs (
     output logic [6:0]  commit_page,
     output logic [3:0]  commit_reg,
     output logic [31:0] commit_data,
-    // Exact byte-3 host transaction for observation; functional commit outputs remain registered below.
-    output logic        debug_host_commit,
-    output logic [6:0]  debug_host_page,
-    output logic [3:0]  debug_host_reg,
-    output logic [31:0] debug_host_data,
-
     // Voice-engine port (registered read of current voice; writeback next state).
     input  logic [4:0]  eng_voice,
     // Pulses the one cycle the engine actually latches eng_voice's
@@ -123,11 +117,6 @@ always_comb begin
         2'd3: assembled_write[7:0]   = host_wdata;
     endcase
 end
-
-assign debug_host_commit = host_commit;
-assign debug_host_page   = current_page;
-assign debug_host_reg    = host_reg;
-assign debug_host_data   = assembled_write;
 
 // Shared MLAB read address: host byte-0 steals one cycle for PAGE voice.
 wire [4:0] rd_addr = host_rd_steal ? voice : eng_voice;
