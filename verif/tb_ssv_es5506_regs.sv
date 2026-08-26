@@ -53,6 +53,7 @@ ssv_es5506_regs dut (
     .commit, .commit_page, .commit_reg, .commit_data,
     .eng_voice,
     .eng_snap,
+    .snap_ok(),
     .eng_cr(), .eng_cr_valid, .eng_fc(),
     .eng_lvol(), .eng_lvramp(), .eng_rvol(), .eng_rvramp(),
     .eng_ecount(), .eng_k1(), .eng_k1ramp(), .eng_k2(), .eng_k2ramp(),

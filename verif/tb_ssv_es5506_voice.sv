@@ -97,7 +97,10 @@ ssv_es5506_voice dut (
     .eng_irq_set, .eng_irq_voice,
     .host_ecount_write, .host_ecount_voice,
     .sdr_req, .sdr_addr, .sdr_dout, .sdr_ack,
-    .audio_l, .audio_r, .sample_tick, .underrun, .eng_snap
+    .audio_l, .audio_r, .sample_tick, .underrun, .eng_snap,
+    // Bench drives the register side by hand with no host traffic, so the
+    // read port is always clean.
+    .snap_ok(1'b1)
 );
 
 // Simple writeback model

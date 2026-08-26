@@ -1381,6 +1381,7 @@ wire [31:0] sound_commit_data;
 wire [4:0] sound_active_voices;
 wire [4:0] eng_voice;
 wire       eng_snap;
+wire       eng_snap_ok;
 wire [15:0] eng_cr;
 wire        eng_cr_valid;
 wire [16:0] eng_fc;
@@ -1427,6 +1428,7 @@ ssv_es5506_regs sound_registers (
     .commit_data(sound_commit_data),
     .eng_voice(eng_voice),
     .eng_snap(eng_snap),
+    .snap_ok(eng_snap_ok),
     .eng_cr(eng_cr), .eng_cr_valid(eng_cr_valid),
     .eng_fc(eng_fc),
     .eng_lvol(eng_lvol), .eng_lvramp(eng_lvramp),
@@ -1486,7 +1488,8 @@ ssv_es5506_voice sound_voices (
     .sdr_dout(sdr_p4_dout), .sdr_ack(sdr_p4_ack),
     .audio_l(audio_l), .audio_r(audio_r),
     .sample_tick(sound_sample_tick), .underrun(sound_underrun),
-    .eng_snap(eng_snap)
+    .eng_snap(eng_snap),
+    .snap_ok(eng_snap_ok)
 );
 
 assign audio_tick = sound_sample_tick;

@@ -91,7 +91,14 @@ module ssv_es5506_voice (
     // "host wrote a fresher value since this voice's snapshot" tracking at
     // the one instant that tracking is known correct -- see
     // docs/debug/ES5506_WARPED_NOTES_ROOT_CAUSE_20260819.md.
-    output logic        eng_snap
+    output logic        eng_snap,
+    // From the register file: the shared MLAB read port carries this
+    // voice's clean data (no host read-steal/hold in flight, no commit to
+    // this voice settling). S_START waits for it before snapshotting --
+    // hardware-proven necessity (2026-08-27 WB capture: a snapshot taken
+    // inside a steal window consumed a foreign ACCUM and teleported the
+    // voice; the audible random warped-sound defect).
+    input  logic        snap_ok
 );
 
 import ssv_pkg::*;
@@ -275,7 +282,7 @@ assign eng_voice = voice_i;
 // enable -- so "state==S_START" alone can stay high for several clk
 // cycles. Gate on ce too: the snapshot only actually latches (cr <= ...
 // etc., in the S_START case below) on the one edge where both are true.
-assign eng_snap  = ce && (state == S_START);
+assign eng_snap  = ce && (state == S_START) && snap_ok;
 
 // Sample SDRAM handshake is independent of ce_snd. Production ce_snd is a
 // sparse ~16 MHz enable; acks arrive on clk_sys and must not be dropped.
@@ -357,7 +364,13 @@ always_ff @(posedge clk) begin
             if (slot_cnt != SLOT_TICKS[4:0] - 5'd1) slot_cnt <= slot_cnt + 5'd1;
 
         unique case (state)
-                S_START: begin
+                S_START: if (!snap_ok) begin
+                    // Register-file read port busy (host steal/hold, or a
+                    // commit to this voice still settling): wait. The slot
+                    // pacing in S_NEXT absorbs the delay -- a read occupies
+                    // four clocks against ~7 spare ce ticks per slot.
+                    state <= S_START;
+                end else begin
                     cr       <= eng_cr_valid ? eng_cr : 16'h0003;
                     cr_valid <= eng_cr_valid;
                     fc       <= eng_fc;

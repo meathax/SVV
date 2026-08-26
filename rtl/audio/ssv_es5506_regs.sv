@@ -47,6 +47,11 @@ module ssv_es5506_regs (
     // registers (S_START). Marks the instant it is safe to forget any
     // earlier "host wrote a fresher value" tracking for that voice.
     input  logic         eng_snap,
+    // High only when the shared MLAB read port is clean for eng_voice: no
+    // host read-steal/hold in flight and no commit to this voice in the
+    // last two cycles. The voice engine must not snapshot while low (see
+    // the snapshot hold-off comment at snap_ok's assign).
+    output logic        snap_ok,
     output logic [15:0] eng_cr,
     output logic        eng_cr_valid,
     output logic [16:0] eng_fc,
@@ -295,6 +300,26 @@ logic [31:0] cr_scan_void;
 wire cr_commit_now  = host_commit && (host_reg == 4'h0) && (current_page < 7'h40);
 wire cr_snap_missed = (d_commit && d_cr && (d_voice == eng_voice)) ||
                       (cr_commit_now && (voice == eng_voice));
+
+// Snapshot hold-off. The 2026-08-27 hardware video (drifto94, WB detector)
+// caught the voice engine consuming another voice's ACCUM at S_START while
+// its stored value and bounds were clean, then writing foreign+FC back --
+// the random warped/extra-sound teleport. The common factor is the snapshot
+// colliding with a host read-steal of the shared MLAB read port (real
+// hardware reads the ES5506 ~840x/s; MAME's map shows almost none, so no
+// sim reproduced it) or with a same-voice commit still settling into the
+// MLAB. Rather than patching each alignment of the steal/hold/commit
+// windows, refuse to snapshot until the port has been quiet for the full
+// hold span and no commit touched this voice in the last two cycles: the
+// engine simply waits in S_START (its 16-tick slot has ~7 spare ticks, and
+// a read occupies four clocks, so the wait is invisible). This serializes
+// host access against the snapshot exactly as MAME's ordering does, and it
+// also closes the same-edge MLAB read-during-write capture window and the
+// stale-_h fresh-bit gap by construction.
+assign snap_ok = !host_rd_steal && !host_rd_pending && !eng_hold &&
+                 !(host_commit && (current_page < 7'h40) &&
+                   (voice == eng_voice)) &&
+                 !(d_commit && (d_voice == eng_voice));
 
 always_ff @(posedge clk) begin
     if (rst) begin
