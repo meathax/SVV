@@ -153,10 +153,32 @@ logic [3:0]  det_f1_reg;
 logic        det_f1_bank;
 logic [15:0] det_tp_frame, det_ra_frame, det_f1_frame, det_f2_frame;
 
+// Second-pass discriminators (2026-08-27 video: TP bursts correlate exactly
+// with the audible corruption but F1/F2/F4/DF stayed zero, so the corruption
+// is either computed by the engine from a garbage snapshot or lands in the
+// wrong MLAB word; these split the space):
+//  F0  commit pulse one cycle AFTER a snap (write edge == snapshot latch
+//      edge, the same-edge RDW variant F1's window misses).
+//  WJ  writeback jump: eng_wr_accum whose value matches none of the six
+//      legal advance/wrap/reflect forms of the snapshot accum -- the engine
+//      COMPUTED the teleport (garbage snapshot bounds). Latches voice,
+//      snapshot accum, written accum, and the snapshot START/END that fed
+//      the math. A TP without a matching WJ = storage-side corruption
+//      (wrong-address write / dropped write) instead.
+//  AC  host ACCUM commit count + last voice/data -- distinguishes lost
+//      note-on writes (new bounds, stale accum, AC shows the write existed).
+logic [15:0] det_f0_cnt, det_wj_cnt, det_ac_cnt;
+logic [4:0]  det_wj_voice;
+logic [31:0] det_wj_snap, det_wj_new, det_wj_start, det_wj_end;
+logic [4:0]  det_ac_voice;
+logic [31:0] det_ac_data;
+logic        snap_d1;
+
 logic        f2_arm;
 logic [4:0]  f2_voice;
 logic        re_d1, re_d2, re_d3;
 logic        cvm_d1, cvm_d2, cvm_d3;
+logic        eng_write_any_d1;
 
 wire commit_vmatch = commit && (commit_page < 7'h40);
 wire [4:0] commit_voice = commit_page[4:0];
@@ -178,12 +200,29 @@ wire snap_outrange = snap_running &&
                      ((eng_accum > eng_end) || (eng_accum < eng_start));
 wire eng_write_any = eng_wr_accum | eng_wr_cr | eng_wr_filt | eng_wr_env;
 wire read_window   = host_re || re_d1 || re_d2 || re_d3;
+
+// The six legal next-accum forms for this voice's snapshot (forward advance,
+// forward loop wrap, forward reflect, and the reverse three). eng_accum and
+// eng_fc still carry the in-flight voice's snapshot when eng_wr_accum pulses
+// (the engine holds its slot through S_MIX).
+wire [31:0] wj_fwd  = eng_accum + {15'd0, eng_fc};
+wire [31:0] wj_rev  = eng_accum - {15'd0, eng_fc};
+wire [31:0] wj_fwrp = eng_start + (wj_fwd - eng_end);
+wire [31:0] wj_frfl = eng_end - (wj_fwd - eng_end);
+wire [31:0] wj_rwrp = eng_end - (eng_start - wj_rev);
+wire [31:0] wj_rrfl = eng_start + (eng_start - wj_rev);
+wire wj_legal = (eng_accum_w == wj_fwd)  || (eng_accum_w == wj_rev)  ||
+                (eng_accum_w == wj_fwrp) || (eng_accum_w == wj_frfl) ||
+                (eng_accum_w == wj_rwrp) || (eng_accum_w == wj_rrfl) ||
+                (eng_accum_w == eng_accum);
 // live frame number (disp_frame increments once per frame below)
 wire [15:0] frame_lo = disp_frame[15:0];
 
 always_ff @(posedge clk) begin
     re_d1 <= host_re; re_d2 <= re_d1; re_d3 <= re_d2;
     cvm_d1 <= commit_this_voice; cvm_d2 <= cvm_d1; cvm_d3 <= cvm_d2;
+    snap_d1 <= eng_snap;
+    eng_write_any_d1 <= eng_write_any;
     if (rst) begin
         exp_valid <= '0; acc_dirty <= '0;
         det_tp_cnt <= '0; det_ra_cnt <= '0; det_f1_cnt <= '0; det_f2_cnt <= '0;
@@ -195,7 +234,32 @@ always_ff @(posedge clk) begin
         det_tp_frame <= '0; det_ra_frame <= '0;
         det_f1_frame <= '0; det_f2_frame <= '0;
         f2_arm <= 1'b0; f2_voice <= '0;
+        det_f0_cnt <= '0; det_wj_cnt <= '0; det_ac_cnt <= '0;
+        det_wj_voice <= '0; det_wj_snap <= '0; det_wj_new <= '0;
+        det_wj_start <= '0; det_wj_end <= '0;
+        det_ac_voice <= '0; det_ac_data <= '0;
     end else begin
+        // F0: commit write edge coincides with the previous cycle's snapshot
+        // latch edge (the same-edge RDW variant).
+        if (snap_d1 && (commit_f1reg || commit_accum || commit_cr))
+            det_f0_cnt <= det_f0_cnt + 1'd1;
+
+        // WJ: engine-computed accum jump (snapshot bounds were garbage).
+        if (eng_wr_accum && !wj_legal) begin
+            det_wj_cnt   <= det_wj_cnt + 1'd1;
+            det_wj_voice <= eng_voice;
+            det_wj_snap  <= eng_accum;
+            det_wj_new   <= eng_accum_w;
+            det_wj_start <= eng_start;
+            det_wj_end   <= eng_end;
+        end
+
+        // AC: host ACCUM commits (lost-note-on discriminator).
+        if (commit_accum) begin
+            det_ac_cnt   <= det_ac_cnt + 1'd1;
+            det_ac_voice <= commit_voice;
+            det_ac_data  <= commit_data;
+        end
         // --- TP arm: remember the engine's own last ACCUM writeback. The
         // regs file drops that writeback when the host refreshed ACCUM since
         // the snapshot (host_fresh), so mirror that window with acc_dirty and
@@ -272,8 +336,11 @@ always_ff @(posedge clk) begin
             f2_arm       <= 1'b0;
         end
 
-        // --- DF: commit racing an engine writeback (deferral engagement) ---
-        if (commit && eng_write_any)
+        // --- DF: commit racing an engine writeback (deferral engagement).
+        //     The collision happens on the host_commit cycle, one cycle
+        //     before the registered `commit` pulse -- compare against the
+        //     delayed writeback flag or every real collision reads as zero.
+        if (commit && eng_write_any_d1)
             det_df_cnt <= det_df_cnt + 1'd1;
 
         // host ACCUM commit supersedes the engine's remembered writeback
@@ -343,6 +410,9 @@ logic [15:0] dd_ra_cr;
 logic [3:0]  dd_f1_reg;
 logic        dd_f1_bank;
 logic [15:0] dd_tp_frame, dd_ra_frame, dd_f1_frame, dd_f2_frame;
+logic [15:0] dd_f0_cnt, dd_wj_cnt, dd_ac_cnt;
+logic [4:0]  dd_wj_voice, dd_ac_voice;
+logic [31:0] dd_wj_snap, dd_wj_new, dd_wj_start, dd_wj_end, dd_ac_data;
 
 always_ff @(posedge clk) begin
     if (rst) begin
@@ -354,7 +424,17 @@ always_ff @(posedge clk) begin
         dd_ra_cr <= '0; dd_f1_reg <= '0; dd_f1_bank <= 1'b0;
         dd_tp_frame <= '0; dd_ra_frame <= '0;
         dd_f1_frame <= '0; dd_f2_frame <= '0;
+        dd_f0_cnt <= '0; dd_wj_cnt <= '0; dd_ac_cnt <= '0;
+        dd_wj_voice <= '0; dd_ac_voice <= '0;
+        dd_wj_snap <= '0; dd_wj_new <= '0;
+        dd_wj_start <= '0; dd_wj_end <= '0; dd_ac_data <= '0;
     end else if (frame_pulse) begin
+        dd_f0_cnt <= det_f0_cnt; dd_wj_cnt <= det_wj_cnt;
+        dd_ac_cnt <= det_ac_cnt;
+        dd_wj_voice <= det_wj_voice; dd_ac_voice <= det_ac_voice;
+        dd_wj_snap <= det_wj_snap; dd_wj_new <= det_wj_new;
+        dd_wj_start <= det_wj_start; dd_wj_end <= det_wj_end;
+        dd_ac_data <= det_ac_data;
         dd_tp_cnt <= det_tp_cnt; dd_ra_cnt <= det_ra_cnt;
         dd_f1_cnt <= det_f1_cnt; dd_f2_cnt <= det_f2_cnt;
         dd_cs_cnt <= det_cs_cnt; dd_f3_cnt <= det_f3_cnt;
@@ -901,6 +981,110 @@ always_comb begin
                         7'd70: charcode = {2'b00, dd_pq_cnt[11:8]};
                         7'd71: charcode = {2'b00, dd_pq_cnt[7:4]};
                         7'd72: charcode = {2'b00, dd_pq_cnt[3:0]};
+                        default: ;
+                    endcase
+                    6'd28: case (tcol) // F0:cccc
+                        7'd66: charcode = 6'd15;
+                        7'd67: charcode = 6'd0;
+                        7'd68: charcode = 6'd17;
+                        7'd69: charcode = {2'b00, dd_f0_cnt[15:12]};
+                        7'd70: charcode = {2'b00, dd_f0_cnt[11:8]};
+                        7'd71: charcode = {2'b00, dd_f0_cnt[7:4]};
+                        7'd72: charcode = {2'b00, dd_f0_cnt[3:0]};
+                        default: ;
+                    endcase
+                    6'd29: case (tcol) // WB:cccc
+                        7'd66: charcode = 6'd37;
+                        7'd67: charcode = 6'd11;
+                        7'd68: charcode = 6'd17;
+                        7'd69: charcode = {2'b00, dd_wj_cnt[15:12]};
+                        7'd70: charcode = {2'b00, dd_wj_cnt[11:8]};
+                        7'd71: charcode = {2'b00, dd_wj_cnt[7:4]};
+                        7'd72: charcode = {2'b00, dd_wj_cnt[3:0]};
+                        default: ;
+                    endcase
+                    6'd30: case (tcol) // V:vv
+                        7'd66: charcode = 6'd36;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {5'd0, dd_wj_voice[4]};
+                        7'd69: charcode = {2'b00, dd_wj_voice[3:0]};
+                        default: ;
+                    endcase
+                    6'd31: case (tcol) // E:snap accum
+                        7'd66: charcode = 6'd14;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {2'b00, dd_wj_snap[31:28]};
+                        7'd69: charcode = {2'b00, dd_wj_snap[27:24]};
+                        7'd70: charcode = {2'b00, dd_wj_snap[23:20]};
+                        7'd71: charcode = {2'b00, dd_wj_snap[19:16]};
+                        7'd72: charcode = {2'b00, dd_wj_snap[15:12]};
+                        7'd73: charcode = {2'b00, dd_wj_snap[11:8]};
+                        7'd74: charcode = {2'b00, dd_wj_snap[7:4]};
+                        7'd75: charcode = {2'b00, dd_wj_snap[3:0]};
+                        default: ;
+                    endcase
+                    6'd32: case (tcol) // N:written accum
+                        7'd66: charcode = 6'd29;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {2'b00, dd_wj_new[31:28]};
+                        7'd69: charcode = {2'b00, dd_wj_new[27:24]};
+                        7'd70: charcode = {2'b00, dd_wj_new[23:20]};
+                        7'd71: charcode = {2'b00, dd_wj_new[19:16]};
+                        7'd72: charcode = {2'b00, dd_wj_new[15:12]};
+                        7'd73: charcode = {2'b00, dd_wj_new[11:8]};
+                        7'd74: charcode = {2'b00, dd_wj_new[7:4]};
+                        7'd75: charcode = {2'b00, dd_wj_new[3:0]};
+                        default: ;
+                    endcase
+                    6'd33: case (tcol) // S:snapshot START at jump
+                        7'd66: charcode = 6'd33;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {2'b00, dd_wj_start[31:28]};
+                        7'd69: charcode = {2'b00, dd_wj_start[27:24]};
+                        7'd70: charcode = {2'b00, dd_wj_start[23:20]};
+                        7'd71: charcode = {2'b00, dd_wj_start[19:16]};
+                        7'd72: charcode = {2'b00, dd_wj_start[15:12]};
+                        7'd73: charcode = {2'b00, dd_wj_start[11:8]};
+                        7'd74: charcode = {2'b00, dd_wj_start[7:4]};
+                        7'd75: charcode = {2'b00, dd_wj_start[3:0]};
+                        default: ;
+                    endcase
+                    6'd34: case (tcol) // D:snapshot END at jump
+                        7'd66: charcode = 6'd13;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {2'b00, dd_wj_end[31:28]};
+                        7'd69: charcode = {2'b00, dd_wj_end[27:24]};
+                        7'd70: charcode = {2'b00, dd_wj_end[23:20]};
+                        7'd71: charcode = {2'b00, dd_wj_end[19:16]};
+                        7'd72: charcode = {2'b00, dd_wj_end[15:12]};
+                        7'd73: charcode = {2'b00, dd_wj_end[11:8]};
+                        7'd74: charcode = {2'b00, dd_wj_end[7:4]};
+                        7'd75: charcode = {2'b00, dd_wj_end[3:0]};
+                        default: ;
+                    endcase
+                    6'd35: case (tcol) // AC:cccc
+                        7'd66: charcode = 6'd10;
+                        7'd67: charcode = 6'd12;
+                        7'd68: charcode = 6'd17;
+                        7'd69: charcode = {2'b00, dd_ac_cnt[15:12]};
+                        7'd70: charcode = {2'b00, dd_ac_cnt[11:8]};
+                        7'd71: charcode = {2'b00, dd_ac_cnt[7:4]};
+                        7'd72: charcode = {2'b00, dd_ac_cnt[3:0]};
+                        default: ;
+                    endcase
+                    6'd36: case (tcol) // A:vv dddddddd (last host accum commit)
+                        7'd66: charcode = 6'd10;
+                        7'd67: charcode = 6'd17;
+                        7'd68: charcode = {5'd0, dd_ac_voice[4]};
+                        7'd69: charcode = {2'b00, dd_ac_voice[3:0]};
+                        7'd71: charcode = {2'b00, dd_ac_data[31:28]};
+                        7'd72: charcode = {2'b00, dd_ac_data[27:24]};
+                        7'd73: charcode = {2'b00, dd_ac_data[23:20]};
+                        7'd74: charcode = {2'b00, dd_ac_data[19:16]};
+                        7'd75: charcode = {2'b00, dd_ac_data[15:12]};
+                        7'd76: charcode = {2'b00, dd_ac_data[11:8]};
+                        7'd77: charcode = {2'b00, dd_ac_data[7:4]};
+                        7'd78: charcode = {2'b00, dd_ac_data[3:0]};
                         default: ;
                     endcase
                     default: ;
