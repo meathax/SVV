@@ -689,7 +689,7 @@ always_comb begin
     build_offsx = signed8(flip_control);
     build_offsy = -(signed10(global_y_base) +
                     $signed({1'b0, global_y_adjust}) + 17'sd1);
-if (coordinate_control == 16'h7140) begin
+    if (coordinate_control == 16'h7140) begin
         build_sx = build_offsx + build_sx_work;
         build_sy = build_offsy - build_sy_work;
     end

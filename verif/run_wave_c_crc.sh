@@ -21,6 +21,7 @@ CORE=(
   rtl/video/ssv_bg_renderer.sv rtl/video/ssv_mlab240_sdp.sv rtl/video/ssv_mlab88_sdp.sv
   rtl/video/ssv_cached_sprite_renderer.sv
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv rtl/audio/ssv_es5506_voice.sv
+  rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv rtl/debug/ssv_audio_debug_overlay.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally
   # and gates it on cfg.has_st010, so these are needed by every core build.

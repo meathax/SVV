@@ -36,6 +36,7 @@ CORE_FILES=(
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_srmp7_bank.sv
   rtl/audio/ssv_es5506_voice.sv
+  rtl/debug/ssv_audio_debug_overlay.sv
   rtl/cpu/v60/s32_v60.sv
   rtl/cpu/v60/s32_v60_bus.sv
   # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally

@@ -8,7 +8,19 @@ module ssv_core #(
     // MAME's unconfigured WATCHDOG_TIMER defaults to exactly three seconds.
     // clk_sys is the PLL's 48.317307 MHz SSV master domain. Focused benches
     // override this cycle count rather than synthesizing a frame-based proxy.
-    parameter int unsigned WDOG_TIMEOUT_CYCLES = 3 * 48_317_307
+    parameter int unsigned WDOG_TIMEOUT_CYCLES = 3 * 48_317_307,
+    // Diagnostic build switch: 1 replaces the game picture with the
+    // fullscreen ES5506 audio-debug text screen (ssv_audio_debug_overlay).
+    // The core, video pipeline and audio path keep running untouched
+    // underneath -- only the final rgb output is swapped.
+    // Default stays 0 so every existing bench and frame-CRC regression sees
+    // the untouched game picture; +define+SSV_DBG_AUDIO_OVERLAY flips the
+    // default for sim builds without touching any testbench.
+`ifdef SSV_DBG_AUDIO_OVERLAY
+    parameter bit DBG_AUDIO_OVERLAY = 1'b1
+`else
+    parameter bit DBG_AUDIO_OVERLAY = 1'b0
+`endif
 ) (
     input              clk_sys,
     // rst includes watchdog soft reset. cold_rst excludes watchdog and is
@@ -943,7 +955,10 @@ wire [23:0] core_pixel =
         (video_enable ? palette_video_rgb : palette_background_rgb) :
         24'h000000;
 
-assign rgb = core_pixel;
+// Audio-debug diagnostic overlay (see DBG_AUDIO_OVERLAY parameter above).
+// Instantiated near the end of the file where the ES5506 taps exist.
+wire [23:0] dbg_rgb;
+assign rgb = DBG_AUDIO_OVERLAY ? dbg_rgb : core_pixel;
 
 // Every subtraction below is evaluated at the SDR_AW+1 = 27-bit width of the
 // return value, with cpu_addr zero-extended -- the operands are written 27 bits
@@ -1475,6 +1490,35 @@ ssv_es5506_voice sound_voices (
 );
 
 assign audio_tick = sound_sample_tick;
+
+// ---------------------------------------------------------------------------
+// Fullscreen ES5506 audio-debug screen (diagnostic builds only; the mux back
+// at the rgb assignment selects it when DBG_AUDIO_OVERLAY=1). It only taps
+// existing signals -- nothing in the audio or video path changes behaviour.
+// ---------------------------------------------------------------------------
+ssv_audio_debug_overlay u_audio_dbg (
+    .clk(clk_sys), .rst(rst), .en(DBG_AUDIO_OVERLAY),
+    .ce_pixel(ce_pixel), .hcnt(hcnt), .vcnt(vcnt),
+    .active_width(active_width), .active_height(active_height),
+    .rgb_in(core_pixel), .rgb_out(dbg_rgb),
+    .eng_snap(eng_snap), .eng_voice(eng_voice),
+    .eng_cr(eng_cr), .eng_fc(eng_fc), .eng_accum(eng_accum),
+    .eng_start(eng_start), .eng_end(eng_end),
+    .eng_lvol(eng_lvol), .eng_rvol(eng_rvol), .eng_ecount(eng_ecount),
+    .eng_k1(eng_k1), .eng_k2(eng_k2),
+    .eng_wr_accum(eng_wr_accum), .eng_accum_w(eng_accum_w),
+    .eng_wr_cr(eng_wr_cr), .eng_wr_filt(eng_wr_filt),
+    .eng_wr_env(eng_wr_env),
+    .bank_valid(cfg.bank_valid),
+    .sample_tick(sound_sample_tick), .underrun(sound_underrun),
+    .irq_n(sound_irq_n), .irq_set(eng_irq_set), .irq_voice(eng_irq_voice),
+    .active_voices(sound_active_voices), .current_page(sound_current_page),
+    .commit(sound_commit), .commit_page(sound_commit_page),
+    .commit_reg(sound_commit_reg), .commit_data(sound_commit_data),
+    .host_we(sound_host_we), .host_re(sound_host_re), .ce_snd(ce_snd),
+    .p4_req(sdr_p4_req), .p4_ack(sdr_p4_ack),
+    .audio_l(audio_l), .audio_r(audio_r)
+);
 
 assign m_rdata = read_mux;
 assign m_ack   = ack_r;

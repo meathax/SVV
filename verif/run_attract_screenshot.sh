@@ -14,6 +14,9 @@ VFLAGS=(--binary --timing --assert --threads 1 --verilate-jobs 4 --build-jobs 4
         -Wno-DECLFILENAME -Wno-PINMISSING -Wno-UNSIGNED -Wno-WIDTH -Wno-CASEOVERLAP
         -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-VARHIDDEN -Wno-UNUSEDSIGNAL
         +define+SIMULATION)
+# Optional extra verilator flags, e.g. EXTRA_VFLAGS=+define+SSV_DBG_AUDIO_OVERLAY
+# to screenshot the fullscreen audio-debug screen instead of the game picture.
+if [ -n "${EXTRA_VFLAGS:-}" ]; then VFLAGS+=(${EXTRA_VFLAGS}); fi
 CORE=(
   rtl/ssv_pkg.sv rtl/ssv_irq.sv rtl/ssv_video_timing.sv
   rtl/common/s32_big_dpram.sv
@@ -23,6 +26,7 @@ CORE=(
   rtl/video/ssv_cached_sprite_renderer.sv
   rtl/audio/ssv_mlab32_sdp.sv rtl/audio/ssv_es5506_regs.sv
   rtl/audio/ssv_es5506_voice.sv
+  rtl/debug/ssv_audio_debug_overlay.sv
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv
   # ST010 (uPD96050) DSP: ssv_core instantiates the wrapper unconditionally
   # and gates it on cfg.has_st010, so these are needed by every core build.

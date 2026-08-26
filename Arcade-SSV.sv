@@ -793,7 +793,11 @@ wire core_audio_tick;
 wire signed [15:0] audio_cdc_l, audio_cdc_r;
 wire audio_cdc_ready, audio_cdc_valid;
 
-ssv_core core (
+// DIAGNOSTIC BUILD: DBG_AUDIO_OVERLAY=1 blacks out the game picture and shows
+// the fullscreen ES5506 audio-debug screen instead (rtl/debug/
+// ssv_audio_debug_overlay.sv). The game, inputs and audio all keep running.
+// Set back to 1'b0 (or delete the parameter override) to restore video.
+ssv_core #(.DBG_AUDIO_OVERLAY(1'b1)) core (
     .cfg(game_cfg),
     .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
     .ce_cpu(ce_cpu), .watchdog_hold(game_pause),

@@ -587,12 +587,14 @@ always_comb begin
             // the engine's own check saw a stale nonzero value) must also
             // suppress the ramp step on the other four fields, not just
             // protect ECOUNT's own register from being overwritten.
-            logic ecount_frozen;
-            ecount_frozen = host_fresh_ecount[eng_voice];
-            if (!host_fresh_lvol[eng_voice]   && !ecount_frozen) we_lvol = 1'b1;
-            if (!host_fresh_rvol[eng_voice]   && !ecount_frozen) we_rvol = 1'b1;
-            if (!host_fresh_k1[eng_voice]     && !ecount_frozen) we_k1 = 1'b1;
-            if (!host_fresh_k2[eng_voice]     && !ecount_frozen) we_k2 = 1'b1;
+            if (!host_fresh_lvol[eng_voice]   &&
+                !host_fresh_ecount[eng_voice]) we_lvol = 1'b1;
+            if (!host_fresh_rvol[eng_voice]   &&
+                !host_fresh_ecount[eng_voice]) we_rvol = 1'b1;
+            if (!host_fresh_k1[eng_voice]     &&
+                !host_fresh_ecount[eng_voice]) we_k1 = 1'b1;
+            if (!host_fresh_k2[eng_voice]     &&
+                !host_fresh_ecount[eng_voice]) we_k2 = 1'b1;
             if (!host_fresh_ecount[eng_voice]) we_ecount = 1'b1;
         end
     end

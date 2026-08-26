@@ -174,7 +174,19 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # still failing. Trying seed 3 next (this file's own "only seed with any
 # recorded clean result" note, +0.04 ns pre-cleanup) as the second of the
 # three-seed sweep budget.
-set_global_assignment -name SEED 19
+set_global_assignment -name SEED 3
+# 26 Aug 2026 seed sweep, netlist after the ES5506 stale-CR-mask /
+# snapshot-blind-spot fix (+268 ALMs, 35,807 -> 36,075 vs the last accepted
+# build): both failing seeds miss in the same single-endpoint
+# pll_hdmi|...counter[0].output_counter|divclk domain (sys/ framework HDMI
+# PLL, not core RTL) -- the placement-lottery domain documented throughout
+# this file's history, now failing every seed tried because area pressure
+# rose.
+#   seed 19 (prior accepted): Slow 100C -0.097 ns, Slow -40C -0.308 ns
+#   seed 11: Slow 100C -0.078 ns, Slow -40C -0.046 ns
+# Seed 23 result on this netlist: one pll_hdmi divclk setup miss at -0.100 ns.
+# Trying seed 3 next (final measured seed in this sweep); no RTL, SDC, clock,
+# reset, or framework file changes with this experiment.
 # SEED 1 crashed quartus_fit twice in a row on 2026-08-05 with exit code -1 and
 # no Error text captured (once during placement prep, once even earlier during
 # clock-uncertainty derivation) -- inconsistent crash point across two

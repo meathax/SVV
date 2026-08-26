@@ -35,6 +35,7 @@ $sourceNames = @(
     'rtl/audio/ssv_mlab32_sdp.sv', 'rtl/audio/ssv_srmp7_bank.sv',
     'rtl/audio/ssv_es5506_regs.sv',
     'rtl/audio/ssv_es5506_voice.sv', 'rtl/audio/ssv_audio_cdc.sv',
+    'rtl/debug/ssv_audio_debug_overlay.sv',
     'rtl/cpu/v60/s32_v60.sv',
     'rtl/cpu/v60/s32_v60_bus.sv', 'rtl/cpu/upd96050/upd96050.sv',
     'rtl/cpu/upd96050/upd96050_st010.sv',
