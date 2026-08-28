@@ -30,7 +30,8 @@ param(
     [UInt64]$SaveCycle = 0,
     [string]$CheckpointControl = '',
     [switch]$LockoutTrace,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$DumpRendererBudget
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,6 +95,7 @@ if (-not $NoStateCrc) {
 }
 if (-not $DiagnosticNoAttract) { $arguments += '+REQUIRE_ATTRACT' }
 if ($DumpFrameDiag) { $arguments += '+DUMP_FRAME_DIAG' }
+if ($DumpRendererBudget) { $arguments += '+DUMP_RENDERER_BUDGET' }
 if ($AssertIrqCadence) { $arguments += '+ASSERT_IRQ_CADENCE' }
 if ($IgnoreNonblack) { $arguments += '+IGNORE_NONBLACK' }
 if ($RegisterChangeTrace) {

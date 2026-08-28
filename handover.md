@@ -1073,3 +1073,59 @@ fit/timing and physical MiSTer validation remain pending.
 user evidence outside the core. The next clean Quartus run must prove that no
 SignalTap/SLD analyzer fabric is regenerated and must remeasure resources and
 timing.
+
+## 11. 2026-08-28 transparent sprite-group throughput optimization
+
+**Observation:** **KNOWN** — the pinned 381-frame Vasara 2 gameplay replay
+visited 5,289,792 four-pixel plot groups. 30,075 groups (0.57%) were fully
+transparent and therefore could not assert any existing `plot_we` lane.
+
+**Evidence:** The strict instrumented baseline passed with zero background or
+object overruns, zero cache deadline aborts, maximum line demand 23, and frame
+JSONL SHA-256 `c2dc64f7c9e2bfc7763a04d753c6592ae0a4af39ef7318ae5d9e445a70426f94`.
+It was byte-identical to the prior uninstrumented strict baseline. Scenario
+semantic journal SHA-256 was
+`0482cc5f52ce92ec5b6b158b2f064fbe1bbb07a68011d9723427d0967edecd5f`;
+descriptor-v3 SHA-256 was
+`e7bbf4c337384e694a43b392fabdbadbc2b60811eadf463094c1f7ccd964e475`.
+
+**Hypotheses:** Fully transparent groups consume plot-state cycles but cannot
+change pixels; selecting only nonzero groups should preserve lane ordering and
+pixel results. A fetch/cache/restart optimization was rejected because it
+would overlap the Vasara disappearing-sprite repair and p2 ownership timing.
+
+**Selected explanation:** **KNOWN** — for a group whose four decoded pens are
+zero, existing `plot_we` is necessarily `4'b0000`; advancing past that group
+removes a no-op at the first causal consumer.
+
+**Smallest change:** The candidate changes only `plot_i` selection in
+`rtl/video/ssv_cached_sprite_renderer.sv`, plus simulation counters and a
+directed sparse-row regression. Cache build, abort/publication, first-write
+restart coalescing, graphics requests, memory, clocks, reset, CDC, raster and
+constraints are unchanged. The stale scenario MRA path was corrected to the
+current byte-identical `Vasara 2.mra`.
+
+**Verification:** The corrected focused sparse/dense/torn-index suite passed.
+A fresh strict headless model built with runtime threads=1, timing and
+assertions enabled, and display backend `none`. The complete Vasara 2 cold
+replay passed 381 frames with zero overruns, deadline aborts, ownership errors
+or watchdog resets. Its frame JSONL remained byte-identical at SHA-256
+`c2dc64f7c9e2bfc7763a04d753c6592ae0a4af39ef7318ae5d9e445a70426f94`,
+while plot cycles fell from 5,289,792 to 5,259,717 — exactly the 30,075
+measured transparent groups. The complete Vasara 1 sibling replay also passed
+381 frames with zero overruns/aborts/ownership errors/watchdog resets and
+skipped 74,993 transparent groups; its frame JSONL SHA-256 was
+`87180ed53dc1d7a89c0a0fd38c51796528fc5c612389e87348573c6b69fcf9ba`.
+Detached Context Mode launching had returned an unexplained make status 1;
+the accepted runs used the same project-owned runner in an integrated hidden
+PowerShell session with large output retained for Context Mode analysis.
+
+**Regression scope:** Focused sparse/dense/torn-index renderer tests, Vasara 2
+cold gameplay/soak replay, exact frame-log comparison, and strict Verilator
+build/lint, plus the Vasara 1 cold gameplay/soak sibling replay. Physical
+MiSTer remains pending. No Quartus or RBF build was run.
+
+**Known unknowns:** Quartus synthesis/timing cost and physical MiSTer behavior
+remain unverified. The change adds only combinational nonzero-group selection
+and no state width, pixel value, request, cache, clock, reset, CDC, raster or
+constraint contract changed.

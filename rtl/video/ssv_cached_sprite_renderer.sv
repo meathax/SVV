@@ -288,6 +288,8 @@ logic        flip_y;
 logic        shadow;
 logic  [8:0] color;
 logic  [4:0] plot_i;
+logic  [4:0] plot_next_i;
+logic        plot_has_later_group;
 logic        render_tilemap;
 logic [15:0] tile_mode;
 logic [15:0] tile_unknown;
@@ -992,6 +994,43 @@ always_comb begin
     if ((tile_pf_stage == 2'd1) &&
         ((state == FETCH_WAIT) || (state == PLOT)))
         spr_addr = tile_next_word_addr;
+
+    plot_next_i = 5'd12;
+    plot_has_later_group = 1'b0;
+    case (plot_i)
+        5'd0: begin
+            if (pens[63:32] != 32'd0) begin
+                plot_next_i = 5'd4;
+                plot_has_later_group = 1'b1;
+            end
+            else if (pens[95:64] != 32'd0) begin
+                plot_next_i = 5'd8;
+                plot_has_later_group = 1'b1;
+            end
+            else if (pens[127:96] != 32'd0) begin
+                plot_next_i = 5'd12;
+                plot_has_later_group = 1'b1;
+            end
+        end
+        5'd4: begin
+            if (pens[95:64] != 32'd0) begin
+                plot_next_i = 5'd8;
+                plot_has_later_group = 1'b1;
+            end
+            else if (pens[127:96] != 32'd0) begin
+                plot_next_i = 5'd12;
+                plot_has_later_group = 1'b1;
+            end
+        end
+        5'd8: begin
+            if (pens[127:96] != 32'd0) begin
+                plot_next_i = 5'd12;
+                plot_has_later_group = 1'b1;
+            end
+        end
+        default: begin
+        end
+    endcase
 
     fetch_start = (state == FETCH_START);
     plot_we = 4'd0;
@@ -1819,14 +1858,21 @@ always_ff @(posedge clk) begin
                         end
                     end
                     else begin
-                        plot_i <= 5'd0;
+                        if (pens[31:0] != 32'd0)
+                            plot_i <= 5'd0;
+                        else if (pens[63:32] != 32'd0)
+                            plot_i <= 5'd4;
+                        else if (pens[95:64] != 32'd0)
+                            plot_i <= 5'd8;
+                        else
+                            plot_i <= 5'd12;
                         state <= PLOT;
                     end
                 end
             end
 
             PLOT: begin
-                if (plot_i == 5'd12) begin
+                if (!plot_has_later_group) begin
                     if (render_tilemap) begin
                         if (tile_screen_x + 11'sd16 >
                             $signed({2'd0, LAST_PIXEL})) begin
@@ -1870,7 +1916,7 @@ always_ff @(posedge clk) begin
                     end
                 end
                 else begin
-                    plot_i <= plot_i + 3'd4;
+                    plot_i <= plot_next_i;
                 end
             end
         endcase
@@ -1898,6 +1944,9 @@ integer sim_line_demand_i;
 integer sim_duplicate_skips;
 integer sim_line_pool_peak;
 integer sim_line_pool_builds;
+integer sim_plot_rows_nonzero;
+integer sim_plot_cycles;
+integer sim_empty_plot_groups;
 
 initial begin
     for (sim_line_demand_i = 0; sim_line_demand_i < 240;
@@ -1908,9 +1957,20 @@ initial begin
     sim_duplicate_skips = 0;
     sim_line_pool_peak = 0;
     sim_line_pool_builds = 0;
+    sim_plot_rows_nonzero = 0;
+    sim_plot_cycles = 0;
+    sim_empty_plot_groups = 0;
 end
 
 always_ff @(posedge clk) begin
+    if (state == PLOT)
+        sim_plot_cycles <= sim_plot_cycles + 1;
+    if ((state == FETCH_WAIT) && fetch_done && (pens != 128'd0)) begin
+        sim_plot_rows_nonzero <= sim_plot_rows_nonzero + 1;
+        sim_empty_plot_groups <= sim_empty_plot_groups +
+            (pens[31:0] == 32'd0) + (pens[63:32] == 32'd0) +
+            (pens[95:64] == 32'd0) + (pens[127:96] == 32'd0);
+    end
     if (state == BUILD_CLEAR_LINES) begin
         sim_line_demand[line_count_addr] <= 0;
         if (line_count_addr == 0)

@@ -2779,7 +2779,11 @@ begin
     $display("CACHE_PEAK=%0d of %0d entries (frame %0d)",
              cache_peak, dut.sprite_renderer.CACHE_ENTRIES, cache_peak_frame);
     $display("SIM_DUPLICATE_SKIPS=%0d",
-             dut.sprite_renderer.sim_duplicate_skips);
+              dut.sprite_renderer.sim_duplicate_skips);
+    $display("SIM_PLOT rows=%0d cycles=%0d empty_groups=%0d",
+             dut.sprite_renderer.sim_plot_rows_nonzero,
+             dut.sprite_renderer.sim_plot_cycles,
+             dut.sprite_renderer.sim_empty_plot_groups);
     if (bg_ack_while_obj_owns != 0)
         $fatal(1, "background renderer latched %0d acks it did not own",
                bg_ack_while_obj_owns);
@@ -3333,7 +3337,11 @@ initial begin
     $display("CACHE_PEAK=%0d of %0d entries (frame %0d)",
              cache_peak, dut.sprite_renderer.CACHE_ENTRIES, cache_peak_frame);
     $display("SIM_DUPLICATE_SKIPS=%0d",
-             dut.sprite_renderer.sim_duplicate_skips);
+              dut.sprite_renderer.sim_duplicate_skips);
+    $display("SIM_PLOT rows=%0d cycles=%0d empty_groups=%0d",
+             dut.sprite_renderer.sim_plot_rows_nonzero,
+             dut.sprite_renderer.sim_plot_cycles,
+             dut.sprite_renderer.sim_empty_plot_groups);
     if (bg_ack_while_obj_owns != 0)
         $fatal(1, "background renderer latched %0d acks it did not own",
                bg_ack_while_obj_owns);

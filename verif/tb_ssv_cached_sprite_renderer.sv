@@ -19,7 +19,7 @@ logic [15:0] spr_data, spr_data_next;
 logic rom_req;
 logic [ssv_pkg::SDR_AW:4] rom_addr;
 logic [127:0] rom_data;
-logic rom_ack;
+logic rom_ack = 1'b0;
 logic [3:0] plot_we;
 logic [35:0] plot_x;
 logic [59:0] plot_color;
@@ -35,9 +35,13 @@ always_ff @(posedge clk) begin
     spr_data <= sprite_mem[spr_addr];
     spr_data_next <= sprite_mem[spr_addr | 17'd1];
 end
+always @(negedge clk) rom_ack = rom_req;
 
 integer i;
 integer timeout;
+integer render_cycles;
+integer plot_cycles;
+integer plot_writes;
 
 task automatic clear_sprite_ram;
 begin
@@ -112,7 +116,6 @@ initial begin
     tilemap_scrolls = '0;
     shadow_4bit = 1'b0;
     rom_data = '0;
-    rom_ack = 1'b0;
     clear_sprite_ram();
 
     repeat (4) @(negedge clk);
@@ -143,6 +146,36 @@ initial begin
         dut.line_meta[238][11:0] != 1 ||
         dut.line_meta[239][11:0] != 1)
         $fatal(1, "signed Y clipping or first/last-line bucket mismatch");
+
+    // One opaque pixel in the first four-pixel group. The baseline renderer
+    // visits all four groups even though three cannot assert plot_we.
+    rom_data = 128'd0;
+    rom_data[7] = 1'b1;
+    render_cycles = 0;
+    plot_cycles = 0;
+    plot_writes = 0;
+    @(negedge clk);
+    start = 1'b1;
+    @(negedge clk);
+    start = 1'b0;
+    while (!done && render_cycles < 1000) begin
+        @(negedge clk);
+        render_cycles = render_cycles + 1;
+        if (dut.state == dut.PLOT)
+            plot_cycles = plot_cycles + 1;
+        if (plot_we != 0) begin
+            plot_writes = plot_writes + plot_we[0] + plot_we[1] +
+                          plot_we[2] + plot_we[3];
+            if ((plot_we != 4'b0001) || (plot_x[8:0] != 9'd20) ||
+                (plot_pen[7:0] != 8'd1))
+                $fatal(1, "sparse plot mismatch we=%b x=%0d pen=%0d",
+                       plot_we, plot_x[8:0], plot_pen[7:0]);
+        end
+    end
+    if (!done || (plot_cycles != 1) || (plot_writes != 1))
+        $fatal(1, "sparse plot cycles=%0d plot=%0d writes=%0d done=%0b",
+               render_cycles, plot_cycles, plot_writes, done);
+    rom_data = 128'd0;
 
     // The cache is the private per-frame snapshot. A CPU-side live RAM write
     // after publication must not alter the descriptor being displayed.
