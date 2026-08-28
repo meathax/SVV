@@ -49,5 +49,5 @@
     <dip bits="14" name="Unused" ids="Off,On" values="1,0"/>
     <dip bits="15" name="Unused" ids="Off,On" values="1,0"/>
   </switches>
-  <buttons names="Button 1,Button 2,Button 3,-,-,-,Coin,Start,Service,Test" default="A,B,X,Select,Start,R,L" count="3"/>
+  <buttons names="Rotate Left,Rotate Right,Tilt,-,-,-,Coin,Start,Service,Test" default="A,B,X,Select,Start,R,L" count="3"/>
 </misterromdescription>
