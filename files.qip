@@ -1,6 +1,6 @@
 # SSV MiSTer project file list
 set_global_assignment -name QIP_FILE sys/sys.qip
-set_global_assignment -name SDC_FILE SSV.sdc
+set_global_assignment -name SDC_FILE Arcade-SSV.sdc
 
 set_global_assignment -name SYSTEMVERILOG_FILE Arcade-SSV.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pkg.sv

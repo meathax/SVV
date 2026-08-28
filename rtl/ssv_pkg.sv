@@ -197,12 +197,13 @@ package ssv_pkg;
     //   dynagear                    0x1000000 -> 0x20000 =     2^17
     //   twineag2/stmblade           0x1800000 -> 0x30000 = 3 * 2^16
     //   cairblad/drifto94/vasara*   0x2000000 -> 0x40000 =     2^18
+    //   mslider                     0xA00000  -> 0x14000 = 5 * 2^14
     //
-    // Four of the eight supported entries use a non-power-of-two region, so the
+    // Five of the nine supported entries use a non-power-of-two region, so the
     // `wrap_code = code[16:0]` mask is wrong for them twice over: wrong width
-    // and wrong wrap rule. Every case is either 2^k or 3*2^k, and for 3*2^k
+    // and wrong wrap rule. Every case is either 2^k, 3*2^k, or 5*2^k. For odd
     //     code % (3<<k) == ((code >> k) % 3) << k | code[k-1:0]
-    // with (code>>k) at most 5 bits, so the modulo is a small LUT rather than
+    // with (code>>k) at most 6 bits, so the modulo is a small LUT rather than
     // a divider.
     // -----------------------------------------------------------------------
     typedef struct packed {
@@ -211,6 +212,7 @@ package ssv_pkg;
         logic [6:0] gfx_mb;             // includes SRMP7's 64 MiB board
         logic [4:0] gfx_code_k;         // tile modulus exponent
         logic       gfx_code_mul3;      // modulus is 3<<k, not 1<<k
+        logic       gfx_code_mul5;      // modulus is 5<<k, not 1<<k
         // (1<<gfx_code_k)-1, precomputed. It is derived, not independent, but
         // it MUST be a stored field rather than recomputed in the wrap: as a
         // variable shift it put a 20-bit barrel shifter in the combinational
@@ -383,6 +385,22 @@ package ssv_pkg;
         cfg_ultrax.has_st010        = 1'b0;
     endfunction
 
+    function automatic ssv_cfg_t cfg_mslider();
+        cfg_mslider = '0;
+        cfg_mslider.game_id               = 4'd8;
+        cfg_mslider.prog_mb               = 3'd1;
+        cfg_mslider.gfx_mb                = 7'd10;
+        cfg_mslider.gfx_code_k            = 5'd14;
+        cfg_mslider.gfx_code_mul5         = 1'b1;
+        cfg_mslider.gfx_code_mask         = 20'h03fff;
+        cfg_mslider.gfx_quarters          = 3'd3;
+        cfg_mslider.bank_valid            = 4'b0001;
+        cfg_mslider.sample_mb             = 6'd4;
+        cfg_mslider.mainram_mirror_010000 = 1'b1;
+        cfg_mslider.visible_width_half   = 8'd176;
+        cfg_mslider.visible_height       = 8'd240;
+    endfunction
+
     function automatic ssv_cfg_t cfg_for_game(input logic [3:0] game_id);
         case (game_id)
             4'd1:    cfg_for_game = cfg_cairblad();
@@ -392,6 +410,7 @@ package ssv_pkg;
             4'd5:    cfg_for_game = cfg_stmblade();
             4'd6:    cfg_for_game = cfg_twineag2();
             4'd7:    cfg_for_game = cfg_ultrax();
+            4'd8:    cfg_for_game = cfg_mslider();
             default: cfg_for_game = cfg_dynagear();
         endcase
     endfunction
@@ -495,24 +514,30 @@ package ssv_pkg;
         gfx_quarter_bytes_cfg = 27'(cfg.gfx_mb) << 18;
     endfunction
 
-    // code % ((1 or 3)<<k), returned at the full 18 bits required by the
+    // code % ((1, 3, or 5)<<k), returned at the full 18 bits required by the
     // qualified 32 MiB region (0x40000 tiles). The quotient-side operand is
-    // only five bits because the smallest qualified k is 15. Constant modulo
-    // three is a small LUT, not a variable divider in the SDRAM address path.
+    // only six bits because the smallest qualified k is 14. Constant modulo
+    // three/five is a small LUT, not a variable divider in the SDRAM address path.
     function automatic logic [17:0] wrap_code_cfg(
         input ssv_cfg_t cfg, input logic [19:0] code
     );
-        logic  [4:0] high5;
+        logic  [5:0] high6;
         logic  [1:0] rem3;
+        logic  [2:0] rem5;
         logic [19:0] low;
         // One AND against the stored mask -- no shifter.
         low = code & cfg.gfx_code_mask;
-        if (!cfg.gfx_code_mul3) begin
+        if (cfg.gfx_code_mul5) begin
+            high6 = 6'(code >> cfg.gfx_code_k);
+            rem5 = 3'(high6 % 6'd5);
+            wrap_code_cfg = 18'(low | (20'(rem5) << cfg.gfx_code_k));
+        end
+        else if (!cfg.gfx_code_mul3) begin
             wrap_code_cfg = 18'(low);
         end
         else begin
-            high5 = 5'(code >> cfg.gfx_code_k);
-            rem3 = 2'(high5 % 5'd3);
+            high6 = 6'(code >> cfg.gfx_code_k);
+            rem3 = 2'(high6 % 6'd3);
             wrap_code_cfg = 18'(low | (20'(rem3) << cfg.gfx_code_k));
         end
     endfunction

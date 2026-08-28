@@ -28,7 +28,7 @@ The core exposes the following MiSTer OSD features:
 - CRT Adjust: CRT Adjust, H-Size, H-Position, and V-Shift
 - Six game buttons, Test, Service, Start, and Coin inputs
 - High score saving on every supported game, enabled by default (OSD:
-  Autosave Hiscores). Six of the eight sets carry a hiscore.dat configuration
+  Autosave Hiscores). Six of the nine sets carry a hiscore.dat configuration
   in their MRA and save the extracted table to `<MRA name>.nvm`; Change Air
   Blade and Drift Out '94 keep their scores in battery-backed board NVRAM
   instead, which is saved as its own persistence stream. The table is written
@@ -41,7 +41,7 @@ service mode, rapid fire, subtitles, and other original board settings.
 ## Direct Video and rotated games
 
 Direct Video outputs each game's native raster without MiSTer framebuffer
-rotation. The horizontal `dynagear` and `drifto94` profiles therefore work
+rotation. The horizontal `dynagear`, `drifto94`, and `mslider` profiles therefore work
 directly on a compatible display. The vertical `cairblad`, `vasara`, `vasara2`,
 `stmblade`, `twineag2`, and `ultrax` profiles require a physically rotated CRT
 or another display that accepts the native vertical signal when Direct Video is
@@ -65,12 +65,6 @@ uses the normal VGA DAC pins; when the MiSTer analog configuration selects it,
 the same native raster can be encoded for composite or S-Video by the framework's
 Y/C path. This configuration is independent of the Direct Video choice above.
 
-The complete profile audit is reproducible with:
-
-```powershell
-python tools/verify_ssv_video_profiles.py
-```
-
 ## PCB Accuracy
 
 This section is intentionally limited to core behavior supported by primary
@@ -80,16 +74,15 @@ claims are documented elsewhere and are not presented as PCB accuracy here.
 
 | Area | Core behavior supported by the evidence | Evidence |
 | --- | --- | --- |
-| Main CPU and program ROM interface | V60 clocked at 16 MHz from the board clock scheme; 16-bit program data split into low/high byte ROMs | 48.000 MHz crystal and `PRL`/`PRH` positions in the real STA-0001B/SAM-5127 photographs; NEC V60 documentation; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
-| Clock sources | 42.9545 MHz video crystal divided by six for the approximately 7.159 MHz pixel clock; 48.000 MHz crystal divided by three for the 16 MHz CPU domain | Real STA-0001B motherboard photograph and the documented clock derivation in [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
-| Dyna Gear cartridge memory complement | Four-bank graphics layout, `16M-MASK` device capacity, and the 12 MiB graphics plus 4 MiB sample complement used by the core | Real SAM-5127 cartridge photographs, including bank labels, socket population, and device markings; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
-| DIP banks | Two 8-position DIP banks represented by the core's descriptor and input model | Real STA-0001B motherboard photograph; [`docs/hardware/SSV_BOARD_HARDWARE.md`](docs/hardware/SSV_BOARD_HARDWARE.md) |
-| ES5506 / OTTO audio device | ES5506 host interface and 32-voice model with separate sample memory, envelopes, looping, reverse playback, and compressed samples | ES5506/OTTO specification plus the real-board photograph identifying the Ensoniq device; [`docs/hardware/SSV_SILICON.md`](docs/hardware/SSV_SILICON.md) |
+| Main CPU and program ROM interface | V60 clocked at 16 MHz from the board clock scheme; 16-bit program data split into low/high byte ROMs | 48.000 MHz crystal and `PRL`/`PRH` positions in the real STA-0001B/SAM-5127 photographs; NEC V60 documentation and board photographs |
+| Clock sources | 42.9545 MHz video crystal divided by six for the approximately 7.159 MHz pixel clock; 48.000 MHz crystal divided by three for the 16 MHz CPU domain | Real STA-0001B motherboard photograph and manufacturer documentation |
+| Dyna Gear cartridge memory complement | Four-bank graphics layout, `16M-MASK` device capacity, and the 12 MiB graphics plus 4 MiB sample complement used by the core | Real SAM-5127 cartridge photographs, including bank labels, socket population, and device markings |
+| DIP banks | Two 8-position DIP banks represented by the core's descriptor and input model | Real STA-0001B motherboard photograph |
+| ES5506 / OTTO audio device | ES5506 host interface and 32-voice model with separate sample memory, envelopes, looping, reverse playback, and compressed samples | ES5506/OTTO specification plus the real-board photograph identifying the Ensoniq device |
 
 ## Supported games
 
-These are the eight supported entries in
-[`tools/ssv_supported_sets.py`](tools/ssv_supported_sets.py). Other Sammy Seta Visco entries
+The core exposes these nine supported entries. Other Sammy Seta Visco entries
 present in MAME are not currently claimed as supported by this core.
 
 | Game | Set name | Runtime hardware notes |
@@ -102,6 +95,7 @@ present in MAME are not currently claimed as supported by this core.
 | Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
+| Monster Slider (Japan) | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster |
 
 ## **Hardware emulated**
 
@@ -120,7 +114,7 @@ present in MAME are not currently claimed as supported by this core.
   MRA generation, verification, and MiSTer integration.
 - **Sega System 32 MiSTer core contributors** — source base for the V60,
   SDRAM controller, PLL, dual-port RAM helpers, and related verification
-  infrastructure. See [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
+  infrastructure. See the source headers and upstream links below.
 - **MiSTer-devel and MiSTer framework contributors** — MiSTer shell, HPS/OSD,
   video, audio, and platform integration from
   [Template_MiSTer](https://github.com/MiSTer-devel/Template_MiSTer).
@@ -148,8 +142,7 @@ present in MAME are not currently claimed as supported by this core.
 
 The original Sammy Seta Visco RTL and integration are released under the
 [GNU General Public License version 3 or later](LICENSE). Third-party files
-retain their own license notices; see the source headers and
-[`docs/PROVENANCE.md`](docs/PROVENANCE.md). MAME and other references are
+retain their own license notices in the source tree. MAME and other references are
 credited above and are not a license to redistribute copyrighted game data.
 
 No copyrighted game ROMs are included. Use only ROMs that you legally own or
@@ -176,21 +169,4 @@ all of the Meatcores automatically:
 ```ini
 [meathax/meatcores]
 db_url = https://raw.githubusercontent.com/meathax/meatcores/db/db.json.zip
-```
-
-## Development and verification
-
-- [`docs/GAME_COVERAGE.md`](docs/GAME_COVERAGE.md) — supported-set matrix and
-  current qualification evidence.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — shared hardware and memory
-  architecture.
-- [`docs/implementation-status.md`](docs/implementation-status.md) — detailed
-  implementation and verification status.
-- [`docs/ES5506_RESEARCH.md`](docs/ES5506_RESEARCH.md) — ES5506 sources,
-  measurements, and implementation notes.
-
-For the local profile/media audit:
-
-```powershell
-python tools/verify_ssv_universal_profile.py --require-roms
 ```

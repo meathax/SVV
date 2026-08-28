@@ -58,7 +58,7 @@ logic       index0_seen;
 //                                     b5 inverted lockout
 //                                     b7..b6 extra_input_mode
 //   4  gfx_code_k           10  wdog_mode
-//   5  b0 gfx_code_mul3      11  game_id
+//   5  b1 gfx_code_mul5, b0 gfx_code_mul3
 //   6  gfx_quarters         13  visible width / 2
 //   7  bank_map             12  sample_mb
 //                            14  visible height
@@ -119,6 +119,7 @@ function automatic ssv_pkg::ssv_cfg_t cfg_decode();
     cfg_decode.gfx_mb             = cfg_raw[3][6:0];
     cfg_decode.gfx_code_k         = cfg_raw[4][4:0];
     cfg_decode.gfx_code_mul3      = cfg_raw[5][0];
+    cfg_decode.gfx_code_mul5      = cfg_raw[5][1];
         // Derived here, ONCE, rather than in the wrap. As a variable shift in
         // the wrap it cost -12.7 ns on the path to the SDRAM address.
     // Validation permits only these six geometry-bound exponents.  Spell out
@@ -167,33 +168,37 @@ endfunction
 // Keep malformed descriptors away from variable shifts, bank selectors and
 // stream-boundary arithmetic.  This is deliberately a small constant-domain
 // predicate rather than a general divider/modulo path: the version-2 ABI has
-// only four graphics geometries and two sample sizes.
+// only the qualified graphics geometries and sample sizes.
 function automatic logic cfg_domain_valid();
     logic gfx_valid;
     logic bank_map_valid;
     logic geometry_valid;
     begin
         unique case (cfg_raw[3][6:0])
+            7'd10: gfx_valid = (cfg_raw[1] == 8'd3) &&
+                                  (cfg_raw[4][4:0] == 5'd14) &&
+                                  cfg_raw[5][1] && !cfg_raw[5][0] &&
+                                  (cfg_raw[6][2:0] == 3'd3);
             7'd14: gfx_valid = (cfg_raw[1] == 8'd3) &&
                                   (cfg_raw[21][1:0] == 2'd1) &&
                                   (cfg_raw[4][4:0] == 5'd14) &&
-                                  !cfg_raw[5][0] &&
+                                  !cfg_raw[5][1] && !cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd4);
             6'd12: gfx_valid = (cfg_raw[4][4:0] == 5'd15) &&
-                                   cfg_raw[5][0] &&
+                                   !cfg_raw[5][1] && cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd3);
             6'd16: gfx_valid = (cfg_raw[4][4:0] == 5'd17) &&
-                                  !cfg_raw[5][0] &&
+                                  !cfg_raw[5][1] && !cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd3);
             6'd24: gfx_valid = (cfg_raw[4][4:0] == 5'd16) &&
-                                   cfg_raw[5][0] &&
+                                   !cfg_raw[5][1] && cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd3);
             6'd32: gfx_valid = (cfg_raw[4][4:0] == 5'd18) &&
-                                  !cfg_raw[5][0] &&
+                                  !cfg_raw[5][1] && !cfg_raw[5][0] &&
                                   ((cfg_raw[6][2:0] == 3'd3) ||
                                    (cfg_raw[6][2:0] == 3'd4));
             7'd64: gfx_valid = (cfg_raw[4][4:0] == 5'd19) &&
-                                  !cfg_raw[5][0] &&
+                                  !cfg_raw[5][1] && !cfg_raw[5][0] &&
                                   (cfg_raw[6][2:0] == 3'd4);
             default: gfx_valid = 1'b0;
         endcase
@@ -234,14 +239,14 @@ function automatic logic cfg_domain_valid();
              (cfg_raw[2][2:0] == 3'd4)) &&
             !cfg_raw[3][7] &&
             (cfg_raw[4][7:5] == 3'd0) &&
-            (cfg_raw[5][7:1] == 7'd0) &&
+            (cfg_raw[5][7:2] == 6'd0) &&
             (cfg_raw[6][7:3] == 5'd0) &&
             (cfg_raw[8][7:4] == 4'd0) && (cfg_raw[8][3:0] != 4'd0) &&
             !cfg_raw[9][2] && (cfg_raw[9][7:6] != 2'd3) &&
             (cfg_raw[10][1:0] != 2'd3) &&
             (cfg_raw[10][7:6] != 2'd3) &&
             (cfg_raw[10][2] == (cfg_raw[10][7:6] != 2'd0)) &&
-            (cfg_raw[11][7:4] == 4'd0) && (cfg_raw[11][3:0] <= 4'd7) &&
+            (cfg_raw[11][7:4] == 4'd0) && (cfg_raw[11][3:0] <= 4'd8) &&
             (cfg_raw[12][7:6] == 2'd0) &&
             ((cfg_raw[12][5:0] == 6'd4) ||
              (cfg_raw[12][5:0] == 6'd8) ||
