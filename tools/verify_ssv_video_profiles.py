@@ -19,6 +19,9 @@ from ssv_supported_sets import SUPPORTED_SETS
 ROOT = Path(__file__).resolve().parents[1]
 RELEASES = ROOT / "releases"
 TOP = ROOT / "Arcade-SSV.sv"
+QSF = ROOT / "Arcade-SSV.qsf"
+SYS_QIP = ROOT / "sys" / "sys.qip"
+SYS_TOP = ROOT / "sys" / "sys_top.v"
 
 EXPECTED_ROTATION = {
     "dynagear": "horizontal",
@@ -42,6 +45,9 @@ def main() -> int:
         fail(f"release MRA count {len(mras)} differs from supported count {len(SUPPORTED_SETS)}")
 
     source = TOP.read_text(encoding="utf-8")
+    qsf = QSF.read_text(encoding="utf-8")
+    sys_qip = SYS_QIP.read_text(encoding="utf-8")
+    sys_top = SYS_TOP.read_text(encoding="utf-8")
     required_source = {
         '"H0O[50:49],Rotation,': "Direct Video hides framebuffer rotation",
         ".direct_video(direct_video)": "hps_io Direct Video connection",
@@ -50,6 +56,17 @@ def main() -> int:
     }
     for needle, description in required_source.items():
         if needle not in source:
+            fail(f"missing {description}: {needle}")
+
+    if 'MISTER_DISABLE_YC' in qsf:
+        fail("release QSF disables the framework Y/C encoder")
+    for needle, description in {
+        'yc_out.sv': "Y/C encoder source in sys.qip",
+        '`ifndef MISTER_DISABLE_YC': "conditional Y/C path in sys_top",
+        'yc_out yc_out': "Y/C encoder instance in sys_top",
+    }.items():
+        haystack = sys_qip if needle == 'yc_out.sv' else sys_top
+        if needle not in haystack:
             fail(f"missing {description}: {needle}")
 
     seen_sets = set()

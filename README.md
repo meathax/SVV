@@ -60,6 +60,11 @@ doubler, so `None` gives the native 15 kHz raster for a CRT through a DAC, and
 any scanline level gives a 31 kHz raster for a VGA-rate analog display. The
 scanline levels themselves are only emitted while the doubler is running.
 
+The release build keeps MiSTer's analog Y/C encoder enabled. RGB/component output
+uses the normal VGA DAC pins; when the MiSTer analog configuration selects it,
+the same native raster can be encoded for composite or S-Video by the framework's
+Y/C path. This configuration is independent of the Direct Video choice above.
+
 The complete profile audit is reproducible with:
 
 ```powershell
