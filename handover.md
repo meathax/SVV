@@ -1129,3 +1129,21 @@ MiSTer remains pending. No Quartus or RBF build was run.
 remain unverified. The change adds only combinational nonzero-group selection
 and no state width, pixel value, request, cache, clock, reset, CDC, raster or
 constraint contract changed.
+
+## 12. 2026-08-28 analog Y/C and Direct Video output contract
+
+**Observation:** **KNOWN** — the release QSF previously defined `MISTER_DISABLE_YC=1`, so the framework's composite/S-Video encoder was compiled out despite `sys/yc_out.sv` being present in `sys/sys.qip`.
+
+**Evidence:** `Arcade-SSV.qsf` now leaves Y/C enabled; `sys/sys_top.v` contains the framework `yc_out` instance and routes its Y/C or CVBS result into both the analog VGA boundary and Direct Video data path. `sys/sys_analog.tcl` maps the VGA DAC pins. `sys_top.v` keeps `direct_video` on the normal `cfg[10]` path in the release (`MISTER_FB`) branch; the `MISTER_DEBUG_NOHDMI` constant branch is not defined by this QSF.
+
+**Hypotheses:** The original macro was a resource-saving choice rather than a renderer dependency. Removing only that assignment restores the advertised analog feature without changing clocks, raster timing, sprite scheduling, rotation, or HDMI selection. A Quartus map is the falsifier for an unacceptable resource/timing cost; a real MiSTer DAC/Y/C test is the falsifier for physical pin/waveform issues.
+
+**Selected explanation:** **KNOWN** — the feature was disabled at project configuration, not broken in the core video producer.
+
+**Smallest change:** Removed only `MISTER_DISABLE_YC=1` from `Arcade-SSV.qsf`; added the README note and a static verifier check requiring `yc_out.sv`, the conditional Y/C path, and no release disable macro. No vendored framework RTL changed.
+
+**Verification:** `python tools/verify_ssv_video_profiles.py` passed all 8 profiles and the Y/C/direct-video contract. Strict headless sprite benches passed (`tb_ssv_line_buffer4`; `tb_ssv_cached_sprite_renderer dense=2048 abort_count=1`), confirming the Vasara renderer path remains unchanged. Commit `9e3fe1e` contains this focused change.
+
+**Regression scope:** Release video configuration, all 8 MRA profiles, and the existing sprite regressions. The prior Vasara 1/Vasara 2 full replay evidence remains valid because this change is QSF/documentation/static-verifier only.
+
+**Known unknowns:** The existing `output_files` RBF/reports predate this QSF change. Quartus resource/timing closure and physical RGB/component/composite/S-Video/Direct Video behavior require a fresh build and real MiSTer test; no RBF was produced here.
