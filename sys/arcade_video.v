@@ -292,6 +292,8 @@ always @(posedge CLK_VIDEO) begin
 end
 
 wire [13:0] stride = {bwidth[11:2], 4'd0};
+// FB_STRIDE is four-pixel aligned; reverse writes must skip row padding.
+wire [22:0] flip_line_pad = {9'd0, stride - {hsz, 2'b00}};
 
 reg [22:0] ram_addr, next_addr;
 reg [31:0] ram_data;
@@ -307,7 +309,7 @@ always @(posedge CLK_VIDEO) begin
 
 		if(~old_vs & VGA_VS) begin
 			next_addr <=
-				do_flip    ? bufsize-3'd4 :
+				do_flip    ? bufsize-23'd4-flip_line_pad :
 				rotate_ccw ? (bufsize - stride) : {vsz-1'd1, 2'b00};
 			hcnt <= rotate_ccw ? 3'd4 : {vsz-2'd2, 2'b00};
 		end
@@ -319,9 +321,12 @@ always @(posedge CLK_VIDEO) begin
 				do_flip    ? next_addr-3'd4 :
 				rotate_ccw ? (next_addr - stride) : (next_addr + stride);
 		end
-		if(old_de & ~VGA_DE & ~do_flip) begin
-			next_addr <= rotate_ccw ? (bufsize - stride + hcnt) : hcnt;
-			hcnt <= rotate_ccw ? (hcnt + 3'd4) : (hcnt - 3'd4);
+		if(old_de & ~VGA_DE) begin
+			if(do_flip) next_addr <= next_addr - flip_line_pad;
+			else begin
+				next_addr <= rotate_ccw ? (bufsize - stride + hcnt) : hcnt;
+				hcnt <= rotate_ccw ? (hcnt + 3'd4) : (hcnt - 3'd4);
+			end
 		end
 	end
 end

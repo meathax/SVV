@@ -924,9 +924,9 @@ wire ce_pix_x2;
 // CRT Adjust (rmonic79) was removed with it and is now BACK, upstream of the
 // doubler -- see the block below for where and why.
 //
-// Scanline FX are unaffected by any of this -- sys_top applies them itself
-// from VGA_SL (sys/sys_top.v: scanlines #(0) VGA_scanlines), which is why the
-// option kept working even before this core had any video chain at all.
+// sys_top applies VGA_SL before Direct Video leaves MiSTer. Suppress that mask
+// on the raw path so an external 90-degree rotation cannot turn horizontal
+// scanlines into vertical black bars; keep the line doubler independent.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -1187,7 +1187,7 @@ assign VGA_G    = sd_on ? sd_rgb[15:8]  : vid_g;
 assign VGA_B    = sd_on ? sd_rgb[7:0]   : vid_b;
 assign VGA_HS   = sd_on ? sd_hs : vid_hs;
 assign VGA_VS   = sd_on ? sd_vs : vid_vs;
-// Gated by sd_on, not taken raw from the OSD bits. sys_top applies scanlines
+// Gated by sd_on and suppressed for Direct Video. sys_top applies scanlines
 // itself (sys/sys_top.v: scanlines #(0) VGA_scanlines) to whatever this core
 // emits, on the analog, Direct Video and HDMI paths alike -- it has no idea
 // whether the raster is doubled. u_video_mode_guard deliberately defers the
@@ -1196,7 +1196,7 @@ assign VGA_VS   = sd_on ? sd_vs : vid_vs;
 // scanlines, and every second NATIVE line gets dimmed: a half-brightness comb
 // over the picture rather than a scanline effect. One frame of it on a scaled
 // HDMI display, and for the whole time the request is pending on a 15 kHz set.
-assign VGA_SL   = sd_on ? status[4:3] : 2'd0;
+assign VGA_SL   = (sd_on && !direct_video) ? status[4:3] : 2'd0;
 
 wire vga_de_in = sd_on   ? ~(sd_hb | sd_vb)
                : crt_on  ? crt_de_osd
