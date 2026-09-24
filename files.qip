@@ -34,6 +34,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_audio_cdc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/debug/ssv_audio_debug_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_scandoubler.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pixel_retime.sv
 # Vendored from rmonic79's CRT Adjust (GPLv3+), see rtl/crt_adjust.LICENSE. One
 # marked local change: a `timescale line, see the comment in the file.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt_adjust.sv

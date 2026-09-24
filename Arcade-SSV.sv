@@ -787,6 +787,7 @@ wire [15:0] dsw2_port = {8'hff, sw[1]};
 
 wire [23:0] core_rgb;
 wire core_ce, core_hs, core_vs, core_hb, core_vb;
+wire core_ce_x2_unused;   // superseded by u_pixel_retime's x2 enable
 wire renderer_overrun;
 wire signed [15:0] core_audio_l, core_audio_r;
 wire core_audio_tick;
@@ -824,7 +825,7 @@ ssv_core core (
     .frame_tick(core_frame_tick),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
-    .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(ce_pix_x2),
+    .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(core_ce_x2_unused),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .audio_tick(core_audio_tick),
@@ -895,15 +896,24 @@ hiscore #(
 // raster (ssv_diag_video) that used to sit alongside it has been removed: it
 // was permanently disabled by a hardcoded localparam, so the mux below always
 // selected the core and the second timing path was dead weight in every build.
-wire [7:0] av_r = core_rgb[23:16];
-wire [7:0] av_g = core_rgb[15:8];
-wire [7:0] av_b = core_rgb[7:0];
-wire av_hs = core_hs;
-wire av_vs = core_vs;
-wire av_hb = core_hb;
-wire av_vb = core_vb;
-wire av_ce = core_ce;
-wire ce_pix_x2;
+//
+// Everything downstream takes the raster through ssv_pixel_retime, which
+// re-emits it with every active pixel exactly 7 clk_sys wide. The core's own
+// enable alternates 7,7,7,6 in fixed screen columns, and Direct Video and the
+// analog DAC both show that as narrow columns -- faint vertical seams the
+// background scrolls through. See the module header.
+wire [23:0] av_rgb;
+wire av_hs, av_vs, av_hb, av_vb, av_ce, ce_pix_x2;
+ssv_pixel_retime #(.W(27)) u_pixel_retime (
+    .clk(clk_sys), .rst(video_reset),
+    .ce_in(core_ce), .d_in({core_rgb, core_hs, core_vs, core_vb}),
+    .hb_in(core_hb),
+    .ce_out(av_ce), .ce_x2_out(ce_pix_x2),
+    .d_out({av_rgb, av_hs, av_vs, av_vb}), .hb_out(av_hb)
+);
+wire [7:0] av_r = av_rgb[23:16];
+wire [7:0] av_g = av_rgb[15:8];
+wire [7:0] av_b = av_rgb[7:0];
 
 // ---------------------------------------------------------------------------
 // Video output.
@@ -1159,9 +1169,8 @@ end
 // request is committed by u_video_mode_guard at a VBlank line boundary.
 
 // The doubler needs an enable at exactly twice the pixel rate and in phase
-// with it. That now comes from ssv_video_timing, which runs ONE accumulator at
-// twice the pixel increment and takes ce_pixel as every second carry, so the
-// 2:1 ratio holds by construction.
+// with it. That now comes from ssv_pixel_retime, which marks each output pixel
+// enable and the clock three after it, so the 2:1 ratio holds by construction.
 //
 // It used to be generated here by a SECOND accumulator restarted on the line
 // reference, while the core's free-runs. verif/tb_ssv_scandoubler.sv measured
