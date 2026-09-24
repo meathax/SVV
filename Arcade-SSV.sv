@@ -133,19 +133,8 @@ localparam CONF_STR = {
     // The framework only renders that as an OSD page when CONF_STR carries the
     // "DIP;" token below -- without it the switches are parsed and delivered to
     // sw[] but have no menu entry, which is why the DIP page was missing.
-    // status bits 8..23 are free as a result.
-    "-;",
-    // CRT Adjust (rtl/crt_adjust.sv). Off is a pure passthrough; the three
-    // amounts are hidden until it is On (status_menumask bit 2 below).
-    "P1,CRT Adjust;",
-    "P1-;",
-    "P1O[24],CRT Adjust,Off,On;",
-    // 28 entries, not 32: the shrink end stops at -12 because -13 and below
-    // put more than 512 pixels on a line and overrun both line buffers in the
-    // chain. See the crt_hsize_idx mapping below.
-    "H2P1O[29:25],H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
-    "H2P1O[35:30],H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
-    "H2P1O[40:36],V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    // status bits 8..23 are free as a result. Bits 24..40 are free too: they
+    // held the CRT Adjust page, which has been removed.
     "-;",
     // Renders the MRA <switches> block as its own OSD page. Flip Screen lives
     // there; it is the board's own 180-degree flip, so it runs at native rate
@@ -170,9 +159,9 @@ assign HDMI_FREEZE = 1'b0;
 // only thing it does is make ascal emit three black frames when the measured
 // input resolution changes (sys/ascal.vhd:1996). This core changes input
 // resolution more often than most -- Video Fx switches the line rate between
-// 15 and 31 kHz, CRT Adjust H-Size changes the pixels per line live, and the
-// SSV games themselves resize the active area through the CRTC registers --
-// and with this tied low each of those switches puts the torn/garbage frames
+// 15 and 31 kHz, and the SSV games themselves resize the active area through
+// the CRTC registers -- and with this tied low each of those switches puts the
+// torn/garbage frames
 // ascal produces while it re-measures straight on the HDMI output. Enabling it
 // costs nothing while the resolution is stable.
 assign HDMI_BLACKOUT = 1'b1;
@@ -347,10 +336,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
     .ioctl_upload_index(upload_index_to_hps),
     .ioctl_din(ioctl_data_to_hps),
     // H1 hides Autosave on an MRA that carries no hiscore.dat entry.
-    // H2 hides the three CRT Adjust amounts while CRT Adjust itself is Off.
     // H0 hides the framebuffer Rotation menu while Direct Video is selected.
     // Direct Video carries the native raster and has no rotated framebuffer.
-    .status_menumask({13'd0, ~status[24], ~hs_configured, direct_video}),
+    .status_menumask({14'd0, ~hs_configured, direct_video}),
     .forced_scandoubler(forced_scandoubler),
     .direct_video(direct_video),
     .video_rotated(video_rotated),
@@ -931,69 +919,12 @@ wire [7:0] av_b = av_rgb[7:0];
 // nor a gamma curve earns that on an arcade board driving a CRT. Dropping
 // arcade_video takes gamma with it, so there is no GAMMA parameter to set.
 //
-// CRT Adjust (rmonic79) was removed with it and is now BACK, upstream of the
-// doubler -- see the block below for where and why.
-//
 // sys_top applies VGA_SL before Direct Video leaves MiSTer. Suppress that mask
 // on the raw path so an external 90-degree rotation cannot turn horizontal
 // scanlines into vertical black bars; keep the line doubler independent.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// CRT Adjust (rtl/crt_adjust.sv, rmonic79) -- core-side integration.
-//
-// Everything the picture is resized and repositioned by happens inside a line
-// buffer whose engine restarts on the module's own line reference, so the sync
-// never moves out of phase with the content and a real 15 kHz CRT keeps its
-// lock while the controls are moved live. sys/ is untouched, which is the whole
-// point of choosing the core-side variant over crt_adjust_sys.sv.
-//
-// PLACEMENT: between the core raster and ssv_scandoubler, NOT as an alternative
-// to it. The previous integration muxed the two whole paths against each other,
-// on the argument that no display wants both. That argument is wrong in one
-// direction: a 15 kHz CRT user runs Video Fx = None, so sd_on is 0 and CRT
-// Adjust has to work on the UNDOUBLED path -- which it does here -- but a user
-// on a 31 kHz analog set needs the doubler to get a picture at all, and the old
-// mux silently took the doubler away the moment CRT Adjust was switched on,
-// dropping them back to 15 kHz. Sitting upstream, CRT Adjust adjusts and the
-// doubler doubles whatever it is handed, so both are available together.
-//
-// This composes rather than fighting because ssv_scandoubler MEASURES its line
-// length (hmax) instead of hardcoding one: it counts ce_pix ticks between line
-// references and wraps the read pointer there. Change the pixel rate under it
-// and it follows. It does need its two enables in an exact 2:1 -- see the
-// accumulator below.
-//
-// Deviations from the upstream reference glue, both forced by this core:
-//
-//  1. Read-rate units are SIXTEENTHS of a clk_sys cycle, not quarters. The
-//     reference assumes an integer clk/pixel ratio (96/6 = 16 cycles = 64
-//     quarters). SSV's pixel clock is a fractional accumulator: 9710/65536 of
-//     48.3185 MHz = 7.159091 MHz, i.e. 6.74933 clk per pixel, which is not an
-//     integer and cannot be. 6.74933 x 16 = 107.99, so the base period is 108
-//     sixteenths -- 0.01% slow at H-Size 0, which is 0.05 pixel across a
-//     454-pixel line and is reset every line anyway. It also makes each H-Size
-//     step 1/108 = 0.93%, finer than the reference's 1.5%.
-//
-//  2. H-Position is a signed 6-bit OSD field (-32..+31 px) rather than the
-//     reference's 7-bit wrap encoding of +-48. The wrap encoding needs a
-//     128-entry OSD list to place -48 at index 79; plain two's complement puts
-//     0 at index 0 with a 64-entry list and no dead entries. The module's
-//     hoffset input is unchanged (signed 9-bit); only the range offered is.
-//
-// HPOS_MODE = CONTENTSHIFT: 336 active pixels on a 454-pixel line, and the
-// write pointer resets on the line reference at hcnt 400, leaving 54 samples of
-// margin before the active region and 122 after it inside the 512-entry bank --
-// so +-32 of content shift cannot run the picture out of the buffer window.
-// ---------------------------------------------------------------------------
-localparam int CRT_HTOTAL = 454;
-localparam int CRT_VTOTAL = 262;
-
 wire       sd_on;
-wire       crt_on;
-wire [4:0] crt_hsize_idx;
-wire signed [5:0] crt_hpos;
-wire signed [5:0] crt_vshift;
 wire [1:0] rotation;
 wire [1:0] aspect;
 wire [1:0] scale_select;
@@ -1002,168 +933,12 @@ ssv_video_mode_guard u_video_mode_guard (
     .clk(clk_sys), .rst(video_reset),
     .native_ce(av_ce), .native_hsync(av_hs), .native_vblank(av_vb),
     .sd_request(forced_scandoubler | (|status[5:3])),
-    .crt_request(status[24]),
-    .crt_hsize_request(status[29:25]),
-    .crt_hpos_request(status[35:30]),
-    .crt_vshift_request(status[40:36]),
     .rotation_request(status[50:49]),
     .aspect_request(status[2:1]),
     .scale_request(status[44:43]),
-    .sd_on(sd_on), .crt_on(crt_on),
-    .crt_hsize_idx(crt_hsize_idx),
-    .crt_hpos(crt_hpos), .crt_vshift(crt_vshift),
+    .sd_on(sd_on),
     .rotation(rotation), .aspect(aspect), .scale_select(scale_select)
 );
-
-// H-Size is offered as an INDEX, not as raw two's complement, so that the
-// shrink end can be cut short. Shrinking speeds the read up, which puts MORE
-// output pixels on a line, and both line buffers in this chain hold 512 entries
-// per bank: crt_adjust's own read address is 9 bits, and ssv_scandoubler
-// measures the line into a 9-bit hmax. Measured with the directed chain bench,
-// pixels per output line are 454 at H-Size 0, 510 at -12, and 533 at -16 --
-// so -13 and below overrun the bank. At -16 the doubler's measured line length
-// collapsed from 509 to 19, i.e. the picture is destroyed, not merely clipped.
-//
-// The integration removed in 095d3b2 offered the full -16..+15 and had the same
-// defect; it is fixed here rather than restored. Indices 0..15 are +0..+15 and
-// indices 16..27 are -12..-1, which is what the OSD list enumerates; the
-// subtraction below is 5-bit and wraps to exactly that (16 - 28 = -12).
-wire signed [4:0] crt_hsize =
-    (crt_hsize_idx <= 5'd15) ? $signed(crt_hsize_idx)
-                             : $signed(crt_hsize_idx - 5'd28);
-wire signed [8:0] crt_hoffset = 9'($signed(crt_hpos));
-
-// Read clock enable, restarted on the module's hs_ref_out -- never on the raw
-// HSync, or the read rate and the module's read counter drift apart and the
-// picture desyncs when shrinking.
-//
-// ONE accumulator, stepped 32 per clk against a period in sixteenths, so each
-// carry is a HALF-pixel tick and every second carry is a whole pixel. That is
-// the same construction ssv_video_timing uses for the native pair, and for the
-// same reason: the doubler downstream needs its x2 enable to be exactly twice
-// its pixel enable and in phase, and two independent accumulators cannot be
-// held in that relationship (measured: 907 half-ticks per line where 908 were
-// needed, every doubled line one pixel short). Deriving both from one carry
-// chain makes the ratio true by construction at any H-Size.
-wire crt_hs_ref;
-reg  crt_hs_ref_d;
-always_ff @(posedge clk_sys) crt_hs_ref_d <= crt_hs_ref;
-wire crt_hs_ref_rise = crt_hs_ref & ~crt_hs_ref_d;
-
-wire [7:0] crt_rd_period = 8'd108 + {{3{crt_hsize[4]}}, crt_hsize}; // 92..123
-reg  [7:0] crt_rd_acc;
-reg        crt_rd_phase;
-wire       crt_x2_tick = (crt_rd_acc + 8'd32) >= crt_rd_period;
-always_ff @(posedge clk_sys) begin
-    if (crt_hs_ref_rise) begin
-        crt_rd_acc   <= 8'd0;
-        crt_rd_phase <= 1'b0;
-    end
-    else if (crt_x2_tick) begin
-        crt_rd_acc   <= crt_rd_acc + 8'd32 - crt_rd_period;
-        crt_rd_phase <= ~crt_rd_phase;
-    end
-    else begin
-        crt_rd_acc   <= crt_rd_acc + 8'd32;
-    end
-end
-wire crt_rd_tick = crt_x2_tick & crt_rd_phase;
-wire crt_rd_ce   = crt_on ? crt_rd_tick : av_ce;
-
-wire [7:0] crt_r, crt_g, crt_b;
-wire crt_hs, crt_vs, crt_hb, crt_vb;
-
-crt_adjust #(
-    .VTOTAL   (CRT_VTOTAL),
-    .HTOTAL   (CRT_HTOTAL),
-    // 1 = HPOS_CONTENTSHIFT. Spelled as a literal rather than the module's
-    // `HPOS_CONTENTSHIFT macro because this file is compiled before rtl/ in
-    // files.qip, so the macro is not defined yet at this point.
-    .HPOS_MODE(1)
-) u_crt_adjust (
-    .clk      (clk_sys),
-    .pxl_cen  (av_ce),
-    .pxl2_cen (crt_rd_ce),
-    .active   (crt_on),
-    .hsize    (crt_hsize),
-    .hoffset  (crt_hoffset),
-    .voffset  (crt_vshift),
-    .r_in     (av_r), .g_in(av_g), .b_in(av_b),
-    .hs_in    (av_hs), .vs_in(av_vs),
-    .hb_in    (av_hb | av_vb), .vb_in(av_vb),
-    .r_out    (crt_r), .g_out(crt_g), .b_out(crt_b),
-    .hs_out   (crt_hs), .vs_out(crt_vs),
-    .hb_out   (crt_hb), .vb_out(crt_vb),
-    .hs_ref_out(crt_hs_ref)
-);
-
-// The stream the rest of the chain sees. Muxed rather than always taken from
-// crt_adjust's bypass path so that with CRT Adjust Off the video is bit- and
-// cycle-identical to a build without this module: bypass still costs a pixel of
-// latency on every signal, and the default path should not pay for a feature
-// that is not switched on.
-wire [7:0] vid_r     = crt_on ? crt_r     : av_r;
-wire [7:0] vid_g     = crt_on ? crt_g     : av_g;
-wire [7:0] vid_b     = crt_on ? crt_b     : av_b;
-wire       vid_hs    = crt_on ? crt_hs    : av_hs;
-wire       vid_vs    = crt_on ? crt_vs    : av_vs;
-wire       vid_hb    = crt_on ? crt_hb    : av_hb;
-wire       vid_vb    = crt_on ? crt_vb    : av_vb;
-// vid_ce is crt_rd_ce by definition -- the same mux, named once.
-wire       vid_ce    = crt_rd_ce;
-wire       vid_ce_x2 = crt_on ? crt_x2_tick : ce_pix_x2;
-
-// The OSD centres itself on the rising edge of VGA_DE. Left following the
-// module's blank it would slide with the picture whenever H-Position moves, so
-// build a DE window that rises with the NATIVE active region and falls with the
-// adjusted one: the image moves, the OSD stays put on the physical screen.
-//
-// With one correction. In HPOS_CONTENTSHIFT the module's active window moves
-// with the content (crt_adjust.sv: pass_q compares rdcnt against hb1/hb0 with
-// hoffset added to both), so for a NEGATIVE H-Position the content starts
-// before the native active region does. Rising on the native edge alone
-// therefore did not merely leave the OSD in place, it CLIPPED up to 32 pixels
-// off the left of the picture -- VGA_DE is not a cosmetic signal here, it is
-// what sys_top blanks RGB with (sys/sys_top.v: din(de_emu ? {r,g,b} : 24'd0))
-// on the analog and Direct Video paths, and what ascal takes as the capture
-// window on HDMI. Rising on whichever of the two comes FIRST keeps the whole
-// picture; the OSD anchor is then fixed for H-Position >= 0 as before, and
-// follows the image only when it is shifted left, which is the direction where
-// the alternative was losing image.
-//
-// The native HSync rise is once per line, which is the cadence the reference
-// glue gets from a hcnt == HTOTAL-1 tick; sampling VBlank on it also delivers
-// the one-line delay the read side needs (it is emitting the previous line).
-//
-// This is used on the UNDOUBLED path only. On the doubled path VGA_DE comes
-// from the doubler's replayed blank, so with CRT Adjust and the doubler both on
-// the OSD tracks the image horizontally. Keeping it fixed there would mean
-// storing this bit through the line buffer, i.e. editing ssv_scandoubler; the
-// display that needs a stable OSD and analog geometry correction at once is the
-// 15 kHz set, and that is the path it is correct on.
-reg av_hs_d;
-always_ff @(posedge clk_sys) if (av_ce) av_hs_d <= av_hs;
-wire av_hs_rise = av_ce && (av_hs & ~av_hs_d);
-
-reg crt_vb_1l;
-always_ff @(posedge clk_sys) if (av_hs_rise) crt_vb_1l <= av_vb;
-
-wire crt_native_active = ~(av_hb | crt_vb_1l);
-reg  crt_native_active_d;
-always_ff @(posedge clk_sys) if (av_ce) crt_native_active_d <= crt_native_active;
-wire crt_native_rise = crt_native_active & ~crt_native_active_d;
-
-wire crt_adj_active = ~crt_hb;
-reg  crt_adj_active_d;
-always_ff @(posedge clk_sys) if (crt_rd_ce) crt_adj_active_d <= crt_adj_active;
-wire crt_adj_fall = crt_adj_active_d & ~crt_adj_active;
-wire crt_adj_rise = crt_adj_active & ~crt_adj_active_d;
-
-reg crt_de_osd;
-always_ff @(posedge clk_sys) begin
-    if      (crt_native_rise | crt_adj_rise) crt_de_osd <= 1'b1;
-    else if (crt_adj_fall)                   crt_de_osd <= 1'b0;
-end
 
 // Any Fx selection implies doubling, the same rule arcade_video used. The
 // request is committed by u_video_mode_guard at a VBlank line boundary.
@@ -1183,19 +958,19 @@ wire        sd_hs, sd_vs, sd_hb, sd_vb;
 
 ssv_scandoubler u_scandoubler (
     .clk(clk_sys), .rst(video_reset),
-    .ce_pix(vid_ce), .ce_pix_x2(vid_ce_x2),
-    .rgb_in({vid_r, vid_g, vid_b}),
-    .hs_in(vid_hs), .vs_in(vid_vs), .hb_in(vid_hb), .vb_in(vid_vb),
+    .ce_pix(av_ce), .ce_pix_x2(ce_pix_x2),
+    .rgb_in({av_r, av_g, av_b}),
+    .hs_in(av_hs), .vs_in(av_vs), .hb_in(av_hb), .vb_in(av_vb),
     .rgb_out(sd_rgb),
     .hs_out(sd_hs), .vs_out(sd_vs), .hb_out(sd_hb), .vb_out(sd_vb)
 );
 
-assign CE_PIXEL = sd_on ? vid_ce_x2 : vid_ce;
-assign VGA_R    = sd_on ? sd_rgb[23:16] : vid_r;
-assign VGA_G    = sd_on ? sd_rgb[15:8]  : vid_g;
-assign VGA_B    = sd_on ? sd_rgb[7:0]   : vid_b;
-assign VGA_HS   = sd_on ? sd_hs : vid_hs;
-assign VGA_VS   = sd_on ? sd_vs : vid_vs;
+assign CE_PIXEL = sd_on ? ce_pix_x2 : av_ce;
+assign VGA_R    = sd_on ? sd_rgb[23:16] : av_r;
+assign VGA_G    = sd_on ? sd_rgb[15:8]  : av_g;
+assign VGA_B    = sd_on ? sd_rgb[7:0]   : av_b;
+assign VGA_HS   = sd_on ? sd_hs : av_hs;
+assign VGA_VS   = sd_on ? sd_vs : av_vs;
 // Gated by sd_on and suppressed for Direct Video. sys_top applies scanlines
 // itself (sys/sys_top.v: scanlines #(0) VGA_scanlines) to whatever this core
 // emits, on the analog, Direct Video and HDMI paths alike -- it has no idea
@@ -1207,9 +982,7 @@ assign VGA_VS   = sd_on ? sd_vs : vid_vs;
 // HDMI display, and for the whole time the request is pending on a 15 kHz set.
 assign VGA_SL   = (sd_on && !direct_video) ? status[4:3] : 2'd0;
 
-wire vga_de_in = sd_on   ? ~(sd_hb | sd_vb)
-               : crt_on  ? crt_de_osd
-               :           ~(av_hb | av_vb);
+wire vga_de_in = sd_on ? ~(sd_hb | sd_vb) : ~(av_hb | av_vb);
 // Direct Video is the raw native raster. Its vertical-cabinet use case is a
 // physically rotated CRT; DDRAM screen rotation is for the normal HDMI /
 // framebuffer path only.

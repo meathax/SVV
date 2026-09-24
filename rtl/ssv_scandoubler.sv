@@ -83,8 +83,7 @@ localparam int WORDW = 26;   // {hs, hb, rgb[23:0]}
 
 // ---------------------------------------------------------------------------
 // Line reference: the rising edge of the active-low hsync, i.e. the end of the
-// sync pulse. It is the same edge crt_adjust restarts its engine on, so the two
-// modules agree about where a line begins.
+// sync pulse.
 // ---------------------------------------------------------------------------
 logic hs_in_d;
 always_ff @(posedge clk) if (ce_pix) hs_in_d <= hs_in;

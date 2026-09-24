@@ -25,7 +25,6 @@ The core exposes the following MiSTer OSD features:
 - Stereo Mix: None, 25%, 50%, 100%
 - Service Mode
 - Reset
-- CRT Adjust: CRT Adjust, H-Size, H-Position, and V-Shift
 - Six game buttons, Test, Service, Start, and Coin inputs
 - High score saving on every supported game, enabled by default (OSD:
   Autosave Hiscores). Six of the nine sets carry a hiscore.dat configuration
@@ -106,7 +105,7 @@ present in MAME are not currently claimed as supported by this core.
 | Sammy Seta Visco memory and control logic | Work/sprite/palette RAM, XRAM/NVRAM windows, interrupts, watchdog, coin/service/test inputs, and DIP switches |
 | Ensoniq ES5506 (OTTO) | Host registers, 32-voice sample playback, interpolation, filters, envelopes, stereo mixing, and IRQ status |
 | NEC uPD96050 / ST010 | Optional protection/DSP daughterboard used by Drift Out '94, Storm Blade, and Twin Eagle II |
-| MiSTer platform interface | MiSTer HPS/OSD, SDRAM, HDMI/VGA video, audio output, rotation, scaling, scanlines, and CRT adjustment |
+| MiSTer platform interface | MiSTer HPS/OSD, SDRAM, HDMI/VGA video, audio output, rotation, scaling, and scanlines |
 
 ## Credits
 
@@ -133,8 +132,6 @@ present in MAME are not currently claimed as supported by this core.
   cross-check: [Furnace source](https://github.com/tildearrow/furnace/tree/master/extern/vgsound_emu-modified/vgsound_emu/src/es550x).
 - **visions85 / JTSFTM contributors** — partial ES5506 RTL inspected as an
   FPGA implementation reference: [sftm5506.v](https://github.com/visions85/sftm/blob/main/cores/sftm/hdl/sftm5506.v).
-- **Umberto Parisi (rmonic79), with help from Andrea Bogazzi (@asturur)** —
-  CRT Adjust module used by the OSD integration.
 - **Alan Steremberg and Jim Gregory** — Hiscores_MiSTer module used for the
   hiscore plumbing: [Hiscores_MiSTer](https://github.com/JimmyStones/Hiscores_MiSTer).
 

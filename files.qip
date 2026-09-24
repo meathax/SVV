@@ -35,9 +35,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/debug/ssv_audio_debug_overlay
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_scandoubler.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pixel_retime.sv
-# Vendored from rmonic79's CRT Adjust (GPLv3+), see rtl/crt_adjust.LICENSE. One
-# marked local change: a `timescale line, see the comment in the file.
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt_adjust.sv
 # Vendored from JimmyStones/Hiscores_MiSTer (GPLv2+). One marked local change:
 # dpram_hs picks its storage style from array depth, see the comment there.
 set_global_assignment -name VERILOG_FILE rtl/hiscore.v

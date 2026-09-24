@@ -10,19 +10,11 @@ module ssv_video_mode_guard (
 	input  logic       native_vblank,
 
 	input  logic       sd_request,
-	input  logic       crt_request,
-	input  logic [4:0] crt_hsize_request,
-	input  logic [5:0] crt_hpos_request,
-	input  logic [5:0] crt_vshift_request,
 	input  logic [1:0] rotation_request,
 	input  logic [1:0] aspect_request,
 	input  logic [1:0] scale_request,
 
 	output logic       sd_on,
-	output logic       crt_on,
-	output logic [4:0] crt_hsize_idx,
-	output logic [5:0] crt_hpos,
-	output logic [5:0] crt_vshift,
 	output logic [1:0] rotation,
 	output logic [1:0] aspect,
 	output logic [1:0] scale_select
@@ -34,7 +26,7 @@ wire  native_line_start = native_ce && native_hsync && !native_hsync_d;
 wire  commit_modes      = native_line_start && native_vblank &&
 	                         frame_commit_armed;
 
-// Both optional line-buffer paths keep filling while bypassed. Waiting until
+// The line doubler keeps filling while bypassed. Waiting until
 // the first HSync release in VBlank therefore switches a fully primed path at
 // a line reference, never in active video or halfway through a sync pulse.
 always_ff @(posedge clk) begin
@@ -42,10 +34,6 @@ always_ff @(posedge clk) begin
 		native_hsync_d   <= 1'b1;
 		frame_commit_armed <= 1'b1;
 		sd_on            <= 1'b0;
-		crt_on           <= 1'b0;
-		crt_hsize_idx    <= 5'd0;
-		crt_hpos         <= 6'd0;
-		crt_vshift       <= 6'd0;
 		rotation         <= 2'd0;
 		aspect           <= 2'd0;
 		scale_select     <= 2'd0;
@@ -60,10 +48,6 @@ always_ff @(posedge clk) begin
 		if (commit_modes) begin
 			frame_commit_armed <= 1'b0;
 			sd_on          <= sd_request;
-			crt_on         <= crt_request;
-			crt_hsize_idx  <= crt_hsize_request;
-			crt_hpos       <= crt_hpos_request;
-			crt_vshift     <= crt_vshift_request;
 			rotation       <= rotation_request;
 			aspect         <= aspect_request;
 			scale_select   <= scale_request;
