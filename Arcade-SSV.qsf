@@ -171,10 +171,23 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 #
 # Seed 19 on THIS netlist: -0.053 ns Slow 100C, TNS -0.085 ns / 2 endpoints,
 # same pll_hdmi divclk domain -- an improvement over seed 2's -0.167 ns but
-# still failing. Trying seed 3 next (this file's own "only seed with any
-# recorded clean result" note, +0.04 ns pre-cleanup) as the second of the
-# three-seed sweep budget.
-set_global_assignment -name SEED 3
+# still failing.
+#
+# 7 Sep 2026 seed sweep, netlist after the sdram p3 phase-transfer fix and the
+# hiscore/line-buffer MLAB reversion (no clock, reset, CDC or SDC change):
+# seed 3 measured -0.025 ns Multicorner worst-case setup, TNS -0.025 ns, single
+# endpoint, same pll_hdmi|...counter[0].output_counter|divclk domain as every
+# prior sweep on this file -- the closest any seed has come to clean on any
+# recorded netlist. Trying seed 19 next (first of the three-seed sweep budget)
+# since it has repeatedly been the closest competitor across earlier netlists.
+#
+# 24 Sep 2026, netlist with ssv_pixel_retime (cd428ae) and CRT Adjust removed
+# (8bd317c), 36,864 ALMs: seed 19 misses -0.116 ns Slow 100C only, single
+# endpoint csync_hdmi|csync_hs -> sys_top hs (3 levels, 5.2 ns routing, -0.48 ns
+# clock-mux skew; all ascal paths now >= +0.296 ns). Seed sweep (2,3,5,7)
+# was started and aborted before any fit finished; seed 19 kept to match
+# releases/Arcade-SSV_20260924.rbf.
+set_global_assignment -name SEED 19
 # 26 Aug 2026 seed sweep, netlist after the ES5506 stale-CR-mask /
 # snapshot-blind-spot fix (+268 ALMs, 35,807 -> 36,075 vs the last accepted
 # build): both failing seeds miss in the same single-endpoint
