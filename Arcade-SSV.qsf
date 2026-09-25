@@ -187,6 +187,9 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # clock-mux skew; all ascal paths now >= +0.296 ns). Seed sweep (2,3,5,7)
 # was started and aborted before any fit finished; seed 19 kept to match
 # releases/Arcade-SSV_20260924.rbf.
+# 25-26 Sep 2026 seed sweep on the 36,864-ALM netlist (HEAD 6fe2d73): seed 19
+# Slow 100C -0.116 ns (single pll_hdmi divclk endpoint); seed 2 Slow 100C -0.055,
+# Slow -40C -0.209 (TNS -0.320), same pll_hdmi domain. Trying seed 3 next.
 set_global_assignment -name SEED 19
 # 26 Aug 2026 seed sweep, netlist after the ES5506 stale-CR-mask /
 # snapshot-blind-spot fix (+268 ALMs, 35,807 -> 36,075 vs the last accepted
