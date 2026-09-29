@@ -31,7 +31,7 @@ The core exposes the following MiSTer OSD features:
 - Reset
 - Six game buttons, Test, Service, Start, and Coin inputs
 - High score saving on every supported game, enabled by default (OSD:
-  Autosave Hiscores). Seven of the nine sets carry a hiscore.dat configuration
+  Autosave Hiscores). Eight of the ten sets carry a hiscore.dat configuration
   in their MRA and save the extracted table to `<MRA name>.nvm`; Change Air
   Blade and Drift Out '94 keep their scores in battery-backed board NVRAM
   instead, which is saved as its own persistence stream. The table is written
@@ -89,7 +89,10 @@ needs a listening or viewing pass on a real MiSTer before it is called done:
   mutes only while NVRAM is being transferred or the game is frozen from the OSD.
 - The disk LED now shows real storage activity instead of the renderer-overrun
   flag.
-- Monster Slider hiscore saving.
+- Monster Slider and Survival Arts hiscore saving.
+- Faster sprite-list build (about 20% fewer cycles in the worst scenes), which
+  removes the sprite-cache overflow that made sprites vanish in dense scenes
+  and is what lets Survival Arts run.
 
 ## PCB Accuracy
 
@@ -108,7 +111,7 @@ claims are documented elsewhere and are not presented as PCB accuracy here.
 
 ## Supported games
 
-The core exposes these nine supported entries. Other Sammy Seta Visco entries
+The core exposes these ten supported entries. Other Sammy Seta Visco entries
 present in MAME are not currently claimed as supported by this core.
 
 | Game | Set name | Runtime hardware notes |
@@ -121,7 +124,8 @@ present in MAME are not currently claimed as supported by this core.
 | Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
-| Monster Slider (Japan) | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster; B1 Rotate Left, B2 Rotate Right, B3 Tilt |
+| Survival Arts (USA) | `survartsu` | 1 MiB program ROM, 24 MiB graphics, extra RAM, six-button layout; needs `survartsu.zip` plus parent `survarts.zip`; default DIPs charge 2 coins per credit and 2 credits to start |
+ | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster; B1 Rotate Left, B2 Rotate Right, B3 Tilt |
 
 ## **Hardware emulated**
 

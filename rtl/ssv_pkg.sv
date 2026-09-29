@@ -401,6 +401,27 @@ package ssv_pkg;
         cfg_mslider.visible_height       = 8'd240;
     endfunction
 
+    // Survival Arts (USA). Mirrors the generated MRA descriptor
+    // (53030118100103000480090904A8F0...): 1 MiB program, 24 MiB graphics
+    // (3x8 MiB), x3 tile code multiplier, six-button window at $500008.
+    function automatic ssv_cfg_t cfg_survartsu();
+        cfg_survartsu = '0;
+        cfg_survartsu.game_id           = 4'd9;
+        cfg_survartsu.prog_mb           = 3'd1;
+        cfg_survartsu.gfx_mb            = 7'd24;
+        cfg_survartsu.gfx_code_k        = 5'd16;
+        cfg_survartsu.gfx_code_mul3     = 1'b1;
+        cfg_survartsu.gfx_code_mask     = 20'h0ffff;
+        cfg_survartsu.gfx_quarters      = 3'd3;
+        cfg_survartsu.bank_valid        = 4'b0100;
+        cfg_survartsu.extra_input_mode  = 2'd2;
+        cfg_survartsu.sample_mb         = 6'd4;
+        cfg_survartsu.wdog_mode         = 2'd1;
+        cfg_survartsu.extra_ram_mode    = 2'd1;
+        cfg_survartsu.visible_width_half = 8'd168;
+        cfg_survartsu.visible_height    = 8'd240;
+    endfunction
+
     function automatic ssv_cfg_t cfg_for_game(input logic [3:0] game_id);
         case (game_id)
             4'd1:    cfg_for_game = cfg_cairblad();
@@ -411,6 +432,7 @@ package ssv_pkg;
             4'd6:    cfg_for_game = cfg_twineag2();
             4'd7:    cfg_for_game = cfg_ultrax();
             4'd8:    cfg_for_game = cfg_mslider();
+            4'd9:    cfg_for_game = cfg_survartsu();
             default: cfg_for_game = cfg_dynagear();
         endcase
     endfunction
