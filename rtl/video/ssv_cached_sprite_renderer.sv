@@ -854,7 +854,8 @@ wire [CACHE_ADDR_WIDTH-1:0] cache_read_addr =
     (state == BUILD_REINDEX_READ) ? cache_scan_index[CACHE_ADDR_WIDTH-1:0] :
     // Next descriptor's read is issued on the last bucket-write cycle of this
     // one, so BUILD_REINDEX_READ is skipped between entries.
-    ((state == BUILD_REINDEX_BUCKET_WRITE) && (bucket_y == bucket_last_y))
+    ((state == BUILD_REINDEX_BUCKET_READ) ||
+     (state == BUILD_REINDEX_BUCKET_WRITE))
         ? cache_scan_index[CACHE_ADDR_WIDTH-1:0] + 1'd1 :
     ((state == RENDER_READ) ||
      ((state == RENDER_PREP) &&
@@ -997,8 +998,21 @@ always_comb begin
         // BUILD_BUCKET_WRITE) and its second pair while EVALUATE runs. This
         // is what lets a rejected entry cost two states instead of six.
         BUILD_LOCAL_1: spr_addr = local_base + 3'd4;
-        BUILD_BUCKET_WRITE: spr_addr = local_base + 3'd4;
+        // Held for the whole bucket pass so the next local's first pair is
+        // already sitting in the RAM output when the last bucket write runs;
+        // the last write then issues the second pair for BUILD_LOCAL_1.
+        BUILD_BUCKET_READ: spr_addr = local_base + 3'd4;
+        BUILD_BUCKET_WRITE: spr_addr = (bucket_y == bucket_last_y)
+                                       ? (local_base + 3'd6)
+                                       : (local_base + 3'd4);
         BUILD_EVALUATE: spr_addr = local_base + 3'd6;
+        // The local list of a global starts at global_w1 (captured in
+        // BUILD_GLOBAL_0), so its first word pair is issued from GLOBAL_1 and
+        // BUILD_LOCAL_WAIT is skipped.
+        BUILD_GLOBAL_1: spr_addr = {global_w1[14:0], 2'b00};
+        // Next global's first pair, issued from the state that steps to it so
+        // BUILD_GLOBAL_WAIT is skipped.
+        BUILD_ADVANCE: spr_addr = {5'd0, global_base} + 17'd4;
         TILE_ROW_ADDR, TILE_ROW_WAIT:
             spr_addr = ({9'd0, tile_mode[7:0]} << 9) + tile_map_y[8:0];
         TILE_CODE_ADDR, TILE_CODE_WAIT: spr_addr = tile_word_addr;
@@ -1331,7 +1345,7 @@ always_ff @(posedge clk) begin
                     // descriptor MAME draws and break frame-CRC parity.
                     local_base <= {global_w1[14:0], 2'b00};
                     local_index <= 5'd0;
-                    state <= BUILD_LOCAL_WAIT;
+                    state <= BUILD_LOCAL_0;
                 end
             end
             // Paired reads no longer enter these phases. If a diagnostic
@@ -1353,6 +1367,11 @@ always_ff @(posedge clk) begin
             BUILD_LOCAL_0: begin
                 local_w0 <= spr_data;
                 local_w1 <= spr_data_next;
+                // Same pre-sum BUILD_LOCAL_WAIT does; repeated here so the
+                // GLOBAL_1 -> LOCAL_0 path (which skips WAIT) has it too. It is
+                // constant for a global, so re-deriving it is harmless.
+                build_gx_off_r <= global_w2 + build_offset_x;
+                build_gy_off_r <= global_w3 + build_offset_y;
                 state <= BUILD_LOCAL_1;
             end
             BUILD_LOCAL_1: begin
@@ -1465,7 +1484,9 @@ always_ff @(posedge clk) begin
                         // it, so BUILD_ADVANCE and BUILD_LOCAL_WAIT are skipped.
                         local_index <= local_index + 1'd1;
                         local_base <= local_base + 3'd4;
-                        state <= BUILD_LOCAL_0;
+                        local_w0 <= spr_data;
+                        local_w1 <= spr_data_next;
+                        state <= BUILD_LOCAL_1;
                     end
                     else begin
                         state <= BUILD_ADVANCE;
@@ -1498,7 +1519,7 @@ always_ff @(posedge clk) begin
                 end
                 else if (global_base < LAST_GLOBAL) begin
                     global_base <= global_base + 3'd4;
-                    state <= BUILD_GLOBAL_WAIT;
+                    state <= BUILD_GLOBAL_0;
                 end
                 else begin
                     line_count_addr <= 8'd0;
@@ -1596,7 +1617,11 @@ always_ff @(posedge clk) begin
                 if (bucket_y == bucket_last_y) begin
                     if (cache_scan_index + 1'd1 < cache_write_count) begin
                         cache_scan_index <= cache_scan_index + 1'd1;
-                        state <= BUILD_REINDEX_WAIT;
+                        // The next descriptor has been on the RAM output since
+                        // BUILD_REINDEX_BUCKET_READ, so BUILD_REINDEX_WAIT's
+                        // capture is done here.
+                        cache_decode_q <= cache_scan_q;
+                        state <= BUILD_REINDEX_EVAL;
                     end
                     else begin
                         cache_count <= cache_write_count;
