@@ -852,6 +852,10 @@ wire [LINE_POOL_SUM_WIDTH-1:0] line_pool_end =
 // (last cycle's address) so an uninvolved cycle just repeats the same read.
 wire [CACHE_ADDR_WIDTH-1:0] cache_read_addr =
     (state == BUILD_REINDEX_READ) ? cache_scan_index[CACHE_ADDR_WIDTH-1:0] :
+    // Next descriptor's read is issued on the last bucket-write cycle of this
+    // one, so BUILD_REINDEX_READ is skipped between entries.
+    ((state == BUILD_REINDEX_BUCKET_WRITE) && (bucket_y == bucket_last_y))
+        ? cache_scan_index[CACHE_ADDR_WIDTH-1:0] + 1'd1 :
     ((state == RENDER_READ) ||
      ((state == RENDER_PREP) &&
       (render_line_slot + 1'd1 < render_line_count)))
@@ -975,12 +979,26 @@ wire tile_pf_flip_x_next = tile_pf_attr[15] ^
 wire tile_pf_flip_y_next = tile_pf_attr[14] ^
                            (flip_control[14] && !flip_control[13]);
 
+// True when BUILD_ADVANCE would step to another local of the same global. The
+// read-ahead paths below take exactly this condition, so they visit the same
+// descriptors in the same order as the slow path.
+wire build_has_next_local = (local_index < global_w0[4:0]) &&
+                            ((local_base + 17'd4) <= LAST_LOCAL);
+
 always_comb begin
     spr_addr = {5'd0, global_base};
     unique case (state)
         BUILD_GLOBAL_0: spr_addr = {5'd0, global_base} + 2'd2;
         BUILD_LOCAL_WAIT: spr_addr = local_base;
         BUILD_LOCAL_0: spr_addr = local_base + 2'd2;
+        // Descriptor-walk read-ahead. The walk order never depends on whether
+        // an entry is accepted, so the next local's first word pair is issued
+        // while this one is still being captured/evaluated (BUILD_LOCAL_1,
+        // BUILD_BUCKET_WRITE) and its second pair while EVALUATE runs. This
+        // is what lets a rejected entry cost two states instead of six.
+        BUILD_LOCAL_1: spr_addr = local_base + 3'd4;
+        BUILD_BUCKET_WRITE: spr_addr = local_base + 3'd4;
+        BUILD_EVALUATE: spr_addr = local_base + 3'd6;
         TILE_ROW_ADDR, TILE_ROW_WAIT:
             spr_addr = ({9'd0, tile_mode[7:0]} << 9) + tile_map_y[8:0];
         TILE_CODE_ADDR, TILE_CODE_WAIT: spr_addr = tile_word_addr;
@@ -1375,7 +1393,15 @@ always_ff @(posedge clk) begin
                     // that an identical ordinary descriptor has no visible
                     // effect when repeated consecutively. Skip its cache
                     // slot and continue walking the MAME list.
-                    state <= BUILD_ADVANCE;
+                    if (build_has_next_local) begin
+                        local_index <= local_index + 1'd1;
+                        local_base <= local_base + 3'd4;
+                        local_w0 <= spr_data;
+                        local_w1 <= spr_data_next;
+                        state <= BUILD_LOCAL_1;
+                    end
+                    else
+                        state <= BUILD_ADVANCE;
                 end
                 else if (build_screen_visible) begin
 `ifdef SIMULATION
@@ -1391,7 +1417,15 @@ always_ff @(posedge clk) begin
                     state <= BUILD_PREFIX_READ;
                 end
                 else begin
-                    state <= BUILD_ADVANCE;
+                    if (build_has_next_local) begin
+                        local_index <= local_index + 1'd1;
+                        local_base <= local_base + 3'd4;
+                        local_w0 <= spr_data;
+                        local_w1 <= spr_data_next;
+                        state <= BUILD_LOCAL_1;
+                    end
+                    else
+                        state <= BUILD_ADVANCE;
                 end
             end
 
@@ -1424,6 +1458,14 @@ always_ff @(posedge clk) begin
                         line_count_addr <= 8'd0;
                         cache_stop_after_bucket <= 1'b0;
                         state <= BUILD_PREFIX_READ;
+                    end
+                    else if (build_has_next_local) begin
+                        // The next local's first word pair was issued this
+                        // cycle (see the spr_addr mux); BUILD_LOCAL_0 captures
+                        // it, so BUILD_ADVANCE and BUILD_LOCAL_WAIT are skipped.
+                        local_index <= local_index + 1'd1;
+                        local_base <= local_base + 3'd4;
+                        state <= BUILD_LOCAL_0;
                     end
                     else begin
                         state <= BUILD_ADVANCE;
@@ -1554,7 +1596,7 @@ always_ff @(posedge clk) begin
                 if (bucket_y == bucket_last_y) begin
                     if (cache_scan_index + 1'd1 < cache_write_count) begin
                         cache_scan_index <= cache_scan_index + 1'd1;
-                        state <= BUILD_REINDEX_READ;
+                        state <= BUILD_REINDEX_WAIT;
                     end
                     else begin
                         cache_count <= cache_write_count;
@@ -1992,6 +2034,38 @@ always_ff @(posedge clk) begin
                      ? line_pool_end : sim_line_pool_peak,
                  LINE_POOL_ENTRIES);
     end
+end
+`endif
+
+
+`ifdef SIMULATION
+// Per-phase cycle accounting for one descriptor build, printed when the build
+// commits or the deadline cuts it off. Sim-only; used to find where a dense
+// scene spends its vblank budget.
+integer sim_ph_walk, sim_ph_bucket, sim_ph_prefix, sim_ph_reindex, sim_ph_visits, sim_ph_acc;
+logic   sim_ph_was_busy;
+always @(posedge clk) begin
+    sim_ph_was_busy <= cache_busy;
+    if (rst || (cache_busy && !sim_ph_was_busy)) begin
+        sim_ph_walk <= 0; sim_ph_bucket <= 0; sim_ph_prefix <= 0;
+        sim_ph_reindex <= 0; sim_ph_visits <= 0; sim_ph_acc <= 0;
+    end else if (cache_busy) begin
+        case (state)
+            BUILD_BUCKET_READ, BUILD_BUCKET_WRITE: sim_ph_bucket <= sim_ph_bucket + 1;
+            BUILD_PREFIX_READ, BUILD_PREFIX_WRITE: sim_ph_prefix <= sim_ph_prefix + 1;
+            BUILD_REINDEX_READ, BUILD_REINDEX_WAIT, BUILD_REINDEX_OFFSET,
+            BUILD_REINDEX_PRESUM, BUILD_REINDEX_EVAL, BUILD_REINDEX_STORE,
+            BUILD_REINDEX_BUCKET_READ, BUILD_REINDEX_BUCKET_WRITE:
+                sim_ph_reindex <= sim_ph_reindex + 1;
+            default: sim_ph_walk <= sim_ph_walk + 1;
+        endcase
+        if (state == BUILD_EVALUATE) sim_ph_visits <= sim_ph_visits + 1;
+        if (state == BUILD_EVALUATE && build_accept) sim_ph_acc <= sim_ph_acc + 1;
+    end
+    if (!rst && ((!cache_busy && sim_ph_was_busy && cache_ready) || (cache_busy && cache_deadline && !cache_finish_index)))
+        $display("CACHE_PHASES walk=%0d bucket=%0d prefix=%0d reindex=%0d visits=%0d accepted=%0d",
+                 sim_ph_walk, sim_ph_bucket, sim_ph_prefix, sim_ph_reindex,
+                 sim_ph_visits, sim_ph_acc);
 end
 `endif
 
