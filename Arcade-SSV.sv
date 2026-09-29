@@ -123,8 +123,16 @@ localparam CONF_STR = {
     // filter, so the list is the scanline levels only. Any non-None setting
     // turns the doubler on, which is the convention arcade_video used.
     "O[5:3],Video Fx,None,Scanlines 25%,Scanlines 50%,Scanlines 75%;",
+    // Doubling on its own (31 kHz, no scanline mask) for VGA-rate displays and
+    // scalers that want a progressive raster. Any Video Fx level still implies
+    // it, so this only matters while Video Fx is None.
+    "O[51],Line Doubler,Off,On;",
     "O[47:46],Stereo Mix,None,25%,50%,100%;",
     "O[6],Service Mode,Off,On;",
+    // Opt-in: freezes the game CPU and ES5506 while the OSD is open. Off by
+    // default. The video raster and audio clock keep running (see cpu_halt),
+    // so HDMI sync is not disturbed the way retuning around a full pause was.
+    "O[52],Pause when OSD open,Off,On;",
     // Default On: the option bit reads 0 until the user changes it, so the
     // enabled state is the first entry and the wire below is inverted.
     "H1O[48],Autosave Hiscores,On,Off;",
@@ -370,12 +378,17 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
 // not a combinational loop.
 wire hs_pause;
 wire game_pause;
+// User-selected freeze while the OSD is up. Only the CPU/sound clock enable is
+// gated, never the pixel or video-timing accumulators, so the raster stays
+// locked and the scaler never sees a signal change.
+wire user_pause = status[52] & OSD_STATUS;
+wire cpu_halt   = game_pause | user_pause;
 
 logic ce_cpu;
 logic [15:0] cpu_acc;
 always_ff @(posedge clk_sys) begin
     logic [16:0] sum;
-    if (!pll_ready_sys || game_pause) begin
+    if (!pll_ready_sys || cpu_halt) begin
         ce_cpu <= 1'b0;
         if (!pll_ready_sys) cpu_acc <= 16'd0;
     end
@@ -789,7 +802,7 @@ wire audio_cdc_ready, audio_cdc_valid;
 ssv_core core (
     .cfg(game_cfg),
     .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
-    .ce_cpu(ce_cpu), .watchdog_hold(game_pause),
+    .ce_cpu(ce_cpu), .watchdog_hold(cpu_halt),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr),
@@ -852,7 +865,7 @@ hiscore #(
 ) u_hiscore (
     .clk(clk_sys),
     .reset(core_reset),
-    .paused(game_pause),
+    .paused(cpu_halt),
     .autosave(~status[48]),
     // Opening the OSD is what triggers extraction of the table from game RAM,
     // and without it nothing is ever saved. It pauses the game CPU for the
@@ -932,7 +945,7 @@ wire [1:0] scale_select;
 ssv_video_mode_guard u_video_mode_guard (
     .clk(clk_sys), .rst(video_reset),
     .native_ce(av_ce), .native_hsync(av_hs), .native_vblank(av_vb),
-    .sd_request(forced_scandoubler | (|status[5:3])),
+    .sd_request(forced_scandoubler | status[51] | (|status[5:3])),
     .rotation_request(status[50:49]),
     .aspect_request(status[2:1]),
     .scale_request(status[44:43]),
@@ -1069,13 +1082,30 @@ video_freak u_video_freak (
     .SCALE(scale_mode)
 );
 
-assign AUDIO_L = game_pause ? 16'd0 : audio_cdc_l;
-assign AUDIO_R = game_pause ? 16'd0 : audio_cdc_r;
+// Mute only while a persistence transfer replaces game state (NVRAM
+// upload/download, NVRAM init) or the user has frozen the game from the OSD. hs_pause is deliberately NOT part of it: the
+// hiscore module raises it repeatedly during boot and on every OSD open, and
+// the ES5506 is clocked from ce_cpu so a short pause just holds the last
+// sample. Zeroing the output there produced audible ticks. The request comes
+// from clk_sys, so it is synchronised into CLK_AUDIO before it gates the
+// output, and the gate is registered so AUDIO_L/R never glitch.
+wire audio_mute_sys = nvram_transfer | nv_init_busy | user_pause;
+(* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+reg [1:0] audio_mute_pipe = 2'b11;
+reg signed [15:0] audio_out_l = 16'sd0, audio_out_r = 16'sd0;
+always @(posedge CLK_AUDIO) begin
+    audio_mute_pipe <= {audio_mute_pipe[0], audio_mute_sys};
+    audio_out_l <= audio_mute_pipe[1] ? 16'sd0 : audio_cdc_l;
+    audio_out_r <= audio_mute_pipe[1] ? 16'sd0 : audio_cdc_r;
+end
+assign AUDIO_L = audio_out_l;
+assign AUDIO_R = audio_out_r;
 assign AUDIO_MIX = status[47:46];
 
-// {override, activity}: make a renderer deadline/cache overflow visible on
-// hardware even though debug_status itself is simulation-only.
-assign LED_DISK = {1'b1, renderer_overrun};
+// {override, activity}: no override, so the disk LED shows MiSTer's real SD/
+// storage activity. It used to be forced to the renderer-overrun flag, which
+// flickered in busy scenes and hid genuine disk activity.
+assign LED_DISK = 2'b00;
 
 // DDRAM_BUSY, DDRAM_DOUT and DDRAM_DOUT_READY are now genuinely consumed by
 // u_ddr_rom_loader above and must not be folded into this sink.

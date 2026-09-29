@@ -11,27 +11,35 @@ ROM geometry, memory windows, video geometry, watchdog, audio banks, and
 optional ST010 hardware at runtime. There are no per-game Quartus builds.
 
 The core is still a work in progress. The RTL has focused simulation and MAME
-differential evidence, but the complete nine-set qualification matrix and
-current physical MiSTer validation are not yet finished.
+differential evidence. Physical MiSTer validation is still pending for the
+most recent fixes (see "Status of recent fixes" below).
 
 ## OSD features
 
 The core exposes the following MiSTer OSD features:
 
 - Aspect ratio: Original, Full Screen
-- Scaling: Normal, Integer (Horizontal), V-Integer (Vertical), HV-Integer
+- Scale: Normal, HV-Integer, V-Integer, HV-Integer+
 - Rotation: Horizontal, Vertical (CW), Vertical (CCW), Horizontal (Flipped)
 - Video FX: None, Scanlines 25%, Scanlines 50%, Scanlines 75%
+- Line Doubler: Off, On (31 kHz progressive output without a scanline mask;
+  any Video FX level already implies it)
+- Pause when OSD open: Off, On (freezes the game CPU and sound while the menu
+  is up; the video raster keeps running so the display never re-syncs)
 - Stereo Mix: None, 25%, 50%, 100%
 - Service Mode
 - Reset
 - Six game buttons, Test, Service, Start, and Coin inputs
 - High score saving on every supported game, enabled by default (OSD:
-  Autosave Hiscores). Six of the nine sets carry a hiscore.dat configuration
+  Autosave Hiscores). Seven of the nine sets carry a hiscore.dat configuration
   in their MRA and save the extracted table to `<MRA name>.nvm`; Change Air
   Blade and Drift Out '94 keep their scores in battery-backed board NVRAM
   instead, which is saved as its own persistence stream. The table is written
   back to game RAM at load and re-read when the OSD is opened.
+  MiSTer persists one stream per MRA, so Storm Blade saves its score table
+  (main RAM) and does not also persist its 2 KiB board NVRAM; in MAME 0.289
+  that window stays all zeros through attract and coin-up. Game settings
+  (coinage, difficulty, lives, ...) are DIP switches from the MRA, not NVRAM.
 
 Game-specific DIP switches are supplied by each MRA. Depending on the game,
 these include coinage, flip screen, demo sounds, difficulty, lives, free play,
@@ -54,15 +62,34 @@ signal. Aspect ratio and Scale are hidden for the same reason: both are HDMI
 scaler settings, and MiSTer reports a zero HDMI size to the core while Direct
 Video is on, so neither can act on a raw native raster.
 
-Video Fx does still apply under Direct Video. It switches the core's own line
-doubler, so `None` gives the native 15 kHz raster for a CRT through a DAC, and
-any scanline level gives a 31 kHz raster for a VGA-rate analog display. The
-scanline levels themselves are only emitted while the doubler is running.
+Video Fx and Line Doubler do still apply under Direct Video. Both switch the
+core's own line doubler, so `None` with Line Doubler Off gives the native
+15 kHz raster for a CRT through a DAC, Line Doubler On gives a 31 kHz
+progressive raster with no scanline mask, and any scanline level gives a 31 kHz
+raster with scanlines. The scanline levels themselves are only emitted while
+the doubler is running.
 
 The release build keeps MiSTer's analog Y/C encoder enabled. RGB/component output
 uses the normal VGA DAC pins; when the MiSTer analog configuration selects it,
 the same native raster can be encoded for composite or S-Video by the framework's
 Y/C path. This configuration is independent of the Direct Video choice above.
+
+## Status of recent fixes
+
+These changes are in the source and have simulation evidence, but each still
+needs a listening or viewing pass on a real MiSTer before it is called done:
+
+- ES5506 warped/stray voices: stale-mask and snapshot fixes (18304da, bb1a1e8).
+- Direct Video / RetroTINK seams, dropped columns and faint drifting lines
+  (cd428ae, 4a9f895).
+- Analog Y/C (composite / S-Video) output, now compiled in.
+- Vasara 2 sprites disappearing under load.
+- Audio no longer drops to silence while the hiscore module briefly pauses the
+  CPU (this was audible as ticks during boot and when opening the OSD); it now
+  mutes only while NVRAM is being transferred or the game is frozen from the OSD.
+- The disk LED now shows real storage activity instead of the renderer-overrun
+  flag.
+- Monster Slider hiscore saving.
 
 ## PCB Accuracy
 
