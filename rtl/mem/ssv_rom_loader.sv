@@ -246,7 +246,7 @@ function automatic logic cfg_domain_valid();
             (cfg_raw[10][1:0] != 2'd3) &&
             (cfg_raw[10][7:6] != 2'd3) &&
             (cfg_raw[10][2] == (cfg_raw[10][7:6] != 2'd0)) &&
-            (cfg_raw[11][7:4] == 4'd0) && (cfg_raw[11][3:0] <= 4'd8) &&
+            (cfg_raw[11][7:4] == 4'd0) &&   // game_id is informational (simulation profile select); any 4-bit id is valid
             (cfg_raw[12][7:6] == 2'd0) &&
             ((cfg_raw[12][5:0] == 6'd4) ||
              (cfg_raw[12][5:0] == 6'd8) ||
