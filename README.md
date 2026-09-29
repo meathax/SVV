@@ -124,7 +124,7 @@ present in MAME are not currently claimed as supported by this core.
 | Storm Blade (US) | `stmblade` | ST010, 4 MiB program ROM, 24 MiB graphics, 2 KiB NVRAM |
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
-| Survival Arts (USA) | `survartsu` | 1 MiB program ROM, 24 MiB graphics, extra RAM, six-button layout; needs `survartsu.zip` plus parent `survarts.zip`; default DIPs charge 2 coins per credit and 2 credits to start |
+| Survival Arts (World) | `survarts` | 1 MiB program ROM, 24 MiB graphics, extra RAM, six-button layout; loads from `survarts.zip` alone; default DIPs charge 2 coins per credit and 2 credits to start |
  | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster; B1 Rotate Left, B2 Rotate Right, B3 Tilt |
 
 ## **Hardware emulated**
