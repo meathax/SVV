@@ -17,9 +17,8 @@ module ssv_cached_sprite_renderer #(
     input  logic         rst,
     input  ssv_pkg::ssv_cfg_t cfg,
     input  logic         cache_start,
-    // One-cycle pulse on the first accepted sprite-list/scroll write in the
-    // measured update window. Later writes are coalesced by the core so a
-    // dense list cannot chase the build into an empty deadline publication.
+    // Accepted scroll writes each invalidate the build. Large sprite-list
+    // bursts are coalesced so they cannot chase the build into its deadline.
     input  logic         cache_restart,
     // Asserted once the raster reaches the lines where the first display rows
     // must be prepared. The vblank descriptor build must give up by then --
@@ -873,7 +872,7 @@ always_ff @(posedge clk) begin
     end
     else begin
         line_meta_q <= line_meta[line_count_addr];
-        if ((state == IDLE) && (cache_start || cache_pending))
+        if ((state == IDLE) && (cache_start || cache_pending || cache_restart))
             line_pool_alloc <= '0;
         if (state == BUILD_CLEAR_LINES) begin
             line_meta[line_count_addr] <= '0;
@@ -1261,11 +1260,9 @@ always_ff @(posedge clk) begin
         // it reflects the post-write state. Deadline containment above wins
         // if both fire on the same edge.
         //
-        // The core coalesces the measured vblank write burst, so this restart
-        // is also allowed during BUILD_CLEAR_LINES. The first write can arrive
-        // before the descriptor walk starts; rewinding once is cheaper than
-        // letting the walk capture a pre-write frame, while later writes in the
-        // same window cannot restart the clear again.
+        // Scroll stores can also arrive during BUILD_CLEAR_LINES. Restarting
+        // until the last store leaves one complete pass over stable controls.
+        // The much longer sprite-list burst still gets only one restart.
         else if (cache_busy && cache_restart) begin
 `ifdef SIMULATION
             $display("CACHE_RESTART state=%0d writes=%0d", state,
@@ -1279,7 +1276,7 @@ always_ff @(posedge clk) begin
             IDLE: begin
                 busy <= 1'b0;
                 cache_busy <= 1'b0;
-                if (cache_start || cache_pending) begin
+                if (cache_start || cache_pending || cache_restart) begin
                     clear_y <= 8'd0;
                     line_count_addr <= 8'd0;
                     cache_write_count <= '0;

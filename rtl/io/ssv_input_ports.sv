@@ -47,8 +47,9 @@ function automatic logic [15:0] player_port(
                      (rapid_enable && joy[6] && rapid_pressed);
         b2_pressed = joy[5] && (!rapid_fire_b2 || rapid_pressed);
         // Start reads bit 11, not bit 12, so the OSD assign-button prompt
-        // order (fixed per bit position, see Arcade-SSV.sv:583-593) comes out
-        // Coin,Start,Service,Test. Bit 12 is Service's dedicated bit now --
+        // order (fixed per bit position, see the "MiSTer J1 order" comment
+        // in Arcade-SSV.sv) comes out Coin,Start,Service,Test. Bit 12 is
+        // Service's dedicated bit now --
         // it was Start's until 2026-08-19; do not let the two collide again.
         player_port = {8'hff, ~{joy[3], joy[2], joy[1], joy[0],
                                   b1_pressed, b2_pressed,

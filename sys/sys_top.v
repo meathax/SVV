@@ -714,52 +714,20 @@ wire         bob_deint;
 	ascal 
 	#(
 		.RAMBASE(32'h20000000),
-		// Bound the scaler's downscale line buffer instead of taking the 2048
-		// default.  It is only elaborated under DownLine:IF DOWNSCALE GENERATE
-		// (ascal.vhd), which MISTER_DISABLE_DOWNSCALE in Arcade-SSV.qsf turns
-		// off, so this costs nothing today and only matters if a later build
-		// re-enables downscaling.  1024, not the 512 this said before: 336 is
-		// the NATIVE active width, but the core's line doubler feeds ascal a
-		// 672-pixel active line (908 total) whenever Video Fx or a forced
-		// scandoubler is on, and 512 would have been too small for exactly the
-		// build this bound was meant to protect.
-		.IHRES(1024),
 	`ifdef MISTER_SMALL_VBUF
 		.RAMSIZE(32'h00200000),
 	`else
 		.RAMSIZE(32'h00800000),
 	`endif
 	`ifndef MISTER_FB
-		// No framebuffer mode in this core, so neither 8bpp palette is
-		// reachable.  Upstream MiSTer drops both here; keeping PALETTE on
-		// left ascal's 128x48 pal1_mem instantiated for 2 dead M10Ks.
-		.PALETTE("false"),
 		.PALETTE2("false"),
 	`else
 		`ifndef MISTER_FB_PALETTE
-			// The comment above already covers this generic when MISTER_FB
-			// is undefined, but the arcade cores that define MISTER_FB for
-			// screen_rotate (this core included) still produce an RGB
-			// framebuffer, not 8bpp indexed -- MISTER_FB_PALETTE is left
-			// undefined on purpose (Arcade-SSV.qsf) and FB_FORMAT is a
-			// constant RGB code (arcade_video.v). Only PALETTE2 was forced
-			// false here; PALETTE stayed at ascal's "true" default, so
-			// GenPal1 (ascal.vhd) still elaborated pal1_mem plus a second
-			// copy of the o_acpt4/o_format select mux inside ascal's o_clk
-			// pixel-fetch stage -- the same stage and the same operands as
-			// this design's chronic pll_hdmi Slow-corner setup miss. Forcing
-			// both false here removes an unreachable generate branch; it is
-			// a VHDL generic, not an RTL behaviour change, and does not
-			// touch ascal.vhd itself.
-			.PALETTE("false"),
 			.PALETTE2("false"),
 		`endif
 	`endif
 	`ifdef MISTER_DISABLE_ADAPTIVE
 		.ADAPTIVE("false"),
-	`endif
-	`ifdef MISTER_DISABLE_DOWNSCALE
-		.DOWNSCALE("false"),
 	`endif
 	`ifdef MISTER_DOWNSCALE_NN
 		.DOWNSCALE_NN("true"),

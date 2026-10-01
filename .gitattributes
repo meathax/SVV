@@ -1,0 +1,2 @@
+# Preserve the exact bytes of the vendored Template_MiSTer framework.
+/sys/** -text

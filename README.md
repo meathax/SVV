@@ -10,9 +10,16 @@ descriptor before the game ROM data so the shared core can select the correct
 ROM geometry, memory windows, video geometry, watchdog, audio banks, and
 optional ST010 hardware at runtime. There are no per-game Quartus builds.
 
+The `sys` directory is an unmodified copy of
+[Template_MiSTer at 3ea1134](https://github.com/MiSTer-devel/Template_MiSTer/tree/3ea1134cf05d62c2b1db30362277a823d739ced2/sys).
+Core-specific scaler settings stay in `Arcade-SSV.qsf`, and `rtl/pll.qip`
+connects the framework to the generated SSV PLL.
+
 The core is still a work in progress. The RTL has focused simulation and MAME
-differential evidence. Physical MiSTer validation is still pending for the
-most recent fixes (see "Status of recent fixes" below).
+differential evidence. USB-1 HDMI tests on 2026-10-01 confirmed Dyna Gear and
+Survival Arts boot, attract mode, audio, coin/start, and entry into gameplay.
+Other output modes and the remaining fixes need further hardware validation
+(see "Status of recent fixes" below).
 
 ## OSD features
 
@@ -62,12 +69,20 @@ signal. Aspect ratio and Scale are hidden for the same reason: both are HDMI
 scaler settings, and MiSTer reports a zero HDMI size to the core while Direct
 Video is on, so neither can act on a raw native raster.
 
-Video Fx and Line Doubler do still apply under Direct Video. Both switch the
-core's own line doubler, so `None` with Line Doubler Off gives the native
-15 kHz raster for a CRT through a DAC, Line Doubler On gives a 31 kHz
-progressive raster with no scanline mask, and any scanline level gives a 31 kHz
-raster with scanlines. The scanline levels themselves are only emitted while
-the doubler is running.
+Direct Video is the pure native raster: no scanline mask is ever applied to
+it. Line Doubler still applies, and so does Video Fx to the extent that any
+non-None level turns the doubler on, so `None` with Line Doubler Off gives the
+native 15 kHz raster for a CRT through a DAC and either setting gives a 31 kHz
+progressive raster. Scanline levels are drawn only on the scaled HDMI and
+analog outputs, and only while the doubler is running.
+
+Every native pixel is exactly 8 `CLK_VIDEO` cycles and every line-doubled
+pixel exactly 4 (clk_sys is 8x the board pixel clock), and every line and
+every doubled line is the same length. That is what MiSTer's DV1 metadata
+needs: Main reports the clocks-per-pixel to the sink, and a DV1-aware scaler
+(RetroTINK 4K, Morph) samples one pixel at that pitch. Sync keeps
+running through game loads, OSD Reset and core start-up; the picture is black
+until the game starts.
 
 The release build keeps MiSTer's analog Y/C encoder enabled. RGB/component output
 uses the normal VGA DAC pins; when the MiSTer analog configuration selects it,
@@ -76,13 +91,36 @@ Y/C path. This configuration is independent of the Direct Video choice above.
 
 ## Status of recent fixes
 
-These changes are in the source and have simulation evidence, but each still
-needs a listening or viewing pass on a real MiSTer before it is called done:
+These changes are in the source. Validation coverage varies by change:
 
 - ES5506 warped/stray voices: stale-mask and snapshot fixes (18304da, bb1a1e8).
-- Direct Video / RetroTINK seams, dropped columns and faint drifting lines
-  (cd428ae, 4a9f895).
+- Direct Video timing rework: clk_sys moved to 57.272727 MHz (exactly 8x the
+  pixel clock; SDRAM at 114.545 MHz, now CAS latency 3), replacing the
+  fractional pixel accumulator, its per-line preload (4a9f895) and the
+  ssv_pixel_retime FIFO (cd428ae). Native and doubled CE_PIXEL now have
+  constant whole-number pitches (8 and 4), so Main's DV1 pixrep is correct
+  in both modes; also fixes the line doubler emitting alternate lines of
+  different length, keeps sync running through loads and resets, drives
+  positive-polarity sync at the framework boundary, and makes the V60, ST010
+  and pixel clocks exact. The source compiles and renderer comparisons pass;
+  full CPU/DSP regressions and Direct Video hardware testing remain pending.
 - Analog Y/C (composite / S-Video) output, now compiled in.
+- Graphics-row reuse: consecutive requests for the same ROM row reuse the
+  fetcher's existing output registers. Frozen Dyna Gear, Survival Arts and
+  Ultra X Weapons scenes match MAME pixel for pixel; the Dyna Gear and Survival
+  Arts line-buffer tests complete without underruns under synthetic CPU/audio
+  memory contention. USB-1 HDMI tests recorded 150 seconds of attract mode per
+  game plus entry into gameplay. Subsequent comparisons of the Dyna Gear tall
+  grass scene reproduced a horizontal scroll seam against MAME; row reuse
+  alone did not resolve that intermittent issue.
+- Descriptor-cache scroll consistency: every accepted early-vblank scroll
+  register store invalidates the build, while the large sprite-list write
+  burst retains one restart. This prevents successive tilemap slices from
+  capturing different scroll values. A completed cache also restarts with a
+  fresh line-entry allocation. The shared regression and stressed Dyna Gear
+  and Survival Arts replays pass; the corrected Dyna Gear replay matches the
+  aligned MAME framebuffer pixel for pixel. User visual testing of the resulting
+  build was reported successful on 2026-10-01.
 - Vasara 2 sprites disappearing under load.
 - Audio no longer drops to silence while the hiscore module briefly pauses the
   CPU (this was audible as ticks during boot and when opening the OSD); it now
@@ -125,7 +163,7 @@ present in MAME are not currently claimed as supported by this core.
 | Twin Eagle II - The Rescue Mission | `twineag2` | ST010, extra RAM, IRQ level 1, ES5506 bank aliases |
 | Ultra X Weapons / Ultra Keibitai | `ultrax` | 12 MiB graphics, extra RAM, IRQ level 1 |
 | Survival Arts (World) | `survarts` | 1 MiB program ROM, 24 MiB graphics, extra RAM, six-button layout; loads from `survarts.zip` alone; default DIPs charge 2 coins per credit and 2 credits to start |
- | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster; B1 Rotate Left, B2 Rotate Right, B3 Tilt |
+| Monster Slider | `mslider` | 1 MiB program ROM, 10 MiB graphics, 4 MiB samples, 352x240 horizontal raster; B1 Rotate Left, B2 Rotate Right, B3 Tilt |
 
 ## **Hardware emulated**
 

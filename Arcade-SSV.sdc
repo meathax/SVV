@@ -6,8 +6,8 @@
 derive_pll_clocks
 
 #**************************************************************
-# SDRAM interface (single 64Mx16 module on GPIO0, CL2, clk_ram
-# 96.648 MHz, SDRAM_CLK forwarded from PLL outclk2 at 180 deg)
+# SDRAM interface (single 64Mx16 module on GPIO0, CL3, clk_ram
+# 114.545 MHz, SDRAM_CLK forwarded as inverted clk_ram through a DDIO cell)
 #
 # Until this block existed the SDRAM bus was COMPLETELY
 # unconstrained: SDRAM_CLK had no clock, so no DQ capture path
@@ -50,23 +50,24 @@ proc ssv_require {present what} {
     error "SSV SDC: expected $what but it is missing at $::quartus(nameofexecutable)"
 }
 
-# outclk2 -> SDRAM_CLK, outclk0 -> clk_ram.  Index confirmed against
-# output_files/Arcade-SSV.sta.rpt "Clocks" table: general[2] is the
-# 10.348 ns / 96.63 MHz output with Phase 180.0, general[0] is the
-# 10.348 ns 0-degree output.  The 180 deg shift lives inside the PLL
-# (rtl/pll/pll.qsys gui_phase_shift2 = 5174 ps = half of 10.348 ns),
-# so no -phase argument is needed here -- derive_pll_clocks already
-# carries it on the source.
-set sdram_fwd_pin [get_pins -nowarn -compatibility_mode \
-    {*|pll|pll_inst|altera_pll_i|*[2].*|divclk}]
+# SDRAM_CLK is driven by a DDIO output register (Arcade-SSV.sv
+# sdramclk_ddr) clocked by clk_ram = PLL outclk0, with datain_h=0 /
+# datain_l=1, so the pin carries an INVERTED clk_ram: the same 180 degrees
+# the PLL's outclk2 used to provide, now leaving through an I/O register.
+# Defining it from the clk_ram counter output with -invert keeps every
+# relationship below unchanged (SDRAM_CLK rises at T/2 = 4.365 ns); TimeQuest
+# traces the clock-out delay through the DDIO cell to the port. outclk2 is
+# no longer used.
+set sdram_ram_pin [get_pins -nowarn -compatibility_mode \
+    {*|pll|pll_inst|altera_pll_i|*[0].*|divclk}]
 set sdram_mem_clk [get_clocks -nowarn \
     {*|pll|pll_inst|altera_pll_i|*[0].*|divclk}]
 
-if {[ssv_require [expr {[get_collection_size $sdram_fwd_pin] == 1 && \
+if {[ssv_require [expr {[get_collection_size $sdram_ram_pin] == 1 && \
                         [get_collection_size $sdram_mem_clk] == 1}] \
-        "exactly one PLL outclk2 pin and outclk0 clock for the SDRAM bus"]} {
+        "exactly one PLL outclk0 (clk_ram) pin and clock for the SDRAM bus"]} {
 
-create_generated_clock -name SDRAM_CLK -source $sdram_fwd_pin \
+create_generated_clock -name SDRAM_CLK -source $sdram_ram_pin -invert \
     [get_ports SDRAM_CLK]
 
 # ---- Read path: DQ arriving from the chip, referenced to SDRAM_CLK ----
@@ -82,7 +83,7 @@ create_generated_clock -name SDRAM_CLK -source $sdram_fwd_pin \
 # *** schematic or from a board-level measurement.  Treat the      ***
 # *** resulting slack as indicative until then.                    ***
 #
-# max 6.4 ns  = tAC(CL2) 5.4 ns for a -7 part (data valid after the
+# max 6.4 ns  = tAC(CL3) 5.4 ns for a -7 part (data valid after the
 #               clock edge at the chip) + ~1.0 ns assumed round-trip
 #               board delay (clock out + data back on GPIO0).
 # min 3.2 ns  = tOH 2.5 ns (data hold after the clock edge) + ~0.7 ns
@@ -108,9 +109,9 @@ set_output_delay -clock SDRAM_CLK -min -0.8 \
                 SDRAM_nCS SDRAM_nCAS SDRAM_nRAS SDRAM_nWE SDRAM_CKE}]
 
 # Read capture edge.  SDRAM_CLK is 180 deg late, so its rising edge
-# is at 5.174 ns while clk_ram (rtl/mem/sdram.sv:621, dq_in <= SDRAM_DQ)
-# captures at 0 / 10.348 ns.  By default STA would try to close the
-# 6.4 ns input delay onto the clk_ram edge only 5.174 ns after the
+# is at 4.365 ns while clk_ram (rtl/mem/sdram.sv, dq_in <= SDRAM_DQ)
+# captures at 0 / 8.730 ns.  By default STA would try to close the
+# 6.4 ns input delay onto the clk_ram edge only 4.365 ns after the
 # launch -- an edge the data physically cannot make -- so the real
 # capture edge is one clk_ram period later.  -setup -end 2 selects it;
 # -hold -end 1 keeps the hold check on the adjacent edge.  Same
@@ -127,9 +128,9 @@ set_multicycle_path -hold -end -from [get_clocks SDRAM_CLK] \
 # After the SDRAM clock exists, so its uncertainty is derived too.
 derive_clock_uncertainty
 
-# The V60 is clock-enabled at approximately 16.1 MHz from clk_sys.  The
-# accumulator ratio guarantees at least three clk_sys periods between enable
-# pulses, and every V60 state register is updated by the same `ce` branch.
+# The V60 is clock-enabled at exactly 16 MHz from the 57.273 MHz clk_sys
+# (modulo-315 accumulator, +88 per clock).  That ratio guarantees at least
+# three clk_sys periods between enable pulses, and every V60 state register is updated by the same `ce` branch.
 # Constrain only register-to-register paths wholly inside that instance.
 set v60_registers [get_registers {*|s32_v60:cpu|*}]
 set v60_registers [add_to_collection $v60_registers \

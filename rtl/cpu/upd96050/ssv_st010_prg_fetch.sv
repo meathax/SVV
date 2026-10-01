@@ -25,17 +25,17 @@
 //  BANDWIDTH, WITH THE ARITHMETIC SHOWN
 //  ------------------------------------
 //    ce_dsp     = 2.5 MHz          (MAME's 10 MHz / 4-clock instruction)
-//    clk_sys    = 48.324 MHz       -> 19.3 clk_sys per instruction
-//    clk_ram    = 96.648 MHz       (clk_sys x 2)
+//    clk_sys    = 57.273 MHz       -> 22.9 clk_sys per instruction
+//    clk_ram    = 114.545 MHz      (clk_sys x 2)
 //
 //  One p5 burst returns 4 x 16 bits = 8 bytes = TWO instruction dwords, so a
 //  single-line cache serving strictly sequential code misses on every second
 //  instruction:
 //
 //    bursts/s  = 2.5e6 / 2 = 1.25e6
-//    clk_ram budget per burst = 96.648e6 / 1.25e6 = 77 clk_ram
+//    clk_ram budget per burst = 114.545e6 / 1.25e6 = 91 clk_ram
 //
-//  A row-hit 4-word read on this controller costs CAS + 4 beats, order 8-10
+//  A row-hit 4-word read on this controller costs CAS + 4 beats, order 9-11
 //  clk_ram, so the DSP occupies about 12% of the cycles it is given -- and the
 //  region lives alone in SDRAM bank 2, whose 2048-column row spans 4 KB = 1024
 //  instructions, so consecutive fetches are row hits by construction and never

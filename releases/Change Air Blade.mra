@@ -7,6 +7,7 @@
   <year>1999</year>
   <manufacturer>Sammy</manufacturer>
   <rbf>Arcade-SSV</rbf>
+  <mameversion>0289</mameversion>
   <resolution>15kHz</resolution>
   <homebrew>no</homebrew>
   <bootleg>no</bootleg>

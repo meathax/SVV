@@ -109,7 +109,7 @@ assign SDRAM_CKE  = 1'b1;
 assign {SDRAM_DQMH, SDRAM_DQML} = SDRAM_A[12:11];
 
 localparam BURST_1   = 3'b000;
-localparam CL        = 3'd2;
+localparam CL        = 3'd3;
 
 // commands {nRAS,nCAS,nWE}.  nCS is NOT part of the command encoding any more:
 // on the 128 MB module it is the device selector, driven from address bit 26.
@@ -134,7 +134,8 @@ assign SDRAM_DQ = dq_oe ? dq_out : 16'hZZZZ;
 // init sequencer
 reg [15:0] init_cnt = 16'hffff;
 
-// refresh: 8192 rows / 64 ms @96.6MHz -> every ~755 cycles
+// refresh: 8192 rows / 64 ms = 7.8 us; at 114.545 MHz that is 894 cycles.
+// The counter below issues one every 701 cycles (6.12 us).
 reg [9:0]  ref_cnt;
 reg        ref_pend;
 
@@ -353,7 +354,7 @@ end
 
 // Centre the SDRAM board interface with SDRAM_CLK forwarded at 180 degrees.
 // Commands and write data launched here have half a cycle of setup at the
-// chip. CL2 read data returns to this direct pin-to-register sample under the
+// chip. CL3 read data returns to this direct pin-to-register sample under the
 // SDC input-delay and multicycle constraints, so Quartus can place dq_in in
 // the input IOE. The fourth pipe tap transfers the already-registered word
 // into the response buffer one cycle later without a pin-to-core critical path.
@@ -451,7 +452,7 @@ always @(posedge clk) begin
                 chip_sel <= 1'b0;
                 cmd      <= CMD_MRS;
                 SDRAM_BA <= 2'b00;
-                SDRAM_A  <= 13'b000_0_00_010_0_000; // CL2, sequential, burst 1
+                SDRAM_A  <= 13'b000_0_00_011_0_000; // CL3, sequential, burst 1
             end
             // ---- device 1 ----
             16'h0400: begin chip_sel <= 1'b1; cmd <= CMD_PRE; SDRAM_A <= 13'h0400; end
@@ -461,7 +462,7 @@ always @(posedge clk) begin
                 chip_sel <= 1'b1;
                 cmd      <= CMD_MRS;
                 SDRAM_BA <= 2'b00;
-                SDRAM_A  <= 13'b000_0_00_010_0_000; // CL2, sequential, burst 1
+                SDRAM_A  <= 13'b000_0_00_011_0_000; // CL3, sequential, burst 1
             end
             16'h0010: begin chip_sel <= 1'b0; SDRAM_A <= 13'h0000; end
             16'h0001: ready <= 1'b1;
@@ -469,13 +470,23 @@ always @(posedge clk) begin
         endcase
     end
     else begin
-        // refresh scheduling: 8192 rows / 64ms @ 96.65MHz -> every 755 cyc
+        // refresh scheduling: 8192 rows / 64ms @ 114.545MHz -> <= 894 cyc
         ref_cnt <= ref_cnt + 1'd1;
         if (ref_cnt == 10'd700) begin ref_cnt <= 0; ref_pend <= 1'b1; end
 
-        // Fourth pipe tap captures after registered command + CL2 + dq_in.
+        // Fifth pipe tap captures after registered command + CL3 + dq_in.
+        //
+        // CAS latency 3, not 2: clk_ram is 114.545 MHz (2x the 8x-pixel
+        // clk_sys), an 8.73 ns cycle, and CL2 needs tCK >= 10 ns on a -7 part.
+        // Data returns exactly one clock later than it did at CL2, so the tap
+        // moves from cl_pipe[3] to cl_pipe[4] and every other relationship is
+        // unchanged in cycles. ST_RDW still waits for cl_pipe == 0, which is
+        // the same cycle as before (the bit now leaves one stage closer to the
+        // end of the 6-bit pipe). The command spacings were re-checked at
+        // 8.73 ns: tRP 3 cycles (26.2 ns), tRCD 3 (26.2 ns), REF->ACT >= 10
+        // (87 ns), WRITE->PRE >= 6, ACT->PRE >= 9, ACT->ACT >= 12.
         cl_pipe <= {cl_pipe[4:0], 1'b0};
-        if (cl_pipe[3]) begin
+        if (cl_pipe[4]) begin
             cap_buf[rd_captured[2:0]] <= dq_in;
             rd_captured <= rd_captured + 1'd1;
             if (rd_captured + 1'd1 == rd_total) begin
@@ -571,7 +582,7 @@ always @(posedge clk) begin
             SDRAM_BA <= xfer_addr[24:23];
             SDRAM_A  <= 13'd0;
             row_open[xfer_idx] <= 1'b0;
-            pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
+            pre_cnt <= 2'd1;          // PRE->ACT = 3 cycles = 26.2 ns >= tRP
             state <= ST_PRE_XFER;
         end
 
@@ -590,7 +601,7 @@ always @(posedge clk) begin
             state    <= ST_RCD1;
         end
 
-        // tRCD >= 21ns = 3 cycles ACT->READ/WRITE
+        // tRCD >= 21ns: ACT->READ/WRITE = 3 cycles = 26.2 ns
         ST_RCD1: state <= ST_RCD2;
         ST_RCD2: begin
             if (is_write) state <= ST_WR;
@@ -648,7 +659,7 @@ always @(posedge clk) begin
         ST_PRE_REF_B: begin
             chip_sel <= 1'b1;
             cmd      <= CMD_PRE; SDRAM_A <= 13'h0400;
-            refw_cnt <= 3'd1;   // tRP >= 2 cycles before REF
+            refw_cnt <= 3'd1;   // PRE->REF = 3 cycles = 26.2 ns >= tRP
             state    <= ST_PRE_REF;
         end
         ST_PRE_REF: begin
@@ -664,7 +675,7 @@ always @(posedge clk) begin
         ST_REF_B: begin
             chip_sel <= 1'b1;
             cmd      <= CMD_REF;
-            refw_cnt <= 3'd6;   // tRC(ref) >= 63ns = 7 cycles; both devices
+            refw_cnt <= 3'd6;   // REF->next ACT >= 10 cycles = 87 ns >= tRC; both devices
             state    <= ST_REFW; // refresh concurrently, so one wait covers them
         end
         ST_REFW: begin

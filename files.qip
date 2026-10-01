@@ -27,6 +27,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_mlab88_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_bg_renderer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_mlab240_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_cached_sprite_renderer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/ssv_cache_restart.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_mlab32_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_es5506_voice.sv
@@ -34,10 +35,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/ssv_audio_cdc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/debug/ssv_audio_debug_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_scandoubler.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ssv_pixel_retime.sv
 # Vendored from JimmyStones/Hiscores_MiSTer (GPLv2+). One marked local change:
 # dpram_hs picks its storage style from array depth, see the comment there.
 set_global_assignment -name VERILOG_FILE rtl/hiscore.v
+set_global_assignment -name VERILOG_FILE rtl/video/ssv_screen_rotate.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
@@ -54,4 +55,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_ddr_rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_nvram_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/ssv_hs_extram.sv
-set_global_assignment -name QIP_FILE rtl/pll/pll.qip
+# The framework includes rtl/pll.qip, which forwards to rtl/pll/pll.qip.
