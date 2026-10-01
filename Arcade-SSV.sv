@@ -177,8 +177,7 @@ assign HDMI_BOB_DEINT = 1'b0;
 assign FB_FORCE_BLANK = 1'b0;
 assign AUDIO_S = 1'b1;
 // AUDIO_MIX is driven from the OSD at the bottom of this file.
-assign LED_POWER = 2'b00;
-// LED_DISK is driven below from the renderer overrun status.
+// LED_POWER and LED_DISK use the framework's normal indicators below.
 assign BUTTONS = 2'b00;
 // This core does not use the MiSTer User I/O port. Keep its open-drain
 // outputs released while retaining the framework-required shell ports.
@@ -186,11 +185,47 @@ assign USER_OUT = 7'b1111111;
 
 wire clk_sys, clk_ram, clk_aux, pll_locked;
 wire pll_ready_sys, pll_ready_ram;
+wire pll_sdram_clk_unused;   // PLL outclk2 is no longer the SDRAM_CLK source
 pll pll (
     .refclk_clk(CLK_50M), .reset_reset(1'b0),
     .outclk0_clk(clk_ram), .outclk1_clk(clk_sys),
-    .outclk2_clk(SDRAM_CLK), .outclk3_clk(clk_aux),
+    .outclk2_clk(pll_sdram_clk_unused), .outclk3_clk(clk_aux),
     .locked_export(pll_locked)
+);
+
+// SDRAM_CLK is forwarded through a DDIO output register clocked by clk_ram,
+// the standard MiSTer arrangement (Saturn's sdram1/2.sv, which runs this same
+// 114.545 MHz). datain_h=0 / datain_l=1 makes the pin an inverted clk_ram,
+// i.e. the same 180 degrees the PLL's outclk2 used to provide.
+//
+// It used to come straight from PLL outclk2 through a global clock buffer
+// and then ~4.9 ns of general routing to PIN_AD20: a 13.8 ns clock-out path
+// (slow corner) against 8.5 ns for clk_ram reaching the DQ capture registers.
+// At 96.6 MHz the read-capture window absorbed that; at 114.5 MHz the
+// SDRAM_DQ -> dq_in paths missed setup by up to 1.436 ns. Out of a DDIO cell
+// the clock leaves through the same kind of I/O register as the address,
+// command and DQ outputs, so its delay tracks theirs across process, voltage
+// and temperature instead of adding a long general route.
+altddio_out #(
+    .extend_oe_disable("OFF"),
+    .intended_device_family("Cyclone V"),
+    .invert_output("OFF"),
+    .lpm_hint("UNUSED"),
+    .lpm_type("altddio_out"),
+    .oe_reg("UNREGISTERED"),
+    .power_up_high("OFF"),
+    .width(1)
+) sdramclk_ddr (
+    .datain_h(1'b0),
+    .datain_l(1'b1),
+    .outclock(clk_ram),
+    .dataout(SDRAM_CLK),
+    .aclr(1'b0),
+    .aset(1'b0),
+    .oe(1'b1),
+    .outclocken(1'b1),
+    .sclr(1'b0),
+    .sset(1'b0)
 );
 assign CLK_VIDEO = clk_sys;
 // Keep the established 2x system/DDR clock.  It is a platform clock, not a
@@ -362,10 +397,12 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
 // below targets that from clk_sys.
 //
 // The two board clocks are independent, so their ratio is the observable
-// quantity for gameplay/frame lock: 16 MHz / (42.954545 MHz / 6) = 704/315.
-// SSV_CPU_INC=21701 against SSV_PIXEL_INC=9710 is within 3.7 ppm; the former
-// 21702 value was 42.4 ppm fast relative to video and visibly accumulated an
-// ES5506/frame-boundary phase error in current Dyna Gear lockstep evidence.
+// quantity for gameplay/frame lock: 16 MHz / (42.954545 MHz / 6) = 704/315
+// CPU clocks per pixel. clk_sys is exactly 8 clk per pixel, so that is
+// SSV_CPU_NUM / SSV_CPU_DEN = 88/315 per clk_sys, and a modulo-315
+// accumulator hits it exactly -- 16.000000 MHz and 0 ppm against the raster.
+// (The old 16-bit pair was -3.7 ppm; 42.4 ppm fast was enough to visibly
+// move an ES5506/frame-boundary phase in Dyna Gear lockstep evidence.)
 //
 // The OSD is deliberately not part of the emulation pause path. MiSTer may
 // retune or redraw video while the menu is open, so freezing the CPU here can
@@ -384,18 +421,23 @@ wire game_pause;
 wire user_pause = status[52] & OSD_STATUS;
 wire cpu_halt   = game_pause | user_pause;
 
+localparam logic [11:0] CPU_NUM = 12'(ssv_pkg::SSV_CPU_NUM);
+localparam logic [11:0] CPU_DEN = 12'(ssv_pkg::SSV_CPU_DEN);
+
 logic ce_cpu;
-logic [15:0] cpu_acc;
+logic [11:0] cpu_acc;   // 0 .. CPU_DEN-1
 always_ff @(posedge clk_sys) begin
-    logic [16:0] sum;
     if (!pll_ready_sys || cpu_halt) begin
         ce_cpu <= 1'b0;
-        if (!pll_ready_sys) cpu_acc <= 16'd0;
+        if (!pll_ready_sys) cpu_acc <= 12'd0;
+    end
+    else if (cpu_acc >= CPU_DEN - CPU_NUM) begin
+        ce_cpu  <= 1'b1;
+        cpu_acc <= cpu_acc - (CPU_DEN - CPU_NUM);
     end
     else begin
-        sum = {1'b0, cpu_acc} + {1'b0, ssv_pkg::SSV_CPU_INC};
-        ce_cpu <= sum[16];
-        cpu_acc <= sum[15:0];
+        ce_cpu  <= 1'b0;
+        cpu_acc <= cpu_acc + CPU_NUM;
     end
 end
 
@@ -431,7 +473,40 @@ ssv_host_guard u_host_guard (
     .core_cold_reset(core_cold_reset), .core_reset(core_reset)
 );
 
-assign LED_USER = ~rom_loaded;
+// LED_USER shows ROM-load activity below.
+
+// ---------------------------------------------------------------------------
+// Raster continuity across machine resets.
+//
+// The raster (ssv_core video_rst) only restarts on PLL lock. It used to reset
+// with core_cold_reset, which stopped CE_PIXEL and froze sync for the length
+// of every ROM/descriptor download, every OSD Reset and SDRAM/NVRAM init --
+// a Direct Video sink or CRT dropped lock and took seconds to recover.
+//
+// The machine still needs to start at a fixed raster phase: that is what made
+// frame CRCs and MAME lockstep traces repeatable when the raster was reset
+// with it. So the machine's cold reset is held past core_cold_reset until the
+// running raster reaches its origin (the pixel enable that enters line 0,
+// pixel 0 -- the one active-region entry where vblank falls), and released
+// there. Watchdog resets are not aligned; they never restarted the raster.
+//
+// The picture is black while the machine is held (see the video capture
+// register below); sync, blanking and DE keep their normal timing.
+// ---------------------------------------------------------------------------
+wire [23:0] core_rgb;
+wire core_ce, core_ce_x2, core_hs, core_vs, core_hb, core_vb;
+
+logic core_vb_d;
+logic machine_hold = 1'b1;
+always_ff @(posedge clk_sys) begin
+    if (core_ce) core_vb_d <= core_vb;
+    if (core_cold_reset)
+        machine_hold <= 1'b1;
+    else if (core_ce && core_vb_d && !core_vb)
+        machine_hold <= 1'b0;
+end
+wire machine_cold_reset = core_cold_reset | machine_hold;
+wire machine_reset      = core_reset | machine_hold;
 
 `ifdef SIMULATION
 // Release builds contain no reset-cause state or diagnostic ports.  The
@@ -454,16 +529,16 @@ always @(posedge clk_sys) begin
         $display("SSV_VIDEO_RESET_%s time=%0t causes=%b",
                  video_reset ? "ASSERT" : "RELEASE",
                  $time, sim_reset_causes);
-    if (core_reset !== sim_core_reset_d)
+    if (machine_reset !== sim_core_reset_d)
         $display("SSV_CORE_RESET_%s time=%0t causes=%b",
-                 core_reset ? "ASSERT" : "RELEASE",
+                 machine_reset ? "ASSERT" : "RELEASE",
                  $time, sim_reset_causes);
     if (wdog_rst !== sim_wdog_rst_d)
         $display("SSV_WDOG_RESET_%s time=%0t mode=%0d counter=%0d",
                  wdog_rst ? "ASSERT" : "RELEASE",
                  $time, game_cfg.wdog_mode, core.wdog_cycle_cnt);
     sim_video_reset_d <= video_reset;
-    sim_core_reset_d  <= core_reset;
+    sim_core_reset_d  <= machine_reset;
     sim_wdog_rst_d    <= wdog_rst;
 end
 `endif
@@ -699,9 +774,12 @@ sdram sdram (
     .p5_req(p5_req), .p5_addr(p5_addr), .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
-// MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Start,Coin,Service,Test
-//                  joy[4]..joy[13]
-// (the MRA's <buttons names=...> list must stay in this same order).
+// MiSTer J1 order: Fire,Jump,B3,B4,B5,B6,Coin,Start,Service,Test
+//                  joy[4]..joy[13]  (Coin = joy[10], Start = joy[11],
+//                  Service = joy[12], Test = joy[13])
+// This matches the "J1," entry in CONF_STR above and the wiring below.
+// The MRA's <buttons names=...> list must stay in this same order -- Coin
+// BEFORE Start -- or a new game's MRA will swap the two controls.
 //
 wire [31:0] joy_p1 = joystick_0;
 wire [31:0] joy_p2 = joystick_1;
@@ -741,7 +819,7 @@ wire [15:0] extra_input_port;
 wire core_frame_tick;
 
 ssv_input_ports input_ports (
-    .clk(clk_sys), .rst(core_cold_reset), .frame_tick(core_frame_tick),
+    .clk(clk_sys), .rst(machine_cold_reset), .frame_tick(core_frame_tick),
     .joy_p1(joy_p1), .joy_p2(joy_p2),
     .input_layout(game_cfg.input_layout),
     .system_input_mode(game_cfg.system_input_mode),
@@ -786,9 +864,6 @@ end
 wire [15:0] dsw1_port = {8'hff, sw[0]};
 wire [15:0] dsw2_port = {8'hff, sw[1]};
 
-wire [23:0] core_rgb;
-wire core_ce, core_hs, core_vs, core_hb, core_vb;
-wire core_ce_x2_unused;   // superseded by u_pixel_retime's x2 enable
 wire renderer_overrun;
 wire signed [15:0] core_audio_l, core_audio_r;
 wire core_audio_tick;
@@ -801,7 +876,8 @@ wire audio_cdc_ready, audio_cdc_valid;
 // 0 for this release build -- re-enable only for diagnostic captures.
 ssv_core core (
     .cfg(game_cfg),
-    .clk_sys(clk_sys), .rst(core_reset), .cold_rst(core_cold_reset),
+    .clk_sys(clk_sys), .rst(machine_reset), .cold_rst(machine_cold_reset),
+    .video_rst(~pll_ready_sys),
     .ce_cpu(ce_cpu), .watchdog_hold(cpu_halt),
     .sdr_p0_req(core_p0_req), .sdr_p0_addr(core_p0_addr),
     .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
@@ -826,7 +902,7 @@ ssv_core core (
     .frame_tick(core_frame_tick),
     .hs_addr(hs_word_addr), .hs_din(hs_word_din), .hs_be(hs_word_be),
     .hs_we(hs_ram_we), .hs_dout(hs_word_dout),
-    .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(core_ce_x2_unused),
+    .rgb(core_rgb), .ce_pixel(core_ce), .ce_pix_x2(core_ce_x2),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .audio_l(core_audio_l), .audio_r(core_audio_r),
     .audio_tick(core_audio_tick),
@@ -835,10 +911,10 @@ ssv_core core (
 );
 
 ssv_audio_cdc audio_cdc (
-    .src_clk(clk_sys), .src_rst(RESET | core_reset),
+    .src_clk(clk_sys), .src_rst(RESET | machine_reset),
     .src_valid(core_audio_tick), .src_l(core_audio_l), .src_r(core_audio_r),
     .src_ready(audio_cdc_ready),
-    .dst_clk(CLK_AUDIO), .dst_rst(RESET | core_reset),
+    .dst_clk(CLK_AUDIO), .dst_rst(RESET | machine_reset),
     .dst_l(audio_cdc_l), .dst_r(audio_cdc_r), .dst_valid(audio_cdc_valid)
 );
 
@@ -864,7 +940,7 @@ hiscore #(
     .CFG_ADDRESSWIDTH(4)
 ) u_hiscore (
     .clk(clk_sys),
-    .reset(core_reset),
+    .reset(machine_reset),
     .paused(cpu_halt),
     .autosave(~status[48]),
     // Opening the OSD is what triggers extraction of the table from game RAM,
@@ -898,23 +974,46 @@ hiscore #(
 // was permanently disabled by a hardcoded localparam, so the mux below always
 // selected the core and the second timing path was dead weight in every build.
 //
-// Everything downstream takes the raster through ssv_pixel_retime, which
-// re-emits it with every active pixel exactly 7 clk_sys wide. The core's own
-// enable alternates 7,7,7,6 in fixed screen columns, and Direct Video and the
-// analog DAC both show that as narrow columns -- faint vertical seams the
-// background scrolls through. See the module header.
-wire [23:0] av_rgb;
-wire av_hs, av_vs, av_hb, av_vb, av_ce, ce_pix_x2;
-ssv_pixel_retime #(.W(27)) u_pixel_retime (
-    .clk(clk_sys), .rst(video_reset),
-    .ce_in(core_ce), .d_in({core_rgb, core_hs, core_vs, core_vb}),
-    .hb_in(core_hb),
-    .ce_out(av_ce), .ce_x2_out(ce_pix_x2),
-    .d_out({av_rgb, av_hs, av_vs, av_vb}), .hb_out(av_hb)
-);
+// Everything downstream takes the raster through the capture register below,
+// which samples the core's outputs on its pixel enable and holds them for the
+// whole pixel. Direct Video and the analog DAC emit one sample per CLK_VIDEO
+// cycle, so the outputs must only change with CE_PIXEL: the core's rgb is
+// combinational off a two-stage line-buffer/palette read that is already
+// fetching the NEXT pixel two clocks into the current one (and, at the last
+// active pixel, the look-ahead has wrapped to x=0). Sampling on the enable is
+// what makes every pixel a single colour for its full 8 clk.
+//
+// Every pixel is exactly 8 clk_sys by construction now (ssv_video_timing), so
+// no retiming is needed. The ssv_pixel_retime FIFO that used to sit here only
+// existed to hide the 7,7,7,6 cadence of the old non-integer clk_sys, and its
+// uneven half-pixel enable broke the line doubler: alternate doubled lines
+// came out 1571 and 1493 clk long, with different hsync widths and active
+// spans.
+//
+// While the machine is held in reset (ROM load, OSD Reset, init) the picture
+// is forced black but sync, blanking and the pixel enables keep running, so a
+// Direct Video sink or CRT stays locked.
+logic [23:0] av_rgb;
+logic        av_hs, av_vs, av_hb, av_vb, av_ce, ce_pix_x2;
+always_ff @(posedge clk_sys) begin
+    av_ce     <= core_ce;
+    ce_pix_x2 <= core_ce_x2;
+    if (core_ce) begin
+        av_rgb <= machine_cold_reset ? 24'd0 : core_rgb;
+        av_hs  <= core_hs;
+        av_vs  <= core_vs;
+        av_hb  <= core_hb;
+        av_vb  <= core_vb;
+    end
+end
 wire [7:0] av_r = av_rgb[23:16];
 wire [7:0] av_g = av_rgb[15:8];
 wire [7:0] av_b = av_rgb[7:0];
+
+// The video tail restarts only with the raster (PLL lock). Resetting the mode
+// guard on an OSD Reset would drop sd_on and change the line rate under a
+// Direct Video sink for no reason.
+wire video_pipe_reset = ~pll_ready_sys;
 
 // ---------------------------------------------------------------------------
 // Video output.
@@ -932,9 +1031,10 @@ wire [7:0] av_b = av_rgb[7:0];
 // nor a gamma curve earns that on an arcade board driving a CRT. Dropping
 // arcade_video takes gamma with it, so there is no GAMMA parameter to set.
 //
-// sys_top applies VGA_SL before Direct Video leaves MiSTer. Suppress that mask
-// on the raw path so an external 90-degree rotation cannot turn horizontal
-// scanlines into vertical black bars; keep the line doubler independent.
+// sys_top applies VGA_SL before Direct Video leaves MiSTer. Direct Video is
+// the pure native raster -- no scanline mask is applied to it (an external
+// 90-degree rotation would also turn one into vertical black bars). The line
+// doubler stays independent of that.
 // ---------------------------------------------------------------------------
 
 wire       sd_on;
@@ -943,7 +1043,7 @@ wire [1:0] aspect;
 wire [1:0] scale_select;
 
 ssv_video_mode_guard u_video_mode_guard (
-    .clk(clk_sys), .rst(video_reset),
+    .clk(clk_sys), .rst(video_pipe_reset),
     .native_ce(av_ce), .native_hsync(av_hs), .native_vblank(av_vb),
     .sd_request(forced_scandoubler | status[51] | (|status[5:3])),
     .rotation_request(status[50:49]),
@@ -957,20 +1057,29 @@ ssv_video_mode_guard u_video_mode_guard (
 // request is committed by u_video_mode_guard at a VBlank line boundary.
 
 // The doubler needs an enable at exactly twice the pixel rate and in phase
-// with it. That now comes from ssv_pixel_retime, which marks each output pixel
-// enable and the clock three after it, so the 2:1 ratio holds by construction.
+// with it: ce_pix_x2 comes from the same divide-by-8 as the pixel enable
+// (ssv_video_timing), marking clocks 0 and 4 of every pixel, and is delayed
+// through the capture register with it. Every doubled pixel is exactly 4 clk
+// and both doubled copies of a line are exactly 1816 clk with identical sync
+// and active timing.
 //
-// It used to be generated here by a SECOND accumulator restarted on the line
-// reference, while the core's free-runs. verif/tb_ssv_scandoubler.sv measured
-// that at a constant 907 ticks per line where exact doubling of a 454-pixel
-// line needs 908 -- every doubled line was one pixel short. Do not reintroduce
-// a local generator; the two accumulators cannot be kept in step.
+// "Exactly" matters for Direct Video. sys/hps_io.sv video_calc measures the
+// CE_PIXEL spacing at the start of the active line (vid_pixrep) and Main sends
+// it to the sink in the DV1 SPD infoframe; a DV1-aware scaler samples one
+// pixel every pixrep clocks. A 3,4,3,4 doubled cadence (the 7x clock) was
+// reported as 4 against a true pitch of 3.5, so the sink ran off the line.
+//
+// Do not derive it from anything else. A second accumulator restarted on the
+// line reference delivered 907 ticks per line instead of 908
+// (verif/tb_ssv_scandoubler.sv), and the output retime FIFO's emit-plus-3
+// enable was spaced unevenly across the line, which made alternate doubled
+// lines different lengths.
 
 wire [23:0] sd_rgb;
 wire        sd_hs, sd_vs, sd_hb, sd_vb;
 
 ssv_scandoubler u_scandoubler (
-    .clk(clk_sys), .rst(video_reset),
+    .clk(clk_sys), .rst(video_pipe_reset),
     .ce_pix(av_ce), .ce_pix_x2(ce_pix_x2),
     .rgb_in({av_r, av_g, av_b}),
     .hs_in(av_hs), .vs_in(av_vs), .hb_in(av_hb), .vb_in(av_vb),
@@ -982,8 +1091,13 @@ assign CE_PIXEL = sd_on ? ce_pix_x2 : av_ce;
 assign VGA_R    = sd_on ? sd_rgb[23:16] : av_r;
 assign VGA_G    = sd_on ? sd_rgb[15:8]  : av_g;
 assign VGA_B    = sd_on ? sd_rgb[7:0]   : av_b;
-assign VGA_HS   = sd_on ? sd_hs : av_hs;
-assign VGA_VS   = sd_on ? sd_vs : av_vs;
+// The raster generates active-low sync (the doubler's line reference depends
+// on it). The emu boundary contract is positive pulses: sys_top's sync_fix
+// hides the difference for the DAC/HDMI paths, but video_freak and
+// screen_rotate take VGA_VS directly and key on its rising edge as the start
+// of vsync. Invert here, at the boundary only.
+assign VGA_HS   = ~(sd_on ? sd_hs : av_hs);
+assign VGA_VS   = ~(sd_on ? sd_vs : av_vs);
 // Gated by sd_on and suppressed for Direct Video. sys_top applies scanlines
 // itself (sys/sys_top.v: scanlines #(0) VGA_scanlines) to whatever this core
 // emits, on the analog, Direct Video and HDMI paths alike -- it has no idea
@@ -1037,8 +1151,16 @@ wire [28:0] rotate_ddram_addr;
 wire [63:0] rotate_ddram_din;
 wire [7:0] rotate_ddram_be;
 
-screen_rotate u_screen_rotate (
-    .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL),
+// screen_rotate only advances (and only writes DDR3) on its CE_PIXEL. Holding
+// that low while the machine is in reset keeps its write stream idle for the
+// whole of a ROM load, exactly as it was when the raster itself stopped -- the
+// DDR3 fast-load arbitration below relies on it -- and the raster keeps
+// running for the display.
+// ssv_screen_rotate, not the framework's screen_rotate: it carries the
+// row-padding fix for Horizontal (Flipped) on widths that are not a multiple of
+// four (Change Air Blade's 338). See rtl/video/ssv_screen_rotate.v.
+ssv_screen_rotate u_screen_rotate (
+    .CLK_VIDEO(CLK_VIDEO), .CE_PIXEL(CE_PIXEL & ~machine_cold_reset),
     .VGA_R(VGA_R), .VGA_G(VGA_G), .VGA_B(VGA_B),
     .VGA_HS(VGA_HS), .VGA_VS(VGA_VS), .VGA_DE(vga_de_in),
     .rotate_ccw(!direct_video && (rotation == 2'd2)),
@@ -1058,9 +1180,10 @@ screen_rotate u_screen_rotate (
 // clk_ram here advertised unrelated sampling edges for clk_sys-owned payload.
 //
 // DDR3 port arbitration with the ROM-load adaptor (u_ddr_rom_loader above):
-// ddr_ld_acquire is only ever asserted while core_cold_reset holds ssv_core's
-// video timing -- and with it screen_rotate's write stream -- idle (see
-// ssv_ddr_rom_loader.sv), so this reduces to the original direct
+// ddr_ld_acquire is only ever asserted while core_cold_reset is held (see
+// ssv_ddr_rom_loader.sv), and machine_cold_reset -- a superset of it -- holds
+// screen_rotate's write stream idle (its CE_PIXEL gate above; the raster
+// itself keeps running for the display), so this reduces to the original direct
 // screen_rotate wiring whenever a load isn't in flight. The adaptor is
 // read-only -- it never drives DIN and DDRAM_WE is forced low while it owns
 // the port so a stale screen_rotate write can never land during a load.
@@ -1102,6 +1225,9 @@ assign AUDIO_L = audio_out_l;
 assign AUDIO_R = audio_out_r;
 assign AUDIO_MIX = status[47:46];
 
+assign LED_USER = ~rom_loaded;
+assign LED_POWER = 2'b00;
+
 // {override, activity}: no override, so the disk LED shows MiSTer's real SD/
 // storage activity. It used to be forced to the renderer-overrun flag, which
 // flickered in busy scenes and hid genuine disk activity.
@@ -1111,6 +1237,6 @@ assign LED_DISK = 2'b00;
 // u_ddr_rom_loader above and must not be folded into this sink.
 wire unused_inputs = &{1'b0, SD_MISO,
                        SD_CD, UART_CTS, UART_RXD, UART_DSR, USER_IN,
-                       clk_aux};
+                       clk_aux, pll_sdram_clk_unused};
 
 endmodule

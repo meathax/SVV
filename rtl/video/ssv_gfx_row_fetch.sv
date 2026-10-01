@@ -35,6 +35,14 @@ import ssv_pkg::*;
 typedef enum logic {IDLE, WAIT_ACK} state_t;
 state_t state;
 
+// Graphics ROM is immutable between resets. The output registers already
+// retain the last fetched row, and rom_addr retains its wrapped address, so
+// consecutive requests for that row can reuse it without an SDRAM transfer.
+// Invalidate on reset, including a game/ROM change. Keep the quarter count
+// with the entry because it controls whether plane67 is populated.
+logic row_valid;
+logic [2:0] row_quarters;
+
 // Tile-code wrapping is MAME's `code % elements()`, and elements() is
 // per-game (0x18000 / 0x20000 / 0x30000 / 0x40000). The old local
 // `code[16:0]` mask was only correct for Dyna Gear's 0x20000; see
@@ -65,6 +73,8 @@ always_ff @(posedge clk) begin
         plane23  <= 32'd0;
         plane45  <= 32'd0;
         plane67  <= 32'd0;
+        row_valid <= 1'b0;
+        row_quarters <= 3'd0;
     end
     else begin
         done <= 1'b0;
@@ -73,10 +83,17 @@ always_ff @(posedge clk) begin
                 rom_req <= 1'b0;
                 busy    <= 1'b0;
                 if (start) begin
-                    rom_addr <= start_record_addr[SDR_AW:4];
-                    rom_req  <= 1'b1;
-                    busy     <= 1'b1;
-                    state    <= WAIT_ACK;
+                    if (row_valid &&
+                        (rom_addr == start_record_addr[SDR_AW:4]) &&
+                        (row_quarters == cfg.gfx_quarters)) begin
+                        done <= 1'b1;
+                    end
+                    else begin
+                        rom_addr <= start_record_addr[SDR_AW:4];
+                        rom_req  <= 1'b1;
+                        busy     <= 1'b1;
+                        state    <= WAIT_ACK;
+                    end
                 end
             end
 
@@ -99,6 +116,8 @@ always_ff @(posedge clk) begin
                     // why this is gated and not simply opened up.
                     plane67 <= (cfg.gfx_quarters == 3'd4) ? rom_data[127:96]
                                                           : 32'd0;
+                    row_valid <= 1'b1;
+                    row_quarters <= cfg.gfx_quarters;
                     busy    <= 1'b0;
                     done    <= 1'b1;
                     state   <= IDLE;

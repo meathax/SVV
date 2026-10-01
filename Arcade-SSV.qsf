@@ -226,9 +226,12 @@ set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 
-# Dyna Gear's native image is 336x240. Disable scaler output modes smaller than
-# the source image; normal HDMI upscale and direct video remain available.
-set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
+# Keep core-specific scaler generics here so sys stays byte-identical to
+# Template_MiSTer. The framebuffer is RGB, so its indexed palette is unused.
+# Native input is 336 pixels (672 with the line doubler); 1024 covers both.
+set_parameter -entity sys_top -to ascal -name PALETTE false
+set_parameter -entity sys_top -to ascal -name IHRES 1024
+set_parameter -entity sys_top -to ascal -name DOWNSCALE false
 
 # disable adaptive scanline filtering
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
