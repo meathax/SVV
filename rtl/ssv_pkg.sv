@@ -748,22 +748,68 @@ package ssv_pkg;
     // legible on the silkscreen next to the can. See
     // docs/hardware/SSV_BOARD_HARDWARE.md.
     //
-    //   42.9545 MHz / 6 = 7.159083 MHz pixel clock
-    //   7.159083 MHz / (454 x 262) = 60.19 Hz
+    //   42.9545 MHz / 6 = 7.159091 MHz pixel clock
+    //   7.159091 MHz / (454 x 262) = 60.1867 Hz
     //
     // so the divide-by-6 and the totals below are consistent with real board
     // hardware, not just with the emulator they were originally taken from.
     //
-    // NOT yet confirmed: the active/blank split (336/240) and the sync pulse
-    // positions in ssv_video_timing.sv. Those still need a scope on a board.
+    // The TOTALS are confirmed by the games themselves, not only by MAME: every
+    // game writes 0x1c6 (454) and 0x106 (262) to the ST-0006 CRTC registers at
+    // $1c0066 / $1c006e (MAME ssv_v.cpp CRTC table). 454 dots is a 15.77 kHz
+    // line only with the /6 divider, which independently corroborates the
+    // 7.159 MHz dot clock. The per-game active size comes from the same CRTC
+    // registers ($1c0062/64 x start/end in 2-dot units, $1c006a/6c y start/
+    // end) and matches the descriptors here: 336x240, 338x240 (cairblad),
+    // 352x240 (stmblade, mslider), 336x238 (drifto94).
     //
-    // clk_sys is 48.317307 MHz in the generated PLL. The two 16-bit enables
-    // deliberately track the *ratio* of the board's independent crystals:
-    // 16 MHz / (42.954545 MHz / 6) = 704 / 315. CPU_INC=21701 with
-    // PIXEL_INC=9710 is -3.7 ppm from that ratio; 21702 was +42.4 ppm and
-    // moved one four-write ES5506 group across Dyna Gear lockstep token 100.
-    localparam logic [15:0] SSV_CPU_INC   = 16'd21701;
-    localparam logic [15:0] SSV_PIXEL_INC = 16'd9710;
+    // NOT confirmed: the sync pulse positions and widths in ssv_video_timing.sv
+    // -- see the note there. They still need a scope on a board.
+    //
+    // clk_sys is 57.272727 MHz in the generated PLL: exactly EIGHT times the
+    // pixel clock (42.954545 MHz / 6 * 8 = 630/11 MHz). The pixel enable is
+    // therefore a plain divide-by-8 with no fractional residue, so every
+    // pixel, every line and every frame is the same number of clk_sys cycles.
+    //
+    // Why a whole number, and why an EVEN one. Direct Video emits one HDMI
+    // sample per CLK_VIDEO cycle, and Main tells the sink how many CLK_VIDEO
+    // cycles each pixel lasts: hps_io video_calc measures the spacing of
+    // CE_PIXEL at the start of the active line (vid_pixrep) and Main sends it
+    // in the DV1 SPD infoframe, with the DE offset and active size. A DV1-aware
+    // sink (RetroTINK 4K, Morph) samples one pixel every pixrep clocks. The
+    // spacing therefore has to be the same whole number for every pixel -- on
+    // the native raster (8) AND on the line doubler's raster (4). 7x gave a
+    // doubled pitch of 3.5 that video_calc reported as 4, so the sink walked
+    // off the end of every doubled line. 8x is also at least the board's
+    // fastest crystal (48 MHz), which leaves room for CPU enables to catch up
+    // after SDRAM stalls.
+    //
+    // The previous 48.317307 MHz clk_sys was 6.749 clk per pixel. That could
+    // only be approximated by a fractional accumulator, whose 7,7,7,6 pixel
+    // widths showed as seams on Direct Video and made the reported pixrep
+    // depend on where each line started; every later workaround (per-line
+    // accumulator preload, the ssv_pixel_retime FIFO) traded accuracy for
+    // uniformity and broke the line doubler's timing.
+    //
+    // The V60 enable tracks the ratio of the board's independent crystals,
+    // 16 MHz / (42.954545 MHz / 6) = 704 / 315 CPU clocks per pixel. With
+    // exactly 8 clk_sys per pixel that is 88 / 315 per clk_sys, which a
+    // modulo-315 accumulator reproduces EXACTLY -- 0 ppm, where the old 16-bit
+    // pair was -3.7 ppm, and -67.7 ppm once the line-phase preload lengthened
+    // the pixel rate but not the CPU rate. Enables are 3 or 4 clk_sys apart
+    // (315/88 = 3.58), so the SDC's three-cycle V60/ES5506 multicycle
+    // constraints still hold.
+    localparam int SSV_PIXEL_DIV  = 8;
+    localparam int SSV_CPU_NUM    = 88;
+    localparam int SSV_CPU_DEN    = 315;
+    // ST010 instruction-issue enable: MAME's 10 MHz / 4 = 2.5 MHz, which is
+    // 11 / 252 per clk_sys -- exact with a modulo-252 accumulator. (MAME flags
+    // its own 10 MHz figure "TODO: correct?", but there is no reason to add
+    // error on top of it.) See ssv_core.sv.
+    localparam int SSV_ST010_NUM  = 11;
+    localparam int SSV_ST010_DEN  = 252;
+    // clk_sys cycles per second, for wall-clock timeouts (watchdog).
+    localparam int unsigned SSV_CLK_SYS_HZ = 57_272_727;
     localparam logic [8:0] SSV_HTOTAL  = 9'h1C6; // 454
     localparam logic [8:0] SSV_HBSTART = 9'h150; // 336
     localparam logic [8:0] SSV_VTOTAL  = 9'h106; // 262

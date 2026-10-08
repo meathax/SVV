@@ -70,7 +70,7 @@ module upd96050_st010 (
     input               rst,       // cold/download reset: clear all state/RAM
     input               soft_rst,  // watchdog /RESET: MAME-retained state
     // Instruction-issue enable for the DSP. On SSV, drive from a fractional
-    // accumulator with increment 3391 off clk_sys (48.324 MHz) for the
+    // modulo-252 accumulator (+11 per clk_sys, 57.272727 MHz) for the
     // 2.5 MIPS MAME models at its (self-flagged "TODO: correct?") 10 MHz.
     input               ce_dsp,
 

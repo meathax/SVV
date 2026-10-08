@@ -40,8 +40,8 @@
 //  of the kind ssv_core already uses for graphics rows. A single 16-byte
 //  prefetch line plus tag is ~141 flops and ZERO M10K, and turns 2.5 M
 //  fetches/s into 0.63 M SDRAM accesses/s. At ce = 2.5 MHz against
-//  clk_sys = 48.324 MHz there are ~19 clk_sys per instruction of which the
-//  FSM uses 5, so ~14 clk_sys (28 clk_ram) of slack absorbs the miss.
+//  clk_sys = 57.273 MHz there are ~23 clk_sys per instruction of which the
+//  FSM uses 5, so ~18 clk_sys (36 clk_ram) of slack absorbs the miss.
 //
 //  TIMING
 //  ------
@@ -50,8 +50,8 @@
 //  so 10 MHz -> 2.5 MIPS. This core runs a fixed 5-state sequence at `clk`
 //  and starts an instruction only when `ce` is high, so the instruction rate
 //  is the `ce` pulse rate, decoupled from the state count. For MAME parity on
-//  SSV (clk_sys = 48.324 MHz) use the same fractional accumulator style as
-//  ce_cpu with increment 3391: 3391/65536 * 48.324 MHz = 2.5003 MHz.
+//  SSV (clk_sys = 57.272727 MHz = 630/11 MHz) use a modulo-252 accumulator
+//  adding 11 per clock: exactly 2.5 MHz.
 //  MAME's own comment on the 10 MHz figure is "// TODO: correct?", so this is
 //  not a precise number to begin with.
 //

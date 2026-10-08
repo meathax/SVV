@@ -6,9 +6,9 @@
 
 module ssv_core #(
     // MAME's unconfigured WATCHDOG_TIMER defaults to exactly three seconds.
-    // clk_sys is the PLL's 48.317307 MHz SSV master domain. Focused benches
+    // clk_sys is the PLL's 57.272727 MHz SSV master domain. Focused benches
     // override this cycle count rather than synthesizing a frame-based proxy.
-    parameter int unsigned WDOG_TIMEOUT_CYCLES = 3 * 48_317_307,
+    parameter int unsigned WDOG_TIMEOUT_CYCLES = 3 * ssv_pkg::SSV_CLK_SYS_HZ,
     // Diagnostic build switch: 1 replaces the game picture with the
     // fullscreen ES5506 audio-debug text screen (ssv_audio_debug_overlay).
     // The core, video pipeline and audio path keep running untouched
@@ -27,6 +27,13 @@ module ssv_core #(
     // used where MAME/device hardware retains state across /RESET.
     input              rst,
     input              cold_rst,
+    // Raster reset. Deliberately separate from cold_rst: the wrapper drives it
+    // from PLL lock only, so the video timing -- and with it every sync pulse
+    // the display sees -- keeps running through ROM loads, OSD Reset and
+    // SDRAM/NVRAM init. A Direct Video sink or CRT would otherwise lose lock
+    // on every game switch. Benches that want the old behaviour tie it to
+    // cold_rst.
+    input              video_rst,
     input              ce_cpu,
     // MiSTer persistence pauses stop the V60, preventing the game from
     // servicing its physical watchdog. Freeze only for explicit host pauses;
@@ -112,7 +119,7 @@ module ssv_core #(
 
     output logic [23:0] rgb,
     output logic       ce_pixel,
-    // Exactly 2x ce_pixel, from the same accumulator. Used by the line
+    // Exactly 2x ce_pixel, from the same divider. Used by the line
     // doubler; see ssv_video_timing.
     output logic       ce_pix_x2,
     output logic       hs,
@@ -128,8 +135,8 @@ module ssv_core #(
     // $210000 strobe. Wrapper ORs it into core reset.
     output logic       wdog_rst,
     output logic [1:0] coin_lockout,
-    output logic       renderer_overrun
-    ,output logic       motor_output
+    output logic       renderer_overrun,
+    output logic       motor_output
 `ifdef SIMULATION
     , output logic [31:0] debug_pc
     , output logic [23:0] debug_status
@@ -495,9 +502,10 @@ logic video_enable;
 wire [8:0] active_width = active_width_cfg(cfg);
 wire [8:0] active_height = active_height_cfg(cfg);
 ssv_video_timing timing (
-    // A watchdog machine reset must not restart the raster halfway through a
-    // frame. Renderers may blank while restarting, but sync remains continuous.
-    .clk(clk_sys), .rst(cold_rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
+    // No machine reset restarts the raster -- not the watchdog, and not a cold
+    // reset either (see video_rst). Renderers may blank while restarting, but
+    // sync remains continuous.
+    .clk(clk_sys), .rst(video_rst), .ce_pixel(ce_pixel), .ce_pix_x2(ce_pix_x2),
     .active_width(active_width), .active_height(active_height),
     .hcnt(hcnt), .vcnt(vcnt), .hblank(hb), .vblank(vb),
     .hsync(hs), .vsync(vs), .vblank_pulse(vblank_pulse),
@@ -703,30 +711,26 @@ assign renderer_shadow_4bit = obj_busy ? obj_shadow_4bit : bg_shadow_4bit;
 assign renderer_busy = bg_busy | obj_busy;
 assign renderer_done = obj_done;
 
-// Sprite-list writes are clustered in the first nine visible-height lines of
-// vblank. Restarting the cache on every accepted write made the build chase
-// the CPU's list walk: a late write could abort BUILD_REINDEX and the repeated
-// rebuilds then reached cache_deadline with no publishable index. Issue one
-// restart on the first accepted write and suppress the rest of that window;
-// this preserves the full remaining vblank budget for the rebuild.
-logic cache_write_pending;
+// Coalesce the large sprite-list burst, but invalidate on every scroll store.
+// A restart on only the first register store can finish the initial tilemap
+// slices before the CPU updates their scroll, leaving a horizontal split at
+// the next 64-line slice. Both policies retain the early-vblank window so a
+// late update cannot repeatedly restart the build into visible display.
 wire cache_list_write_accept = m_req && m_we &&
                                (sel_sprlist || sel_scroll) &&
                                ack_r && !ack_r_d;
 wire cache_write_window = (vcnt >= active_height) &&
                           (vcnt < active_height + 9'd9);
-wire cache_restart_flush = cache_list_write_accept &&
-                            cache_write_window && !cache_write_pending;
+wire cache_restart_flush;
 wire cache_write_window_end = ce_pixel && (hcnt == 9'd0) &&
                               (vcnt == active_height + 9'd9);
-always_ff @(posedge clk_sys) begin
-    if (rst)
-        cache_write_pending <= 1'b0;
-    else if (cache_write_window_end)
-        cache_write_pending <= 1'b0;
-    else if (cache_restart_flush)
-        cache_write_pending <= 1'b1;
-end
+ssv_cache_restart cache_restart_control (
+    .clk(clk_sys), .rst(rst),
+    .write_accept(cache_list_write_accept), .scroll_write(sel_scroll),
+    .write_window(cache_write_window),
+    .write_window_end(cache_write_window_end),
+    .restart(cache_restart_flush)
+);
 
 ssv_line_buffer4 line_buffer (
     .clk(clk_sys), .rst(rst),
@@ -771,16 +775,16 @@ ssv_bg_renderer background_renderer (
 ssv_cached_sprite_renderer sprite_renderer (
     .clk(clk_sys), .rst(rst), .cfg(cfg),
     .cache_start(video_enable && vblank_pulse),
-    // The build starts at vblank_pulse (end of active line 239) but the
-    // game's level-3 handler does not run until irq3_pulse at line 240, so
-    // the build is reading the sprite list exactly while the handler rewrites
-    // it. The committed cache is then a mix of two frames -- the diagonal
-    // seam and HUD shimmer seen on hardware. A completed CPU write to sprite
-    // RAM or the video registers during a build abandons it and rebuilds, so
-    // the commit reflects post-write state.
+    // The cache and IRQ3 both start at line 240. The CPU's interrupt handler
+    // then updates the inputs while the cache is building. The restart
+    // controller coalesces sprite-list writes and follows each scroll store
+    // so all tilemap slices use the completed register update.
     //
     // Window sizing, and why it is +9 rather than the original +5:
-    //   one line   = SSV_HTOTAL 454 px x (48.317/7.159) ~= 3064 clk_sys
+    //   one line   = SSV_HTOTAL 454 px x 8 = 3632 clk_sys
+    //   (the figures below were measured at the former 3064 clk_sys per line;
+    //   the build and the window are line-based, so the extra 18.5% of clocks
+    //   per line only adds margin)
     //   vblank     = lines 240..260 (cache_deadline) = 20 lines ~= 61.3k
     //   worst build= 46,852 clk_sys measured (CACHE_BUILD max, frame 526)
     //               ~= 15.3 lines.
@@ -832,8 +836,8 @@ always_ff @(posedge clk_sys) begin
 end
 
 `ifdef SIMULATION
-// Which producer armed the sticky flag, kept out of synthesis because the
-// hardware indicator is one LED and cannot express a cause anyway.
+// Which producer armed the sticky flag, kept out of synthesis and available
+// to simulation assertions and traces.
 logic overrun_cause_deadline, overrun_cause_cache;
 always_ff @(posedge clk_sys) begin
     if (rst) begin
@@ -1267,23 +1271,28 @@ end
 // MAME instantiates UPD96050 at 10 MHz with its own `// TODO: correct?`, so the
 // clock is not authoritative. The core runs a fixed 5-state sequence per
 // instruction and starts one only when `ce` is high, so the instruction rate IS
-// the ce rate: 10 MHz / 4 = 2.5 MIPS. Off clk_sys = 48.324 MHz a 16-bit
-// fractional accumulator with increment 3391 gives
-//     48.324e6 * 3391 / 65536 = 2.5005 MHz   (+0.02%)
-// which is well inside the uncertainty of the 10 MHz figure itself.
+// the ce rate: 10 MHz / 4 = 2.5 MIPS. clk_sys is 630/11 MHz, so that is
+// exactly 11 enables per 252 clk_sys (SSV_ST010_NUM / SSV_ST010_DEN), which a
+// modulo-252 accumulator hits exactly. Enables are 22-23 clk_sys apart, far
+// more than the 5-state sequence needs.
 // ---------------------------------------------------------------------------
-logic [15:0] st010_ce_acc;
+localparam logic [8:0] ST010_NUM = 9'(ssv_pkg::SSV_ST010_NUM);
+localparam logic [8:0] ST010_DEN = 9'(ssv_pkg::SSV_ST010_DEN);
+logic [8:0]  st010_ce_acc;   // 0 .. ST010_DEN-1
 logic        st010_ce;
-wire  [16:0] st010_acc_next = {1'b0, st010_ce_acc} + 17'd3391;
 
 always_ff @(posedge clk_sys) begin
     if (rst || !cfg.has_st010) begin
-        st010_ce_acc <= 16'd0;
+        st010_ce_acc <= 9'd0;
         st010_ce     <= 1'b0;
     end
+    else if (st010_ce_acc >= ST010_DEN - ST010_NUM) begin
+        st010_ce_acc <= st010_ce_acc - (ST010_DEN - ST010_NUM);
+        st010_ce     <= 1'b1;
+    end
     else begin
-        st010_ce_acc <= st010_acc_next[15:0];
-        st010_ce     <= st010_acc_next[16];
+        st010_ce_acc <= st010_ce_acc + ST010_NUM;
+        st010_ce     <= 1'b0;
     end
 end
 

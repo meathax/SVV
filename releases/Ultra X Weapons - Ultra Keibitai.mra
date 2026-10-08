@@ -9,6 +9,7 @@
   <year>1995</year>
   <manufacturer>Banpresto / Tsuburaya Productions / Seta</manufacturer>
   <rbf>Arcade-SSV</rbf>
+  <mameversion>0289</mameversion>
   <resolution>15kHz</resolution>
   <homebrew>no</homebrew>
   <bootleg>no</bootleg>

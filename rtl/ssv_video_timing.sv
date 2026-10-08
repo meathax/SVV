@@ -3,7 +3,9 @@
 `timescale 1ns/1ps
 
 module ssv_video_timing #(
-    parameter logic [15:0] PIXEL_INC = ssv_pkg::SSV_PIXEL_INC
+    // clk_sys cycles per native pixel. clk_sys is generated at exactly this
+    // multiple of the board pixel clock -- see SSV_PIXEL_DIV in ssv_pkg.sv.
+    parameter int PIXEL_DIV = ssv_pkg::SSV_PIXEL_DIV
 ) (
     input              clk,
     input              rst,
@@ -11,13 +13,9 @@ module ssv_video_timing #(
     input logic [8:0]  active_height,
     output logic       ce_pixel,
     // Exactly twice ce_pixel and phase-locked to it, for the line doubler.
-    //
-    // It MUST come from here rather than from a second accumulator in the
-    // wrapper. Arcade-SSV.sv used to run its own, restarted on the line
-    // reference while this one free-runs, and verif/tb_ssv_scandoubler.sv
-    // measured the result at a constant 907 ticks per line where exact
-    // doubling of a 454-pixel line needs 908 -- so the second copy of every
-    // line was one pixel short.
+    // With PIXEL_DIV = 8 the two halves of every pixel are 4 clk each, so the
+    // line doubler's raster has a constant whole-number pitch too -- required
+    // by Direct Video's DV1 pixrep (see SSV_PIXEL_DIV in ssv_pkg.sv).
     output logic       ce_pix_x2,
     output logic [8:0] hcnt,
     output logic [8:0] vcnt,
@@ -31,75 +29,34 @@ module ssv_video_timing #(
 
 import ssv_pkg::*;
 
-// The accumulator runs at DOUBLE the pixel increment and the native pixel
-// enable is every second carry. That makes ce_pix_x2 exactly 2x ce_pixel by
-// construction, with no second accumulator to drift against.
+// PIXEL CLOCK.
 //
-// It is also bit-identical to the previous single-rate version, which is why
-// it does not move a single frame CRC: the k-th native tick used to be the
-// smallest N with floor(N*INC/65536) == k, and the 2k-th double-rate carry is
-// the smallest N with floor(N*2*INC/65536) == 2k -- the same condition, so
-// both land on exactly the same clock cycles.
+// clk_sys is exactly PIXEL_DIV times the board's 42.954545 MHz / 6 pixel
+// clock, so the pixel enable is a plain divide-by-PIXEL_DIV. Every pixel is
+// PIXEL_DIV clk wide, every line is SSV_HTOTAL * PIXEL_DIV = 3632 clk and the
+// frame runs at the board's own 60.1867 Hz.
 //
-// LINE-PHASE RESET (Direct Video correctness).
+// This replaces a 16-bit fractional accumulator against a 48.317 MHz clk_sys
+// (6.749 clk per pixel). That produced 7,7,7,6 pixel widths, and because
+// Direct Video and the analog DAC emit one sample per CLK_VIDEO cycle, the
+// 6-clk columns were visible as seams on a line-locked scaler. The per-line
+// accumulator preload and the output retime FIFO that followed were both
+// workarounds for the non-integer ratio; neither is needed any more.
 //
-// The accumulator used to run continuously across the line boundary, carrying
-// its residue from one line into the next. 454 pixels cost 908 carries, i.e.
-// 908 * 65536 / 19420 = 3064.13 clk, so the residue made the line length
-// alternate: 3064 clk on most lines and 3065 clk on 51 lines of every 262-line
-// frame -- one long line every ~5 lines -- and because the leftover is 0.13
-// clk per line the positions of those long lines walk UP the raster by two
-// lines per frame.
-//
-// On the analog and scaled-HDMI paths that is invisible: both re-capture the
-// raster on ce_pixel, so a clk-domain cycle more or less between pixel enables
-// has no representation downstream. Direct Video has no such stage. sys_top
-// clocks the ADV7513 at CLK_VIDEO (= clk_sys here) and emits one HDMI pixel per
-// CLK_VIDEO cycle, so those 51 lines are literally one HDMI pixel longer than
-// the rest of the frame. A line-locked external scaler -- a RetroTINK 4K, for
-// one -- breaks its sample phase on each of them, and the seams march two
-// scanlines per frame: black bars scrolling through the picture at roughly
-// 120 lines per second.
-//
-// Real hardware cannot do this. The board's pixel clock is 42.954545 MHz / 6,
-// a fixed integer divide, so every line has an identical pixel phase. Restoring
-// the accumulator to a FIXED value on the line wrap restores that property
-// here: every line then costs the same number of clk cycles, the 6/7-cycle
-// stretch pattern inside a line is identical on every line, and nothing
-// downstream sees a moving edge.
-//
-// The restore value is not zero, and the difference is worth 10x on accuracy.
-// A line needs 908 carries; from an accumulator preload R those land inside N
-// clocks when R + N*19420 >= 908*65536 = 59506688. From R = 0 the 908th carry
-// needs 3065 clocks, giving 7.156952 MHz and 60.1687 Hz -- 265 ppm SLOW. Any
-// R in 3808..23227 lands it on 3064 clocks instead (and still keeps the 909th
-// out, which needs 3068 clocks even at R = 23227), giving 7.159288 MHz and
-// 60.2032 Hz -- 27 ppm fast. 3064 is the integer clock count nearest the true
-// 3064.13, so +27 ppm is the smallest error reachable at this clk_sys at all.
-// PIXEL_LINE_PRELOAD sits mid-range with margin at both ends.
-//
-// Residual cost: the CPU-to-pixel ratio that ssv_pkg.sv tunes to -3.7 ppm
-// (SSV_CPU_INC) moves by that +27 ppm, since cpu_acc is untouched and only the
-// pixel side changes. That is inside the +42 ppm that was measured to move an
-// ES5506 four-write group across a Dyna Gear lockstep token, not comfortably
-// clear of it -- re-run the audio and lockstep regressions after touching this.
-//
-// Do NOT chase the rate by re-tuning PIXEL_INC instead. The line length is an
-// integer number of clk cycles no matter what PIXEL_INC is, so the reachable
-// rates are exactly the 3064 and 3065 above; changing PIXEL_INC only moves
-// which one you land on, at the cost of the ratio it was chosen for.
-localparam logic [15:0] PIXEL_INC_X2 = PIXEL_INC << 1;
+// ce_pix_x2 marks phase 0 (with ce_pixel) and phase PIXEL_DIV/2 of every
+// pixel, from the same counter, so it is exactly 2x ce_pixel and in phase by
+// construction -- the line doubler's invariant (see ssv_scandoubler.sv).
+localparam int PHW = $clog2(PIXEL_DIV);
+localparam logic [PHW-1:0] PHASE_LAST = PHW'(PIXEL_DIV - 1);
+localparam logic [PHW-1:0] PHASE_HALF = PHW'(PIXEL_DIV / 2 - 1);
 
-// Accumulator value restored on every line wrap -- see LINE-PHASE RESET above.
-// Valid window for a 3064-clock line is 3808..23227; this is mid-range.
-localparam logic [15:0] PIXEL_LINE_PRELOAD = 16'd13312;
+// Even, so the doubler's half-pixel enable has a whole-number pitch too.
+initial if (PIXEL_DIV < 4 || PIXEL_DIV % 2 != 0)
+    $fatal(1, "ssv_video_timing: PIXEL_DIV must be even and at least 4");
 
-logic [15:0] pixel_acc;
-logic        pix_phase;      // 0 -> next carry is the half tick, 1 -> native
-
-logic [16:0] pixel_sum;
+logic [PHW-1:0] pix_phase;
 logic        native_tick;
-logic        line_wrap;      // native tick that returns hcnt to 0
+logic        half_tick;
 logic [8:0]  hcnt_next;
 logic [8:0]  vcnt_next;
 logic        vblank_pulse_next;
@@ -113,18 +70,16 @@ logic        irq3_pulse_next;
 // this implementation preserves the existing phase: sync is decoded from the
 // very same next counter value that is committed on the native pixel tick.
 always_comb begin
-    pixel_sum         = {1'b0, pixel_acc} + {1'b0, PIXEL_INC_X2};
-    native_tick       = pixel_sum[16] & pix_phase;
+    native_tick       = (pix_phase == PHASE_LAST);
+    half_tick         = (pix_phase == PHASE_HALF);
     hcnt_next         = hcnt;
     vcnt_next         = vcnt;
     vblank_pulse_next = 1'b0;
     irq3_pulse_next   = 1'b0;
-    line_wrap         = 1'b0;
 
     if (native_tick) begin
         if (hcnt == SSV_HTOTAL - 1) begin
             hcnt_next = 9'd0;
-            line_wrap = 1'b1;
             if (vcnt == SSV_VTOTAL - 1)
                 vcnt_next = 9'd0;
             else begin
@@ -146,8 +101,7 @@ end
 
 always_ff @(posedge clk) begin
     if (rst) begin
-        pixel_acc    <= PIXEL_LINE_PRELOAD;
-        pix_phase    <= 1'b0;
+        pix_phase    <= '0;
         ce_pixel     <= 1'b0;
         ce_pix_x2    <= 1'b0;
         hcnt         <= 9'd0;
@@ -158,19 +112,8 @@ always_ff @(posedge clk) begin
         vsync        <= 1'b1;
     end
     else begin
-        // Restore the carry chain on the line wrap so every line starts from
-        // the same pixel phase and therefore takes the same number of clk
-        // cycles. Both halves are restored together, which keeps ce_pix_x2
-        // exactly 2x ce_pixel and in phase -- the line doubler's invariant.
-        if (line_wrap) begin
-            pixel_acc <= PIXEL_LINE_PRELOAD;
-            pix_phase <= 1'b0;
-        end
-        else begin
-            pixel_acc <= pixel_sum[15:0];
-            if (pixel_sum[16]) pix_phase <= ~pix_phase;
-        end
-        ce_pix_x2 <= pixel_sum[16];
+        pix_phase <= native_tick ? '0 : pix_phase + 1'd1;
+        ce_pix_x2 <= native_tick | half_tick;
         ce_pixel  <= native_tick;
         hcnt         <= hcnt_next;
         vcnt         <= vcnt_next;
@@ -194,6 +137,22 @@ end
 // active dimensions and interrupt position remain exact.  Keep this note
 // beside the registered decode so a future timing change does not mistake the
 // pulse locations for measured ST-0006 hardware values.
+//
+// Best available evidence (MAME 0.289 ssv_v.cpp CRTC table + per-game
+// set_visarea): the games program the ST-0006 with display START positions
+// that differ per game -- x start 68 dots (cairblad) .. 88 dots (dynagear,
+// survarts, twineag2, ultrax); y start line 14 (vasara, stmblade, mslider,
+// cairblad) .. 19 (drifto94). If the CRTC counters' zero is the start of
+// sync (the usual CRTC arrangement, NOT verified), real hsync begins 454 - 2*x
+// start dots before the first active pixel (366 for dynagear vs 368 here,
+// 382 for vasara) and vsync begins (262 - y start) lines into the frame
+// (244 for dynagear -- exactly the value used here -- 248 for vasara). So the
+// picture sits up to ~20 dots / ~5 lines differently on a real board, per
+// game. $1c0060 (0x21 or 0x2b) and $1c0068 (1) are plausibly the hsync and
+// vsync END values, but MAME labels both "?". Only a scope on a real
+// STA-0001B can settle the positions and widths; a DV1-aware sink is
+// unaffected either way (Main reports the DE offset), a CRT just centres
+// differently.
 
 `ifdef SIMULATION
 // Simulation-only boundary guard.  It has no release hardware cost and makes

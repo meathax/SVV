@@ -72,3 +72,4 @@ Thumbs.db
 !.mister/provenance/licenses/.gitkeep
 .mister/donors/
 # MISTER-FPGA-AUTOPILOT-V4 END
+build_id.v

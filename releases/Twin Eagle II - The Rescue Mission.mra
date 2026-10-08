@@ -8,6 +8,7 @@
   <year>1994</year>
   <manufacturer>Seta</manufacturer>
   <rbf>Arcade-SSV</rbf>
+  <mameversion>0289</mameversion>
   <resolution>15kHz</resolution>
   <homebrew>no</homebrew>
   <bootleg>no</bootleg>

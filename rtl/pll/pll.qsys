@@ -164,8 +164,8 @@
   <parameter name="gui_multiply_factor" value="1" />
   <parameter name="gui_number_of_clocks" value="4" />
   <parameter name="gui_operation_mode" value="direct" />
-  <parameter name="gui_output_clock_frequency0" value="96.648" />
-  <parameter name="gui_output_clock_frequency1" value="48.324" />
+  <parameter name="gui_output_clock_frequency0" value="114.545454" />
+  <parameter name="gui_output_clock_frequency1" value="57.272727" />
   <parameter name="gui_output_clock_frequency10" value="100.0" />
   <parameter name="gui_output_clock_frequency11" value="100.0" />
   <parameter name="gui_output_clock_frequency12" value="100.0" />
@@ -174,8 +174,8 @@
   <parameter name="gui_output_clock_frequency15" value="100.0" />
   <parameter name="gui_output_clock_frequency16" value="100.0" />
   <parameter name="gui_output_clock_frequency17" value="100.0" />
-  <parameter name="gui_output_clock_frequency2" value="96.648" />
-  <parameter name="gui_output_clock_frequency3" value="24.162" />
+  <parameter name="gui_output_clock_frequency2" value="114.545454" />
+  <parameter name="gui_output_clock_frequency3" value="28.636363" />
   <parameter name="gui_output_clock_frequency4" value="100.0" />
   <parameter name="gui_output_clock_frequency5" value="100.0" />
   <parameter name="gui_output_clock_frequency6" value="100.0" />
@@ -192,7 +192,7 @@
   <parameter name="gui_phase_shift15" value="0" />
   <parameter name="gui_phase_shift16" value="0" />
   <parameter name="gui_phase_shift17" value="0" />
-  <parameter name="gui_phase_shift2" value="5174" />
+  <parameter name="gui_phase_shift2" value="4365" />
   <parameter name="gui_phase_shift3" value="0" />
   <parameter name="gui_phase_shift4" value="0" />
   <parameter name="gui_phase_shift5" value="0" />
@@ -222,7 +222,7 @@
   <parameter name="gui_pll_auto_reset" value="Off" />
   <parameter name="gui_pll_bandwidth_preset" value="Auto" />
   <parameter name="gui_pll_cascading_mode">Create an adjpllin signal to connect with an upstream PLL</parameter>
-  <parameter name="gui_pll_mode" value="Integer-N PLL" />
+  <parameter name="gui_pll_mode" value="Fractional-N PLL" />
   <parameter name="gui_ps_units0" value="ps" />
   <parameter name="gui_ps_units1" value="ps" />
   <parameter name="gui_ps_units10" value="ps" />

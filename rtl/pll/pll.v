@@ -1,17 +1,30 @@
 // Simulation/behavioral placeholder for the Quartus fPLL IP.
-// Real build: regenerate with the IP wizard (50 -> 96.648 / 48.324 MHz).
+// Real build: regenerate with the IP wizard (50 -> 114.545454 / 57.272727 MHz).
+//
+// clk_sys is exactly 8x the board pixel clock (42.954545 MHz / 6 * 8 =
+// 630/11 MHz). EIGHT, not just any integer: Direct Video reports the clk_vid
+// cycles per CE_PIXEL to the sink (Main's DV1 SPD infoframe, measured by
+// hps_io video_calc), so the pitch must be a constant whole number on the
+// native raster AND on the line doubler's 2x raster -- an even multiple.
+// 8x also keeps clk_sys above the board's fastest crystal (48 MHz).
+//
+// The PLL runs in FRACTIONAL-N mode: VCO 1145.4545 MHz (N=1, M=22.90909),
+// C=10 for clk_ram/SDRAM_CLK, C=20 for clk_sys, C=40 for the spare output.
+// Integer-N cannot reach it: the phase detector needs 50 MHz / N >= 5 MHz,
+// so N <= 10. Only the absolute rate depends on this; the 8:1 pixel ratio
+// comes from the divide-by-8 in ssv_video_timing.
 module pll (
     input  refclk_clk,
     input  reset_reset,
-    output outclk0_clk,   // 96.648 MHz
-    output outclk1_clk,   // 48.324 MHz
-    output outclk2_clk,   // 96.648 MHz, 180 deg (SDRAM_CLK)
+    output outclk0_clk,   // 114.545454 MHz
+    output outclk1_clk,   // 57.272727 MHz
+    output outclk2_clk,   // 114.545454 MHz, 180 deg -- unused: SDRAM_CLK is DDIO-forwarded
     output locked_export
 );
 `ifdef SIMULATION
 reg c0 = 0, c1 = 0;
-always #5.17 c0 = ~c0;
-always #10.34 c1 = ~c1;
+always #4.365 c0 = ~c0;
+always #8.730 c1 = ~c1;
 assign outclk0_clk = c0;
 assign outclk1_clk = c1;
 assign outclk2_clk = c0;
